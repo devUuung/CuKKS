@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ckks-torch"
+version = "0.1.0"
+description = "PyTorch-compatible encrypted deep learning inference using CKKS homomorphic encryption"
+authors = [{name = "CKKS-Torch Team"}]
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security :: Cryptography",
+]
+keywords = [
+    "homomorphic encryption",
+    "CKKS",
+    "deep learning",
+    "PyTorch",
+    "privacy",
+    "secure inference",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+backend = [
+    # The ckks_openfhe_backend needs to be installed separately
+    # from bindings/openfhe_backend
+]
+
+[project.urls]
+Homepage = "https://github.com/ckks-torch/ckks-torch"
+Documentation = "https://github.com/ckks-torch/ckks-torch#readme"
+Repository = "https://github.com/ckks-torch/ckks-torch"
+
+[project.scripts]
+ckks-torch-example = "ckks_torch.examples.encrypted_inference:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ckks_torch*"]
+
+[tool.setuptools.package-data]
+ckks_torch = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "UP"]
+ignore = ["E501"]  # Line too long (handled by black)
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["tests/", "examples/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+markers = [
+    "gpu: marks tests as requiring GPU (deselect with '-m \"not gpu\"')",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
