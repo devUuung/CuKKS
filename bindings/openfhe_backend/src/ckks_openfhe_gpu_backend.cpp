@@ -707,6 +707,9 @@ std::shared_ptr<GPUCiphertextHandle> bootstrap_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     auto result = ctx->context->EvalBootstrap(tensor->ciphertext);
     return make_cipher(ctx, result);
 }
