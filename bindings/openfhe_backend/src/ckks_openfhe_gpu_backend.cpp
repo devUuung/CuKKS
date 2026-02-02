@@ -671,11 +671,11 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
             if (d >= in_features) break;
             
             std::vector<double> diag(slots, 0.0);
-            for (std::size_t row = 0; row < out_features; ++row) {
-                std::size_t col = d;
-                if (col < in_features) {
-                    diag[row] = matrix[row][col];
-                }
+            for (std::size_t i = 0; i < slots; ++i) {
+                std::int64_t row_signed = static_cast<std::int64_t>(i) - static_cast<std::int64_t>(giant_step);
+                std::size_t row = static_cast<std::size_t>((row_signed % static_cast<std::int64_t>(out_features) + static_cast<std::int64_t>(out_features)) % static_cast<std::int64_t>(out_features));
+                std::size_t col = (i + j) % in_features;
+                diag[i] = matrix[row][col];
             }
             
             auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(ctx, diag));
@@ -688,6 +688,10 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         }
         
         if (!block) continue;
+        
+        if (k > 0) {
+            block = cc->EvalAtIndex(block, static_cast<int>(giant_step));
+        }
         
         if (!accumulator) {
             accumulator = block;
