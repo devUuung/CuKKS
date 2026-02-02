@@ -20,6 +20,14 @@
   - [활성화 함수](#활성화-함수)
   - [EncryptedSequential](#encryptedsequential)
   - [기타 레이어](#기타-레이어)
+    - [EncryptedFlatten](#encryptedflatten)
+    - [EncryptedAvgPool2d](#encryptedavgpool2d)
+    - [EncryptedMaxPool2d](#encryptedmaxpool2d)
+    - [EncryptedBatchNorm1d / EncryptedBatchNorm2d](#encryptedbatchnorm1d--encryptedbatchnorm2d)
+    - [EncryptedLayerNorm](#encryptedlayernorm)
+    - [EncryptedDropout](#encrypteddropout)
+    - [EncryptedResidualBlock](#encryptedresidualblock)
+    - [EncryptedApproxAttention](#encryptedapproxattention)
 - [유틸리티](#유틸리티)
   - [SlotPacker](#slotpacker)
 
@@ -556,12 +564,31 @@ from ckks_torch.nn import EncryptedConv2d
 
 ```python
 EncryptedConv2d(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: Union[int, Tuple[int, int]],
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    stride: Tuple[int, int] = (1, 1),
-    padding: Tuple[int, int] = (0, 0),
+    stride: Union[int, Tuple[int, int]] = 1,
+    padding: Union[int, Tuple[int, int]] = 0,
+    groups: int = 1,
+    dilation: Union[int, Tuple[int, int]] = 1,
 )
 ```
+
+**파라미터:**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|------|------|---------|-------------|
+| `in_channels` | `int` | 필수 | 입력 채널 수 |
+| `out_channels` | `int` | 필수 | 출력 채널 수 |
+| `kernel_size` | `int` 또는 `Tuple[int, int]` | 필수 | 합성곱 커널 크기 |
+| `weight` | `torch.Tensor` | 필수 | 합성곱 커널 가중치 |
+| `bias` | `torch.Tensor` | `None` | 선택적 편향 벡터 |
+| `stride` | `int` 또는 `Tuple[int, int]` | `1` | 합성곱 보폭 |
+| `padding` | `int` 또는 `Tuple[int, int]` | `0` | 입력에 추가되는 패딩 |
+| `groups` | `int` | `1` | 입력에서 출력 채널로의 블록 연결 수 |
+| `dilation` | `int` 또는 `Tuple[int, int]` | `1` | 커널 요소 간 간격 |
 
 #### 클래스 메서드
 
@@ -690,8 +717,22 @@ flatten = EncryptedFlatten(start_dim: int = 1, end_dim: int = -1)
 ```python
 from ckks_torch.nn import EncryptedAvgPool2d
 
+pool = EncryptedAvgPool2d(
+    kernel_size: Union[int, Tuple[int, int]],
+    stride: Optional[Union[int, Tuple[int, int]]] = None,
+    padding: Union[int, Tuple[int, int]] = 0
+)
+
+# PyTorch 레이어에서 생성
 pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 ```
+
+**파라미터:**
+- `kernel_size`: 풀링 윈도우 크기.
+- `stride`: 풀링 보폭 (기본값: kernel_size와 동일).
+- `padding`: 추가할 패딩 (기본값: 0).
+
+**참고:** 4D 입력은 더 이상 지원되지 않으며, CNN 입력을 전처리하려면 `encrypt_cnn_input()`을 사용하세요. 2x2 풀링의 경우 회전 기반 최적화가 자동으로 적용되어 더 나은 성능을 제공합니다.
 
 #### EncryptedMaxPool2d
 
@@ -700,8 +741,27 @@ pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 ```python
 from ckks_torch.nn import EncryptedMaxPool2d
 
+pool = EncryptedMaxPool2d(
+    kernel_size: Union[int, Tuple[int, int]],
+    stride: Optional[Union[int, Tuple[int, int]]] = None,
+    padding: Union[int, Tuple[int, int]] = 0,
+    degree: int = 4,
+)
+
+# PyTorch 레이어에서 생성
 pool = EncryptedMaxPool2d.from_torch(max_pool: torch.nn.MaxPool2d)
 ```
+
+**파라미터:**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|------|------|---------|-------------|
+| `kernel_size` | `int` 또는 `Tuple[int, int]` | 필수 | 풀링 윈도우 크기 |
+| `stride` | `int` 또는 `Tuple[int, int]` | `None` | 풀링 보폭. 기본값은 `kernel_size`. |
+| `padding` | `int` 또는 `Tuple[int, int]` | `0` | 추가할 패딩 |
+| `degree` | `int` | `4` | |x| 근사를 위한 다항식 차수. 높을수록 정확하지만 회로 깊이 증가. |
+
+**참고:** 최대 풀링은 `max(a, b) ≈ (a + b + |a - b|) / 2`를 사용하여 근사됩니다. |x|는 다항식 피팅으로 근사합니다. 4D 입력은 더 이상 지원되지 않으며, CNN 입력을 전처리하려면 `encrypt_cnn_input()`을 사용하세요. 정확도는 입력 정규화에 따라 달라지며, [-1, 1] 범위의 값에서 최적입니다.
 
 #### EncryptedBatchNorm1d / EncryptedBatchNorm2d
 
@@ -712,6 +772,56 @@ from ckks_torch.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
 
 bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 ```
+
+#### EncryptedLayerNorm
+
+순수 HE 다항식 근사를 사용한 암호화 레이어 정규화입니다.
+
+```python
+from ckks_torch.nn import EncryptedLayerNorm
+
+ln = EncryptedLayerNorm(
+    normalized_shape: Union[int, List[int], Tuple[int, ...]],
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+)
+
+# PyTorch 레이어에서 생성
+ln = EncryptedLayerNorm.from_torch(layer_norm: torch.nn.LayerNorm)
+```
+
+**파라미터:**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|------|------|---------|-------------|
+| `normalized_shape` | `int` 또는 `List[int]` | 필수 | 정규화를 위한 입력 형상 |
+| `weight` | `torch.Tensor` | `None` | 학습 가능한 스케일 파라미터 (감마) |
+| `bias` | `torch.Tensor` | `None` | 학습 가능한 시프트 파라미터 (베타) |
+| `eps` | `float` | `1e-5` | 수치 안정성 상수 |
+
+**참고:** LayerNorm은 평균/분산 계산을 위해 sum_and_broadcast를 사용하고 1/sqrt(var+eps)를 위해 체비쇼프 15차 다항식을 사용하는 순수 HE 다항식 근사를 사용합니다. 곱셈 깊이: ~18 (역제곱근 다항식 평가 포함).
+
+#### EncryptedDropout
+
+암호화 추론을 위한 드롭아웃 레이어입니다. 추론 시에는 no-op (입력을 변경 없이 반환)으로 동작합니다.
+
+```python
+from ckks_torch.nn import EncryptedDropout
+
+dropout = EncryptedDropout(p: float = 0.5)
+
+# PyTorch 레이어에서 생성
+dropout = EncryptedDropout.from_torch(dropout_layer: torch.nn.Dropout)
+```
+
+**파라미터:**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|------|------|---------|-------------|
+| `p` | `float` | `0.5` | 드롭아웃 확률. 호환성을 위해 저장되지만 추론 시 효과 없음. |
+
+**참고:** 추론 중에는 드롭아웃이 비활성화됩니다 (no-op). 이 모듈은 `convert()`에서 `nn.Dropout` 레이어를 올바르게 처리하기 위한 모델 변환 호환성을 위해 존재합니다.
 
 #### EncryptedResidualBlock
 
@@ -725,13 +835,39 @@ block = EncryptedResidualBlock(main_branch: EncryptedModule)
 
 #### EncryptedApproxAttention
 
-트랜스포머용 근사 어텐션 메커니즘입니다.
+순수 HE 암호문-암호문 연산을 사용하는 암호화된 트랜스포머 추론을 위한 근사 멀티헤드 어텐션입니다. exp(x)의 테일러 전개를 통한 다항식 근사로 소프트맥스를 구현합니다.
 
 ```python
 from ckks_torch.nn import EncryptedApproxAttention
 
-attention = EncryptedApproxAttention(...)
+attention = EncryptedApproxAttention(
+    embed_dim: int,
+    num_heads: int,
+    softmax_degree: int = 4,
+)
+
+# PyTorch 레이어에서 생성
+attention = EncryptedApproxAttention.from_torch(
+    attention: torch.nn.MultiheadAttention,
+    softmax_degree: int = 4,
+)
 ```
+
+**파라미터:**
+
+| 이름 | 타입 | 기본값 | 설명 |
+|------|------|---------|-------------|
+| `embed_dim` | `int` | 필수 | 총 임베딩 차원 |
+| `num_heads` | `int` | 필수 | 어텐션 헤드 수. `embed_dim`은 `num_heads`로 나누어떨어져야 합니다. |
+| `softmax_degree` | `int` | `4` | exp(x) 테일러 근사를 위한 다항식 차수. 높을수록 정확하지만 회로 깊이 증가. |
+
+**메서드:**
+
+- `forward(x)`: 셀프 어텐션 — `x`를 쿼리, 키, 밸류로 사용합니다. 순수 HE 모드에서는 seq_len=1만 지원합니다.
+- `forward_attention(query, key, value)`: 별도의 Q, K, V 입력을 사용한 전체 어텐션. 순수 HE 모드에서는 seq_len=1만 지원합니다.
+- `mult_depth()`: 추정 곱셈 깊이 반환 (프로젝션 + Q@K^T + 소프트맥스 다항식 + attn@V + 출력 프로젝션 포함).
+
+**참고:** 이것은 Q@K^T를 위해 암호문-암호문 곱셈을 사용하고 어텐션 집계를 위해 sum_and_broadcast를 사용하는 순수 HE 다항식 근사입니다. 정확도는 입력 범위와 다항식 차수에 따라 달라집니다. 어텐션 스코어가 작은 범위(예: [-2, 2])로 정규화되었을 때 최적의 결과를 얻습니다. `from_torch()`는 `nn.MultiheadAttention`에서 Q, K, V 및 출력 프로젝션 가중치를 추출합니다. 순수 HE 모드에서는 seq_len=1로 제한됩니다.
 
 ---
 

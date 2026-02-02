@@ -136,7 +136,9 @@ print(ckks_torch.get_backend_info())
 | PyTorch Layer | Encrypted Version | Notes |
 |--------------|-------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | Full support with BSGS optimization |
+| `nn.Linear` | `EncryptedTTLinear` | TT-decomposed for large layers (memory efficient) |
 | `nn.Conv2d` | `EncryptedConv2d` | Via im2col method |
+| `nn.Conv2d` | `EncryptedTTConv2d` | TT-decomposed for large kernels (memory efficient) |
 | `nn.ReLU` | `EncryptedReLU` | Polynomial approximation |
 | `nn.GELU` | `EncryptedGELU` | Polynomial approximation |
 | `nn.SiLU` | `EncryptedSiLU` | Polynomial approximation |
@@ -147,7 +149,9 @@ print(ckks_torch.get_backend_info())
 | `nn.Flatten` | `EncryptedFlatten` | Logical reshape |
 | `nn.BatchNorm1d/2d` | Folded | Merged into preceding layer |
 | `nn.Sequential` | `EncryptedSequential` | Full support |
-| `nn.Dropout` | Ignored | No-op during inference |
+| `nn.Dropout` | `EncryptedDropout` | No-op during inference |
+| `nn.LayerNorm` | `EncryptedLayerNorm` | Pure HE polynomial approximation |
+| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Polynomial softmax approximation (seq_len=1) |
 
 ## Activation Functions
 
@@ -274,10 +278,12 @@ ckks_torch/
 ├── nn/                  # Encrypted neural network layers
 │   ├── module.py        # Base class
 │   ├── linear.py        # EncryptedLinear
-│   ├── conv.py          # EncryptedConv2d
+│   ├── conv.py          # EncryptedConv2d (groups, dilation supported)
 │   ├── activations.py   # Polynomial activations
 │   ├── pooling.py       # EncryptedAvgPool2d, EncryptedMaxPool2d
 │   ├── batchnorm.py     # BatchNorm (for folding)
+│   ├── layernorm.py     # EncryptedLayerNorm
+│   ├── dropout.py       # EncryptedDropout
 │   ├── residual.py      # EncryptedResidualBlock
 │   └── attention.py     # EncryptedApproxAttention
 └── utils/
@@ -313,9 +319,12 @@ ctx = CKKSContext(config, enable_gpu=False)
 | Operation | Acceleration |
 |-----------|-------------|
 | Add/Sub | GPU |
-| Mul/Square | CPU (fallback) |
-| Rotate | CPU |
+| Mul/Square | GPU |
+| Rotate | GPU |
+| Rescale | GPU |
+| Bootstrap | GPU |
 | Encrypt/Decrypt | CPU |
+| BSGS MatMul | CPU (auto GPU reload) |
 
 ### Lazy Synchronization
 

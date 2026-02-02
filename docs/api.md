@@ -20,6 +20,14 @@ This document provides complete API documentation for CKKS-Torch.
   - [Activation Functions](#activation-functions)
   - [EncryptedSequential](#encryptedsequential)
   - [Other Layers](#other-layers)
+    - [EncryptedFlatten](#encryptedflatten)
+    - [EncryptedAvgPool2d](#encryptedavgpool2d)
+    - [EncryptedMaxPool2d](#encryptedmaxpool2d)
+    - [EncryptedBatchNorm1d / EncryptedBatchNorm2d](#encryptedbatchnorm1d--encryptedbatchnorm2d)
+    - [EncryptedLayerNorm](#encryptedlayernorm)
+    - [EncryptedDropout](#encrypteddropout)
+    - [EncryptedResidualBlock](#encryptedresidualblock)
+    - [EncryptedApproxAttention](#encryptedapproxattention)
 - [Utilities](#utilities)
   - [SlotPacker](#slotpacker)
 
@@ -47,6 +55,7 @@ CKKSInferenceContext(
     max_rotation_dim: Optional[int] = None,
     auto_bootstrap: bool = False,
     bootstrap_threshold: int = 2,
+    enable_gpu: bool = True,
 )
 ```
 
@@ -61,6 +70,7 @@ CKKSInferenceContext(
 | `max_rotation_dim` | `int` | `None` | Maximum dimension for rotation keys. |
 | `auto_bootstrap` | `bool` | `False` | Enable automatic bootstrapping when depth is exhausted. |
 | `bootstrap_threshold` | `int` | `2` | Depth at which to trigger auto-bootstrap. |
+| `enable_gpu` | `bool` | `True` | Enable GPU acceleration for HE operations. |
 
 #### Class Methods
 
@@ -396,7 +406,9 @@ enc_model, ctx = convert(
     fold_batchnorm: bool = True,
     activation_degree: int = 4,
     use_square_activation: bool = False,
-    optimize_cnn: bool = True,  # New: auto-apply CNN optimizations
+    optimize_cnn: bool = True,
+    tt: bool = False,
+    enable_gpu: bool = True,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]
 ```
 
@@ -410,6 +422,8 @@ enc_model, ctx = convert(
 | `activation_degree` | `int` | `4` | Polynomial degree for activation approximations |
 | `use_square_activation` | `bool` | `False` | Replace all activations with x² |
 | `optimize_cnn` | `bool` | `True` | Auto-detect CNN and apply optimizations (Flatten absorption, Pool rotation) |
+| `tt` | `bool` | `False` | Use Tensor Train decomposition for large Linear layers |
+| `enable_gpu` | `bool` | `True` | Enable GPU acceleration for HE operations |
 
 **Returns:** Tuple of (encrypted_model, context)
 
@@ -599,6 +613,194 @@ enc_fc = EncryptedLinear.from_torch_cnn(fc_layer, cnn_layout)
 
 ---
 
+### EncryptedTTLinear
+
+Encrypted linear layer using Tensor Train (TT) decomposition. Reduces parameter count and can improve inference speed for large layers.
+
+```python
+from ckks_torch.nn import EncryptedTTLinear
+```
+
+#### Class Methods
+
+```python
+# Create from PyTorch Linear layer using TT decomposition
+tt_layer = EncryptedTTLinear.from_torch(
+    linear: torch.nn.Linear,
+    max_rank: Optional[int] = None,
+    svd_threshold: float = 1e-6
+) -> Optional[EncryptedTTLinear]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `linear` | `torch.nn.Linear` | Required | PyTorch Linear layer to convert |
+| `max_rank` | `int` | `None` | Maximum TT-rank. Auto-determined if None. |
+| `svd_threshold` | `float` | `1e-6` | Threshold for SVD rank determination |
+
+**Returns:** `EncryptedTTLinear` or `None` if the layer is too small (< 1024 parameters).
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `in_features` | `int` | Input dimension (possibly padded) |
+| `out_features` | `int` | Output dimension (possibly padded) |
+| `tt_cores` | `List[torch.Tensor]` | List of TT-cores |
+| `tt_shapes` | `List[Tuple[int, int]]` | Factor pairs (n_k, m_k) for each mode |
+| `bias` | `torch.Tensor` | Bias vector (may be None) |
+
+#### Example
+
+```python
+import torch.nn as nn
+from ckks_torch.nn import EncryptedTTLinear
+
+# Large linear layer (784 -> 128)
+linear = nn.Linear(784, 128)
+
+# Convert to TT format
+tt_layer = EncryptedTTLinear.from_torch(linear, max_rank=64)
+
+if tt_layer is not None:
+    print(f"TT cores: {len(tt_layer.tt_cores)}")
+    print(f"Ranks: {[c.shape[2] for c in tt_layer.tt_cores[:-1]]}")
+```
+
+#### When to Use TT Decomposition
+
+| Layer Size | TT Benefit | Recommendation |
+|------------|------------|----------------|
+| < 1024 params | None | Use regular `EncryptedLinear` |
+| 1024 - 10K params | Moderate | Optional |
+| > 10K params | Significant | Recommended |
+
+---
+
+### EncryptedTTConv2d
+
+Encrypted 2D convolution layer using Tensor Train (TT) decomposition. Reduces parameter count and memory usage for large convolutional kernels while maintaining the same forward pass behavior as `EncryptedConv2d`.
+
+```python
+from ckks_torch.nn import EncryptedTTConv2d
+```
+
+#### Class Methods
+
+```python
+# Create from PyTorch Conv2d layer using TT decomposition
+tt_conv = EncryptedTTConv2d.from_torch(
+    conv: torch.nn.Conv2d,
+    max_rank: Optional[int] = None,
+    svd_threshold: float = 1e-6,
+    TT: bool = False
+) -> Optional[EncryptedTTConv2d]
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `conv` | `torch.nn.Conv2d` | Required | PyTorch Conv2d layer to convert |
+| `max_rank` | `int` | `None` | Maximum TT-rank. Auto-determined if None. |
+| `svd_threshold` | `float` | `1e-6` | Threshold for SVD rank determination |
+| `TT` | `bool` | `False` | Try all 6 input dimension orderings and select the one with lowest reconstruction error. Based on Gabor & Zdunek (2022). |
+
+**Returns:** `EncryptedTTConv2d` or `None` if the layer is too small (< 1024 parameters per group).
+
+**Note:** Permutation optimization is performed at conversion time and does not affect inference performance.
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `in_channels` | `int` | Number of input channels |
+| `out_channels` | `int` | Number of output channels (padded) |
+| `kernel_size` | `Tuple[int, int]` | Convolution kernel size |
+| `stride` | `Tuple[int, int]` | Convolution stride |
+| `padding` | `Tuple[int, int]` | Input padding |
+| `groups` | `int` | Number of groups for grouped convolution |
+| `dilation` | `Tuple[int, int]` | Dilation of the convolution |
+| `tt_cores_per_group` | `List[List[torch.Tensor]]` | TT-cores for each group |
+| `tt_shapes` | `List[Tuple[int, int]]` | Factor pairs (n_k, m_k) for each mode |
+| `bias` | `torch.Tensor` | Bias vector (may be None) |
+| `_kernel_permutation` | `Tuple[int, ...]` | Stored dimension ordering (None if optimization disabled) |
+| `_inverse_permutation` | `Tuple[int, ...]` | Inverse permutation for reconstruction |
+
+#### Example
+
+```python
+import torch.nn as nn
+from ckks_torch.nn import EncryptedTTConv2d
+
+# Conv2d layer with 16*32*3*3 = 4608 parameters
+conv = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+
+# Convert to TT format
+tt_conv = EncryptedTTConv2d.from_torch(conv, max_rank=32)
+
+if tt_conv is not None:
+    print(f"TT cores: {len(tt_conv.tt_cores)}")
+    print(f"Effective weight shape: {tt_conv._effective_weight.shape}")
+```
+
+#### When to Use TT Decomposition for Conv2d
+
+| Kernel Params | TT Benefit | Recommendation |
+|---------------|------------|----------------|
+| < 1024 | None | Use regular `EncryptedConv2d` |
+| 1024 - 10K | Moderate | Optional |
+| > 10K | Significant | Recommended |
+
+**Note:** Kernel parameters per group = `(out_channels/groups) * (in_channels/groups) * kernel_height * kernel_width`
+
+#### Grouped Convolution Support
+
+Grouped convolutions are supported. Each group is TT-decomposed independently:
+
+```python
+# Grouped convolution example
+conv = nn.Conv2d(16, 32, kernel_size=3, groups=2)
+tt_conv = EncryptedTTConv2d.from_torch(conv)
+
+# Each group has its own TT-cores
+print(f"Groups: {tt_conv.groups}")  # 2
+print(f"Cores per group: {len(tt_conv.tt_cores_per_group[0])}")
+```
+
+#### Dilation Support
+
+Dilated convolutions are fully supported:
+
+```python
+# Dilated convolution example
+conv = nn.Conv2d(16, 32, kernel_size=3, dilation=2)
+tt_conv = EncryptedTTConv2d.from_torch(conv)
+
+# Output size accounts for dilation
+out_h, out_w = tt_conv.get_output_size(28, 28)
+```
+
+#### Limitations
+
+- Input must be pre-processed via `ctx.encrypt_cnn_input()` for 2D CNN layouts
+- Per-group parameters must be >= 1024 for TT decomposition to apply
+
+#### References
+
+**Foundational TT Papers:**
+- Oseledets, I. V. (2011). "Tensor-Train Decomposition". SIAM J. Sci. Comput.
+- Novikov, A., et al. (2015). "Tensorizing Neural Networks". NeurIPS 2015.
+
+**CNN-Specific TT Papers:**
+- Garipov, T., et al. (2016). "Ultimate Tensorization: compressing convolutional and FC layers alike". arXiv.
+- Gabor, M. & Zdunek, R. (2022). "CNN Compression via TT on Permuted Weight Tensor with Automatic Rank Determination". ICCS 2022.
+- Wang, D., et al. (2020). "Compressing 3DCNNs based on tensor train decomposition". Neural Networks.
+
+---
+
 ### EncryptedConv2d
 
 Encrypted 2D convolution layer using im2col method.
@@ -611,12 +813,31 @@ from ckks_torch.nn import EncryptedConv2d
 
 ```python
 EncryptedConv2d(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: Union[int, Tuple[int, int]],
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
-    stride: Tuple[int, int] = (1, 1),
-    padding: Tuple[int, int] = (0, 0),
+    stride: Union[int, Tuple[int, int]] = 1,
+    padding: Union[int, Tuple[int, int]] = 0,
+    groups: int = 1,
+    dilation: Union[int, Tuple[int, int]] = 1,
 )
 ```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `in_channels` | `int` | Required | Number of input channels |
+| `out_channels` | `int` | Required | Number of output channels |
+| `kernel_size` | `int` or `Tuple[int, int]` | Required | Size of the convolution kernel |
+| `weight` | `torch.Tensor` | Required | Convolution kernel weights |
+| `bias` | `torch.Tensor` | `None` | Optional bias vector |
+| `stride` | `int` or `Tuple[int, int]` | `1` | Stride of the convolution |
+| `padding` | `int` or `Tuple[int, int]` | `0` | Padding added to input |
+| `groups` | `int` | `1` | Number of blocked connections from input to output channels |
+| `dilation` | `int` or `Tuple[int, int]` | `1` | Spacing between kernel elements |
 
 #### Class Methods
 
@@ -769,7 +990,7 @@ pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 - `stride`: Stride of the pooling (default: same as kernel_size).
 - `padding`: Padding to add (default: 0).
 
-**Note:** For 2x2 pooling, rotation-based optimization is automatically applied for better performance.
+**Note:** 4D input is no longer supported; use `encrypt_cnn_input()` to preprocess CNN inputs. For 2x2 pooling, rotation-based optimization is automatically applied for better performance.
 
 #### EncryptedMaxPool2d
 
@@ -778,8 +999,27 @@ Approximate max pooling using polynomial approximation.
 ```python
 from ckks_torch.nn import EncryptedMaxPool2d
 
+pool = EncryptedMaxPool2d(
+    kernel_size: Union[int, Tuple[int, int]],
+    stride: Optional[Union[int, Tuple[int, int]]] = None,
+    padding: Union[int, Tuple[int, int]] = 0,
+    degree: int = 4,
+)
+
+# Create from PyTorch layer
 pool = EncryptedMaxPool2d.from_torch(max_pool: torch.nn.MaxPool2d)
 ```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `kernel_size` | `int` or `Tuple[int, int]` | Required | Size of the pooling window |
+| `stride` | `int` or `Tuple[int, int]` | `None` | Stride of the pooling. Defaults to `kernel_size`. |
+| `padding` | `int` or `Tuple[int, int]` | `0` | Padding to add |
+| `degree` | `int` | `4` | Polynomial degree for |x| approximation. Higher = more accurate but deeper circuit. |
+
+**Note:** Max pooling is approximated using `max(a, b) ≈ (a + b + |a - b|) / 2`, where |x| is fitted via polynomial approximation. 4D input is no longer supported; use `encrypt_cnn_input()` to preprocess CNN inputs. The polynomial path is used for HE CNN layouts. Accuracy depends on input normalization; best for values in [-1, 1].
 
 #### EncryptedBatchNorm1d / EncryptedBatchNorm2d
 
@@ -790,6 +1030,56 @@ from ckks_torch.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
 
 bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 ```
+
+#### EncryptedLayerNorm
+
+Encrypted layer normalization using pure HE polynomial approximation.
+
+```python
+from ckks_torch.nn import EncryptedLayerNorm
+
+ln = EncryptedLayerNorm(
+    normalized_shape: Union[int, List[int], Tuple[int, ...]],
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+)
+
+# Create from PyTorch layer
+ln = EncryptedLayerNorm.from_torch(layer_norm: torch.nn.LayerNorm)
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `normalized_shape` | `int` or `List[int]` | Required | Input shape for normalization |
+| `weight` | `torch.Tensor` | `None` | Learnable scale parameter (gamma) |
+| `bias` | `torch.Tensor` | `None` | Learnable shift parameter (beta) |
+| `eps` | `float` | `1e-5` | Numerical stability constant |
+
+**Note:** LayerNorm uses pure HE polynomial approximation with sum_and_broadcast for mean/variance computation and Chebyshev degree-15 polynomial for 1/sqrt(var+eps). Multiplicative depth: ~18 (includes polynomial evaluation for inverse square root).
+
+#### EncryptedDropout
+
+Dropout layer for encrypted inference. Acts as a no-op (returns input unchanged) since dropout is only active during training.
+
+```python
+from ckks_torch.nn import EncryptedDropout
+
+dropout = EncryptedDropout(p: float = 0.5)
+
+# Create from PyTorch layer
+dropout = EncryptedDropout.from_torch(dropout_layer: torch.nn.Dropout)
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `p` | `float` | `0.5` | Dropout probability. Stored for compatibility but has no effect during inference. |
+
+**Note:** During inference, dropout is disabled (no-op). This module exists for model conversion compatibility so that `nn.Dropout` layers are properly handled by `convert()`.
 
 #### EncryptedResidualBlock
 
@@ -803,13 +1093,39 @@ block = EncryptedResidualBlock(main_branch: EncryptedModule)
 
 #### EncryptedApproxAttention
 
-Approximate attention mechanism for transformers.
+Approximate multi-head attention for encrypted transformer inference using pure HE cipher-cipher operations. Uses polynomial approximation for softmax via Taylor expansion of exp(x).
 
 ```python
 from ckks_torch.nn import EncryptedApproxAttention
 
-attention = EncryptedApproxAttention(...)
+attention = EncryptedApproxAttention(
+    embed_dim: int,
+    num_heads: int,
+    softmax_degree: int = 4,
+)
+
+# Create from PyTorch layer
+attention = EncryptedApproxAttention.from_torch(
+    attention: torch.nn.MultiheadAttention,
+    softmax_degree: int = 4,
+)
 ```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `embed_dim` | `int` | Required | Total embedding dimension |
+| `num_heads` | `int` | Required | Number of attention heads. `embed_dim` must be divisible by `num_heads`. |
+| `softmax_degree` | `int` | `4` | Polynomial degree for exp(x) Taylor approximation. Higher = more accurate but deeper circuit. |
+
+**Methods:**
+
+- `forward(x)`: Self-attention — uses `x` as query, key, and value. Supports seq_len=1 only in pure HE mode.
+- `forward_attention(query, key, value)`: Full attention with separate Q, K, V inputs. Supports seq_len=1 only in pure HE mode.
+- `mult_depth()`: Returns estimated multiplicative depth (includes projections + Q@K^T + softmax polynomial + attn@V + output projection).
+
+**Note:** This is an approximation using cipher-cipher multiplication for Q@K^T and sum_and_broadcast for attention aggregation. Accuracy depends on input range and polynomial degree. Best results when attention scores are normalized to a small range (e.g., [-2, 2]). `from_torch()` extracts Q, K, V, and output projection weights from `nn.MultiheadAttention`. Limited to seq_len=1 in pure HE mode.
 
 ---
 

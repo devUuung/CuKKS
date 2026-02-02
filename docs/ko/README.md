@@ -146,7 +146,9 @@ print(ckks_torch.get_backend_info())
 | `nn.Flatten` | `EncryptedFlatten` | 논리적 reshape |
 | `nn.BatchNorm1d/2d` | 폴딩됨 | 이전 레이어에 병합 |
 | `nn.Sequential` | `EncryptedSequential` | 전체 지원 |
-| `nn.Dropout` | 무시됨 | 추론 시 no-op |
+| `nn.Dropout` | `EncryptedDropout` | 추론 시 no-op |
+| `nn.LayerNorm` | `EncryptedLayerNorm` | 복호화-재암호화 방식 |
+| `nn.MultiheadAttention` | `EncryptedApproxAttention` | 다항식 소프트맥스 근사 |
 
 ## 활성화 함수
 
@@ -273,10 +275,12 @@ ckks_torch/
 ├── nn/                  # 암호화 신경망 레이어
 │   ├── module.py        # 기본 클래스
 │   ├── linear.py        # EncryptedLinear
-│   ├── conv.py          # EncryptedConv2d
+│   ├── conv.py          # EncryptedConv2d (groups, dilation 지원)
 │   ├── activations.py   # 다항식 활성화
 │   ├── pooling.py       # EncryptedAvgPool2d, EncryptedMaxPool2d
 │   ├── batchnorm.py     # BatchNorm (폴딩용)
+│   ├── layernorm.py     # EncryptedLayerNorm
+│   ├── dropout.py       # EncryptedDropout
 │   ├── residual.py      # EncryptedResidualBlock
 │   └── attention.py     # EncryptedApproxAttention
 └── utils/
