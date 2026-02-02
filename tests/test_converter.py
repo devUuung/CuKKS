@@ -16,7 +16,7 @@ from ckks_torch.nn import (
     EncryptedSquare,
     EncryptedReLU,
     EncryptedSequential,
-    EncryptedIdentity,
+    EncryptedDropout,
     EncryptedMaxPool2d,
 )
 
@@ -197,7 +197,7 @@ class TestDropoutConversion:
             assert issubclass(w[0].category, UserWarning)
             assert "Dropout layers are ignored during inference (no-op)" in str(w[0].message)
         
-        assert isinstance(enc_model, EncryptedIdentity)
+        assert isinstance(enc_model, EncryptedDropout)
     
     def test_model_with_dropout_converts(self):
         """Test that a model with Dropout layers converts successfully."""
@@ -221,7 +221,7 @@ class TestDropoutConversion:
         assert len(enc_model) == 4
         assert isinstance(enc_model[0], EncryptedLinear)
         assert isinstance(enc_model[1], EncryptedSquare)
-        assert isinstance(enc_model[2], EncryptedIdentity)
+        assert isinstance(enc_model[2], EncryptedDropout)
         assert isinstance(enc_model[3], EncryptedLinear)
 
 

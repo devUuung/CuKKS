@@ -237,20 +237,17 @@ class TestCNNInference:
         assert isinstance(enc_model[7], EncryptedLinear)
 
     def test_simple_cnn_encrypted_inference(self, simple_cnn, mock_enc_context):
-        """Test CNN encrypted inference with mock backend."""
+        """Test CNN encrypted inference raises RuntimeError for non-CNN-layout input."""
         enc_model, _ = convert(simple_cnn, use_square_activation=True)
 
-        # Create input: (1, 28, 28) image
+        # Create input: (1, 28, 28) image — not CNN layout
         torch.manual_seed(42)
         sample = torch.randn(1, 28, 28)
         enc_input = mock_enc_context.encrypt(sample)
 
-        # Run encrypted inference
-        enc_output = enc_model(enc_input)
-        output = mock_enc_context.decrypt(enc_output)
-
-        # Output should be 10 class scores
-        assert output.numel() >= 10
+        # Should raise RuntimeError because input lacks _cnn_layout
+        with pytest.raises(RuntimeError, match="encrypt_cnn_input"):
+            enc_model(enc_input)
 
 
 # =============================================================================
@@ -603,15 +600,11 @@ class TestTrueHECNN:
             {'kernel_size': (3, 3), 'stride': (1, 1), 'padding': (1, 1), 'out_channels': 4}
         ]
         
-        # CNN layout after pool: 4x4 spatial, 4 channels
-        cnn_layout = {'num_patches': 16, 'patch_features': 4}
-        
         # Create encrypted layers
         enc_conv = EncryptedConv2d.from_torch(small_cnn.conv)
         enc_square = EncryptedSquare()
         enc_pool = EncryptedAvgPool2d.from_torch(small_cnn.pool)
         enc_flatten = EncryptedFlatten._with_absorbed_permutation()
-        enc_fc = EncryptedLinear.from_torch_cnn(small_cnn.fc, cnn_layout)
         
         # === Encrypted inference ===
         if hasattr(mock_enc_context, 'encrypt_cnn_input'):
@@ -630,10 +623,15 @@ class TestTrueHECNN:
             }
             enc_input._shape = (64, 9)
         
-        # Run through encrypted layers
+        # Run through conv, square, pool to get actual CNN layout
         enc_x = enc_conv(enc_input)
         enc_x = enc_square(enc_x)
         enc_x = enc_pool(enc_x)
+        
+        # Build FC with the actual layout from pool output (may be sparse)
+        cnn_layout = enc_x._cnn_layout
+        enc_fc = EncryptedLinear.from_torch_cnn(small_cnn.fc, cnn_layout)
+        
         enc_x = enc_flatten(enc_x)
         enc_output = enc_fc(enc_x)
         
@@ -654,7 +652,7 @@ class TestTrueHECNN:
         
         # For mock backend, we expect near-perfect match
         # Real HE backend would have ~96%+ match
-        assert cos_sim > 0.90, f"Cosine similarity {cos_sim:.4f} < 0.90"
+        assert cos_sim.item() > 0.90, f"Cosine similarity {cos_sim.item():.4f} < 0.90"
 
     def test_convert_with_optimize_cnn(self, mock_enc_context):
         """Test that convert(optimize_cnn=True) correctly optimizes CNN models."""

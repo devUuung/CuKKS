@@ -164,6 +164,24 @@ class TestMockCKKSTensor:
         b = a.mul(2.0)
         
         assert b._level < initial_level
+    
+    def test_sum_and_broadcast(self, ctx):
+        """Test sum_and_broadcast replicates sum to all active positions."""
+        data = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        t = ctx.encrypt(data)
+        result = t.sum_and_broadcast(4)
+        
+        # All first 4 positions should have sum = 10.0
+        assert abs(result.data[0].item() - 10.0) < 1e-10
+        assert abs(result.data[1].item() - 10.0) < 1e-10
+        assert abs(result.data[2].item() - 10.0) < 1e-10
+        assert abs(result.data[3].item() - 10.0) < 1e-10
+        
+        # Shape should be preserved
+        assert result.shape == (4,)
+        
+        # Level should be preserved
+        assert result._level == t._level
 
 
 class TestMockWithEncryptedModules:

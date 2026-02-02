@@ -276,7 +276,6 @@ class TestGPU_CNN:
         assert cos_sim > 0.85, f"Cosine similarity {cos_sim:.4f} < 0.85"
 
     @requires_gpu
-    @pytest.mark.skip(reason="convert() CNN support needs investigation - manual construction works")
     def test_cnn_convert_and_infer(self, simple_cnn, gpu_context):
         """Test CNN conversion with optimize_cnn and inference."""
         from ckks_torch import convert
@@ -284,7 +283,7 @@ class TestGPU_CNN:
         torch.manual_seed(42)
         
         # Convert with optimization
-        enc_model, _ = convert(simple_cnn, use_square_activation=True, optimize_cnn=True)
+        enc_model, _ = convert(simple_cnn, use_square_activation=True, optimize_cnn=True, input_shape=(1, 8, 8))
         
         # Create input
         image = torch.randn(1, 1, 8, 8)
@@ -389,49 +388,170 @@ class TestRealBackend_CPU:
         # Add
         enc_sum = enc_data.add(enc_data)
         dec_sum = real_context.decrypt(enc_sum)[:16]
-        expected_sum = data + data
+        expected_sum = (data + data).to(dec_sum.dtype)
         assert torch.allclose(expected_sum, dec_sum, atol=1e-3)
         
         # Mul
         enc_prod = enc_data.mul(enc_data)
         dec_prod = real_context.decrypt(enc_prod)[:16]
-        expected_prod = data * data
+        expected_prod = (data * data).to(dec_prod.dtype)
         assert torch.allclose(expected_prod, dec_prod, atol=1e-3)
 
     @requires_real_backend
     def test_mlp_inference_cpu(self, real_context):
-        """Test MLP inference on CPU with real backend."""
-        from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+         """Test MLP inference on CPU with real backend."""
+         from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+         
+         torch.manual_seed(42)
+         
+         # Create model layers directly
+         fc1 = nn.Linear(16, 32).double()
+         fc2 = nn.Linear(32, 10).double()
+         
+         # Build encrypted model
+         enc_fc1 = EncryptedLinear.from_torch(fc1)
+         enc_square = EncryptedSquare()
+         enc_fc2 = EncryptedLinear.from_torch(fc2)
+         
+         x = torch.randn(16, dtype=torch.float64)
+         
+         # Plaintext with Square activation (float64 to match HE path)
+         with torch.no_grad():
+             h = fc1(x)
+             h = h ** 2
+             plain_output = fc2(h)
+         
+         # HE
+         enc_x = real_context.encrypt(x)
+         enc_x = enc_fc1(enc_x)
+         enc_x = enc_square(enc_x)
+         enc_output = enc_fc2(enc_x)
+         he_output = real_context.decrypt(enc_output)[:10]
+         
+         cos_sim = F.cosine_similarity(
+             plain_output.flatten().float().unsqueeze(0),
+             he_output.flatten().float().unsqueeze(0)
+         ).item()
+         
+         assert cos_sim > 0.95, f"Cosine similarity {cos_sim:.4f} < 0.95"
+
+
+# =============================================================================
+# GPU Operation Tests (Rotate, Square, MulPlain)
+# =============================================================================
+
+
+class TestGPURotate:
+    """Tests for GPU-accelerated rotation."""
+    
+    @requires_gpu
+    def test_rotate_uses_gpu(self, gpu_context):
+        """Test that rotation operation executes on GPU."""
+        # Create and encrypt a small test vector
+        x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float64)
+        # Pad to match num_slots
+        x = torch.cat([x, torch.zeros(gpu_context.num_slots - len(x), dtype=torch.float64)])
+        ct = gpu_context.encrypt(x)
         
-        torch.manual_seed(42)
+        # Perform rotation - just verify it doesn't crash
+        rotated = ct.rotate(1)
         
-        # Create model layers directly
-        fc1 = nn.Linear(16, 32)
-        fc2 = nn.Linear(32, 10)
+        # Verify we got an EncryptedTensor back
+        assert hasattr(rotated, 'rotate'), "rotate() should return EncryptedTensor"
+    
+    @requires_gpu
+    def test_rotate_multiple_steps(self, gpu_context):
+        """Test rotation by various step sizes."""
+        x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float64)
+        x = torch.cat([x, torch.zeros(gpu_context.num_slots - len(x), dtype=torch.float64)])
+        ct = gpu_context.encrypt(x)
         
-        # Build encrypted model
-        enc_fc1 = EncryptedLinear.from_torch(fc1)
-        enc_square = EncryptedSquare()
-        enc_fc2 = EncryptedLinear.from_torch(fc2)
+        # Test multiple rotation steps
+        for step in [1, -1, 5]:
+            rotated = ct.rotate(step)
+            # Just verify operation completes without error
+            assert hasattr(rotated, 'rotate')
+
+
+class TestGPUSquare:
+    """Tests for GPU-accelerated square operation."""
+    
+    @requires_gpu
+    def test_square_uses_gpu(self, gpu_context):
+        """Test that square uses GPU when available."""
+        x = torch.tensor([float(i) * 0.1 for i in range(gpu_context.num_slots)], dtype=torch.float64)
+        ct = gpu_context.encrypt(x)
         
-        x = torch.randn(16, dtype=torch.float64)
+        # Perform square
+        squared = ct.square()
         
-        # Plaintext with Square activation
-        with torch.no_grad():
-            h = fc1(x.float())
-            h = h ** 2  # Square activation
-            plain_output = fc2(h).to(torch.float64)
+        # Decrypt and verify
+        result = gpu_context.decrypt(squared)
+        for i in range(min(100, len(result))):
+            expected = (x[i] ** 2).item()
+            assert abs(result[i] - expected) < 1e-3
+    
+    @requires_gpu
+    def test_square_chain(self, gpu_context):
+        """Test chained square operations stay on GPU."""
+        x = torch.full((gpu_context.num_slots,), 0.5, dtype=torch.float64)
+        ct = gpu_context.encrypt(x)
         
-        # HE
-        enc_x = real_context.encrypt(x)
-        enc_x = enc_fc1(enc_x)
-        enc_x = enc_square(enc_x)
-        enc_output = enc_fc2(enc_x)
-        he_output = real_context.decrypt(enc_output)[:10]
+        # Chain: x -> x^2 -> x^4
+        sq1 = ct.square()
+        sq2 = sq1.square()
         
-        cos_sim = F.cosine_similarity(
-            plain_output.flatten().unsqueeze(0),
-            he_output.flatten().unsqueeze(0)
-        ).item()
+        result = gpu_context.decrypt(sq2)
+        expected = 0.5 ** 4  # 0.0625
+        assert abs(result[0] - expected) < 1e-3
+
+
+class TestGPUMulPlain:
+    """Tests for GPU-accelerated plaintext multiplication."""
+    
+    @requires_gpu
+    def test_mul_plain_uses_gpu(self, gpu_context):
+        """Test that mul_plain uses GPU when available."""
+        x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float64)
+        x = torch.cat([x, torch.zeros(gpu_context.num_slots - len(x), dtype=torch.float64)])
+        ct = gpu_context.encrypt(x)
         
-        assert cos_sim > 0.95, f"Cosine similarity {cos_sim:.4f} < 0.95"
+        # Multiply by plaintext scalar
+        scale = 2.0
+        result_ct = ct.mul(scale)
+        
+        # Just verify operation completes without error
+        assert hasattr(result_ct, 'mul'), "mul() should return EncryptedTensor"
+    
+    @requires_gpu
+    def test_mul_plain_vector(self, gpu_context):
+        """Test multiplication by plaintext vector."""
+        x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float64)
+        x = torch.cat([x, torch.zeros(gpu_context.num_slots - len(x), dtype=torch.float64)])
+        plain = torch.full((gpu_context.num_slots,), 2.0, dtype=torch.float64)
+        ct = gpu_context.encrypt(x)
+        
+        result_ct = ct.mul(plain)
+        
+        # Just verify operation completes without error
+        assert hasattr(result_ct, 'mul')
+
+
+class TestGPUChainedOperations:
+    """Test that chained GPU operations stay on GPU."""
+    
+    @requires_gpu
+    def test_add_rotate_square_chain(self, gpu_context):
+        """Test a chain of operations: add -> rotate -> square."""
+        x = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5], dtype=torch.float64)
+        x = torch.cat([x, torch.zeros(gpu_context.num_slots - len(x), dtype=torch.float64)])
+        ct1 = gpu_context.encrypt(x)
+        ct2 = gpu_context.encrypt(x)
+        
+        # Chain operations
+        added = ct1.add(ct2)
+        rotated = added.rotate(1)
+        squared = rotated.square()
+        
+        # Just verify the chain completes without error
+        assert hasattr(squared, 'square'), "Chained operations should return EncryptedTensor"

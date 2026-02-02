@@ -53,6 +53,7 @@ class MockCKKSContext:
         config: MockCKKSConfig | None = None,
         *,
         device: str | torch.device | None = None,
+        enable_gpu: bool = True,
     ):
         self.config = config or MockCKKSConfig()
         self.device = (
@@ -82,14 +83,15 @@ class MockCKKSContext:
         shape: Sequence[int] | None = None,
     ) -> torch.Tensor:
         """Unwrap a MockCKKSTensor back to a regular tensor."""
-        values = tensor.data[: tensor.size].clone()
+        final_shape = shape or tensor.shape
+        num_elements = int(math.prod(final_shape)) if final_shape else tensor.size
+        values = tensor.data[:num_elements].clone()
         target_device = (
             torch.device(device)
             if device is not None
             else tensor.device
         )
         result = values.to(device=target_device, dtype=torch.float32)
-        final_shape = shape or tensor.shape
         if final_shape:
             result = result.view(final_shape)
         return result
@@ -193,6 +195,25 @@ class MockCKKSTensor:
         result._level = self._level
         return result
 
+    def sum_and_broadcast(self, n: int) -> "MockCKKSTensor":
+        """Sum first n active slots and replicate the sum to all n positions.
+        
+        In real CKKS, rotation-and-add naturally fills all slots with the sum.
+        This mock replicates that behavior for testing.
+        
+        Args:
+            n: Number of active elements to sum and broadcast.
+            
+        Returns:
+            MockCKKSTensor with sum replicated in first n positions, same shape.
+        """
+        total = self.data[:n].sum()
+        new_data = self.data.clone()
+        new_data[:n] = total
+        result = MockCKKSTensor(self.context, new_data, self.shape, self.device, self._depth)
+        result._level = self._level
+        return result
+
     def conjugate(self) -> "MockCKKSTensor":
         """Complex conjugate (identity for real values)."""
         result = MockCKKSTensor(self.context, self.data.clone(), self.shape, self.device, self._depth)
@@ -231,6 +252,20 @@ class MockCKKSTensor:
         )
         result._level = max(0, self._level - 1)
         return result
+
+    def matmul_bsgs(
+        self,
+        matrix: Sequence[Sequence[float]] | torch.Tensor,
+        bsgs_n1: int = 0,
+        bsgs_n2: int = 0,
+    ) -> "MockCKKSTensor":
+        """BSGS matrix-vector multiplication (mock delegates to dense).
+
+        In the real backend, BSGS reduces rotation count from O(n) to O(sqrt(n)).
+        The mock doesn't need this optimization — it simply delegates to
+        ``matmul_dense`` while accepting the extra parameters silently.
+        """
+        return self.matmul_dense(matrix)
 
     def poly_eval(self, coeffs: Sequence[float]) -> "MockCKKSTensor":
         """Evaluate a polynomial on the encrypted data.

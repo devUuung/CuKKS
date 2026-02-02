@@ -169,14 +169,14 @@ class TestEncryptDecryptBatch:
 
 class TestContextBatchMethods:
 
-    def test_context_encrypt_batch(self):
+    def test_context_encrypt_batch(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         samples = [torch.tensor([1.0, 2.0, 3.0]), torch.tensor([4.0, 5.0, 6.0])]
@@ -185,14 +185,14 @@ class TestContextBatchMethods:
         
         assert enc_batch.shape == (2, 3)
 
-    def test_context_decrypt_batch(self):
+    def test_context_decrypt_batch(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         samples = [torch.tensor([1.0, 2.0, 3.0]), torch.tensor([4.0, 5.0, 6.0])]
@@ -204,14 +204,14 @@ class TestContextBatchMethods:
         torch.testing.assert_close(recovered[0], samples[0], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(recovered[1], samples[1], rtol=1e-4, atol=1e-4)
 
-    def test_context_batch_roundtrip_large(self):
+    def test_context_batch_roundtrip_large(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         
@@ -226,14 +226,14 @@ class TestContextBatchMethods:
         for orig, rec in zip(samples, recovered):
             torch.testing.assert_close(rec, orig, rtol=1e-4, atol=1e-4)
 
-    def test_context_batch_with_sample_shape(self):
+    def test_context_batch_with_sample_shape(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         
@@ -249,14 +249,14 @@ class TestContextBatchMethods:
 
 class TestBatchedInference:
 
-    def test_batched_linear_inference(self):
+    def test_batched_linear_inference(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         
@@ -276,14 +276,14 @@ class TestBatchedInference:
             expected = orig * scale_factor
             torch.testing.assert_close(res[:input_size], expected, rtol=1e-4, atol=1e-4)
 
-    def test_batched_add_inference(self):
+    def test_batched_add_inference(self, monkeypatch):
         from ckks_torch import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import ckks_torch.context as ctx_module
         
-        ctx_module.CKKSConfig = MockCKKSConfig
-        ctx_module.CKKSContext = MockCKKSContext
-        ctx_module._BACKEND_AVAILABLE = True
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
         
         ctx = CKKSInferenceContext(device="cpu")
         

@@ -9,6 +9,7 @@ import torch
 
 from ckks_torch.stats import (
     crypto_inv_sqrt,
+    crypto_reciprocal_shallow,
     encrypted_mean,
     encrypted_std,
     encrypted_variance,
@@ -189,28 +190,137 @@ class TestNormalization:
 
 
 class TestEncryptedTensorMethods:
-    def test_inv_sqrt_method(self, stats_context):
-        """4.5: Verify EncryptedTensor.inv_sqrt() method."""
+     def test_inv_sqrt_method(self, stats_context):
+         """4.5: Verify EncryptedTensor.inv_sqrt() method."""
+         x = torch.tensor([1.0, 4.0, 9.0])
+         enc = stats_context.encrypt(x)
+
+         result = enc.inv_sqrt()
+         decrypted = stats_context.decrypt(result)
+
+         expected = 1.0 / torch.sqrt(x)
+         mre = (torch.abs(decrypted - expected) / expected).max().item()
+
+         assert mre < 0.005, f"MRE {mre} >= 0.5% for narrow domain"
+
+     def test_sqrt_method(self, stats_context):
+         """4.6: Verify EncryptedTensor.sqrt() method."""
+         x = torch.tensor([1.0, 4.0, 9.0])
+         enc = stats_context.encrypt(x)
+
+         result = enc.sqrt()
+         decrypted = stats_context.decrypt(result)
+
+         expected = torch.sqrt(x)
+         mre = (torch.abs(decrypted - expected) / expected).max().item()
+
+         assert mre < 1e-2
+
+
+class TestInvSqrtShallow:
+    """Tests for inv_sqrt shallow mode (OpenFHE GPU compatible)."""
+
+    @pytest.fixture
+    def no_bootstrap_context(self):
+        """Context without bootstrap for shallow mode tests."""
+        from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
+
+        config = MockCKKSConfig(enable_bootstrap=False)
+        return MockCKKSContext(config)
+
+    def test_shallow_inv_sqrt_works_without_bootstrap(self, no_bootstrap_context):
+        """Shallow mode should work without bootstrap enabled."""
         x = torch.tensor([1.0, 4.0, 9.0])
-        enc = stats_context.encrypt(x)
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
 
-        result = enc.inv_sqrt()
-        decrypted = stats_context.decrypt(result)
+        # Should not raise RuntimeError
+        result = enc_tensor.inv_sqrt(shallow=True)
 
+        decrypted = no_bootstrap_context.decrypt(result._cipher)
         expected = 1.0 / torch.sqrt(x)
-        mre = (torch.abs(decrypted - expected) / expected).max().item()
 
-        assert mre < 0.005, f"MRE {mre} >= 0.5% for narrow domain"
+        # Just verify it returns something reasonable
+        assert decrypted.shape == expected.shape
 
-    def test_sqrt_method(self, stats_context):
-        """4.6: Verify EncryptedTensor.sqrt() method."""
-        x = torch.tensor([1.0, 4.0, 9.0])
-        enc = stats_context.encrypt(x)
+    def test_shallow_inv_sqrt_accuracy(self, no_bootstrap_context):
+        """Shallow mode accuracy should be MRE < 2% for narrow domain."""
+        x = torch.tensor([1.0, 2.0, 4.0, 5.0, 9.0])
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
 
-        result = enc.sqrt()
-        decrypted = stats_context.decrypt(result)
+        result = enc_tensor.inv_sqrt(shallow=True, domain=(1.0, 10.0))
+        decrypted = no_bootstrap_context.decrypt(result._cipher)
+        expected = 1.0 / torch.sqrt(x)
 
-        expected = torch.sqrt(x)
-        mre = (torch.abs(decrypted - expected) / expected).max().item()
+        relative_error = torch.abs(decrypted - expected) / expected
+        mre = relative_error.max().item()
 
-        assert mre < 1e-2
+        assert mre < 0.02, f"MRE {mre:.4f} >= 2%"
+
+    def test_shallow_inv_sqrt_narrow_domain(self, no_bootstrap_context):
+        """Shallow mode should have good accuracy for narrow domain."""
+        x = torch.tensor([1.5, 2.5, 4.0, 6.0, 8.0])
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
+
+        result = enc_tensor.inv_sqrt(shallow=True, domain=(1.0, 10.0))
+        decrypted = no_bootstrap_context.decrypt(result._cipher)
+        expected = 1.0 / torch.sqrt(x)
+
+        relative_error = torch.abs(decrypted - expected) / expected
+        mre = relative_error.max().item()
+
+        assert mre < 0.02, f"MRE {mre:.4f} >= 2% for narrow domain"
+
+
+class TestCryptoReciprocal:
+    """Tests for crypto_reciprocal (1/x approximation)."""
+
+    @pytest.fixture
+    def no_bootstrap_context(self):
+        """Context without bootstrap for reciprocal tests."""
+        from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
+
+        config = MockCKKSConfig(enable_bootstrap=False)
+        return MockCKKSContext(config)
+
+    def test_reciprocal_accuracy(self, no_bootstrap_context):
+        """Reciprocal accuracy should be MRE < 5% for domain (0.5, 10.0)."""
+        x = torch.tensor([1.0, 2.0, 4.0, 5.0, 10.0])
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
+
+        result = crypto_reciprocal_shallow(enc_tensor, domain=(0.5, 10.0))
+        decrypted = no_bootstrap_context.decrypt(result._cipher)
+        expected = 1.0 / x
+
+        rel_error = torch.abs(decrypted - expected) / expected
+        mre = rel_error.max().item()
+
+        assert mre < 0.05, f"MRE {mre:.4f} >= 5%"
+
+    def test_reciprocal_no_bootstrap_required(self, no_bootstrap_context):
+        """Shallow reciprocal should work without bootstrap."""
+        x = torch.tensor([2.0, 5.0])
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
+
+        # Should not raise
+        result = crypto_reciprocal_shallow(enc_tensor)
+        assert result is not None
+
+    def test_reciprocal_edge_values(self, no_bootstrap_context):
+        """Test reciprocal at boundary values in domain."""
+        x = torch.tensor([0.5, 1.0, 5.0, 10.0])
+        enc = no_bootstrap_context.encrypt(x)
+        enc_tensor = EncryptedTensor(enc, x.shape, no_bootstrap_context)
+
+        result = crypto_reciprocal_shallow(enc_tensor, domain=(0.5, 10.0))
+        decrypted = no_bootstrap_context.decrypt(result._cipher)
+        expected = 1.0 / x
+
+        rel_error = torch.abs(decrypted - expected) / expected
+        mre = rel_error.max().item()
+
+        assert mre < 0.05, f"MRE {mre:.4f} >= 5% for edge values"

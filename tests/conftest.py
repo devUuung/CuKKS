@@ -9,17 +9,17 @@ sys.path.insert(0, str(Path(__file__).parent))
 from mocks.mock_backend import MockCKKSConfig, MockCKKSContext, MockCKKSTensor
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def mock_config():
     return MockCKKSConfig()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def mock_context():
     return MockCKKSContext()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def mock_enc_context():
     from ckks_torch.tensor import EncryptedTensor
     
@@ -38,7 +38,7 @@ def mock_enc_context():
     return EncryptedMockContext()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def use_mock_backend(monkeypatch):
     from mocks import mock_backend
     
@@ -82,7 +82,7 @@ requires_gpu = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def real_context():
     """Real CKKS context on CPU."""
     if not _has_real_backend():
@@ -106,7 +106,7 @@ def real_context():
     return ctx
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def gpu_context():
     """Real CKKS context on GPU (CUDA)."""
     if not _has_real_backend():
