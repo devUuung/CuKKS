@@ -468,6 +468,18 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
     const std::vector<double>& plain
 ) {
     auto ctx = lhs->context;
+    
+    if (ctx->gpu_initialized) {
+        lhs->ensureGPU();
+        auto plaintext = make_plaintext(ctx, plain);
+        plaintext->Encode();
+        ckks::PtAccurate gpu_pt = LoadAccuratePlaintext(
+            plaintext, plaintext->GetElement<DCRTPoly>());
+        ckks::CtAccurate result = ctx->gpu_context->EvalMultPlainExt(
+            *lhs->gpu_ct, gpu_pt);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
+    }
+    
     auto plaintext = make_plaintext(ctx, plain);
     auto result = ctx->context->EvalMult(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
@@ -479,16 +491,16 @@ std::shared_ptr<GPUCiphertextHandle> square_cipher(
     auto ctx = cipher->context;
     
     if (ctx->gpu_initialized && ctx->gpu_evk) {
-        cipher->syncFromGPU();
-        auto cpu_result = ctx->context->EvalMultAndRelinearize(cipher->ciphertext, cipher->ciphertext);
-        cpu_result = ctx->context->Rescale(cpu_result);
-        auto result = make_cipher(ctx, cpu_result);
-        result->ensureGPU();
-        return result;
+        // GPU path: square + relin (no rescale) - matches mul_cipher behavior
+        // Python API calls .rescale() separately after square()
+        cipher->ensureGPU();
+        ckks::CtAccurate result = ctx->gpu_context->EvalSquareAndRelinNoRescale(
+            *cipher->gpu_ct, *ctx->gpu_evk);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), cipher->ciphertext);
     }
     
+    // CPU fallback: square + relin (no rescale) - matches GPU path
     auto result = ctx->context->EvalMultAndRelinearize(cipher->ciphertext, cipher->ciphertext);
-    result = ctx->context->Rescale(result);
     return make_cipher(ctx, result);
 }
 
@@ -513,15 +525,24 @@ std::shared_ptr<GPUCiphertextHandle> rotate_cipher(
     int index
 ) {
     auto ctx = tensor->context;
-    
-    if (ctx->gpu_initialized) {
-        tensor->syncFromGPU();
-        auto cpu_result = ctx->context->EvalAtIndex(tensor->ciphertext, index);
-        auto cipher = make_cipher(ctx, cpu_result);
-        cipher->ensureGPU();
-        return cipher;
+
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        auto it = ctx->gpu_rot_keys->find(index);
+        if (it != ctx->gpu_rot_keys->end()) {
+            // GPU path: use existing GPU rotation kernel
+            tensor->ensureGPU();
+            uint32_t auto_index = ctx->context->FindAutomorphismIndex(index);
+            ckks::CtAccurate result = ctx->gpu_context->EvalAtIndex(
+                *tensor->gpu_ct, it->second, auto_index);
+            return make_cipher_from_gpu_lazy(ctx, std::move(result), tensor->ciphertext);
+        }
+        // Key not found for this rotation index - fall through to CPU with warning
     }
-    
+
+    // CPU fallback (existing behavior)
+    if (tensor->gpu_loaded) {
+        tensor->syncFromGPU();
+    }
     auto result = ctx->context->EvalAtIndex(tensor->ciphertext, index);
     return make_cipher(ctx, result);
 }
@@ -621,6 +642,10 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         bsgs_n2 = (static_cast<std::uint32_t>(in_features) + bsgs_n1 - 1) / bsgs_n1;
     }
     
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
+    
     std::vector<Ciphertext<DCRTPoly>> baby_ciphers;
     baby_ciphers.reserve(bsgs_n1);
     
@@ -671,7 +696,11 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         }
     }
     
-    return make_cipher(ctx, accumulator);
+    auto result = make_cipher(ctx, accumulator);
+    if (ctx->gpu_initialized) {
+        result->ensureGPU();
+    }
+    return result;
 }
 
 std::shared_ptr<GPUCiphertextHandle> bootstrap_cipher(

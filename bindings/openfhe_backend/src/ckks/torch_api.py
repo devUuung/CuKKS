@@ -231,6 +231,14 @@ class CKKSTensor:
         new_cipher = self._backend.mul_plain(self._cipher, plain)
         return CKKSTensor(self.context, new_cipher, self.shape, self.device)
 
+    def square(self) -> "CKKSTensor":
+        """Square this ciphertext."""
+        if hasattr(self._backend, 'square'):
+            new_cipher = self._backend.square(self._cipher)
+        else:
+            new_cipher = self._backend.mul_cipher(self._cipher, self._cipher)
+        return CKKSTensor(self.context, new_cipher, self.shape, self.device)
+
     def conjugate(self) -> "CKKSTensor":
         new_cipher = self._backend.conjugate(self._cipher)
         return CKKSTensor(self.context, new_cipher, self.shape, self.device)
