@@ -24,7 +24,7 @@ pip install pybind11 scikit-build-core cmake ninja numpy torch
 
 ### 1. Build OpenFHE GPU First
 
-The backend requires a pre-built OpenFHE GPU library:
+The OpenFHE GPU source is vendored under `openfhe-gpu-public/` and must be built first:
 
 ```bash
 # From repository root

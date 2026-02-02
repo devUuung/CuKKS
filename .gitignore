@@ -42,7 +42,6 @@ htmlcov/
 
 # OpenFHE builds (large, should be built locally)
 openfhe-cpu/
-openfhe-gpu-public/
 
 # Debug files
 debug_*.py

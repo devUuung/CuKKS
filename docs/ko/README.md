@@ -99,7 +99,7 @@ pip install -e .
 
 ### 2단계: OpenFHE 백엔드 빌드 (암호화에 필요)
 
-CKKS 백엔드는 OpenFHE GPU 확장 빌드가 필요합니다:
+OpenFHE GPU 소스는 `openfhe-gpu-public/`에 포함되어 있으며, 로컬 빌드가 필요합니다:
 
 ```bash
 # GPU 지원과 함께 OpenFHE 빌드

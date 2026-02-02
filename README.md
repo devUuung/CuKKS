@@ -99,7 +99,7 @@ pip install -e .
 
 ### Step 2: Build OpenFHE Backend (Required for Encryption)
 
-The CKKS backend requires building the OpenFHE GPU extension:
+The OpenFHE GPU source is vendored under `openfhe-gpu-public/`. Build it locally:
 
 ```bash
 # Build OpenFHE with GPU support

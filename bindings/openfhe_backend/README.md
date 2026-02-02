@@ -1,6 +1,6 @@
 # CKKS + Torch GPU backend
 
-This package builds the `ckks_openfhe_backend` pybind11 extension against the local `openfhe-gpu-public` tree and exposes a small Torch-facing API in `ckks`.
+This package builds the `ckks_openfhe_backend` pybind11 extension against the vendored `openfhe-gpu-public` tree and exposes a small Torch-facing API in `ckks`.
 
 ## Building
 
