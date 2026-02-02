@@ -52,6 +52,8 @@ class EncryptedConv2d(EncryptedModule):
         bias: Optional[torch.Tensor] = None,
         stride: Union[int, Tuple[int, int]] = 1,
         padding: Union[int, Tuple[int, int]] = 0,
+        groups: int = 1,
+        dilation: Union[int, Tuple[int, int]] = 1,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -69,6 +71,12 @@ class EncryptedConv2d(EncryptedModule):
             padding = (padding, padding)
         self.padding = padding
         
+        if isinstance(dilation, int):
+            dilation = (dilation, dilation)
+        self.dilation = dilation
+        
+        self.groups = groups
+        
         # Store weight reshaped for matrix multiplication
         # Original: (out_channels, in_channels, kH, kW)
         # Reshaped: (out_channels, in_channels * kH * kW)
@@ -84,47 +92,37 @@ class EncryptedConv2d(EncryptedModule):
         self.output_shape: Optional[Tuple[int, ...]] = None
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
-        """Forward pass on encrypted input.
+        """Forward pass on encrypted input using pure HE operations.
         
-        For 4D/3D input (image format), automatically applies im2col unfold
-        and performs convolution via matrix multiplication.
-        
-        For 2D input (num_patches, patch_features), assumes pre-unfolded and
-        performs direct matmul.
+        Requires input pre-processed via ctx.encrypt_cnn_input() for CNN
+        inference. Direct 4D/3D image inputs are not supported in pure HE mode.
         
         Args:
             x: Encrypted input tensor.
-               - 4D: (batch, channels, height, width) - auto unfolds
-               - 3D: (channels, height, width) - auto unfolds
-               - 2D: (num_patches, patch_features) - direct matmul
+               - 2D with _cnn_layout: (num_patches, patch_features) - HE matmul
                - 1D: (flattened,) - single patch matmul
                
         Returns:
             Encrypted output after convolution.
+            
+        Raises:
+            RuntimeError: If input is 4D, 3D, or 2D without CNN layout.
         """
         input_ndim = len(x.shape)
         
         if input_ndim == 4:
-            # 4D input: (batch, channels, height, width)
-            batch, channels, height, width = x.shape
-            self.input_shape = (batch, channels, height, width)
-            out_h, out_w = self.get_output_size(height, width)
-            self.output_shape = (batch, self.out_channels, out_h, out_w)
-            
-            # Use conv2d method which handles im2col internally
-            return x.conv2d(self.weight_matrix, self.bias, self.kernel_size, 
-                           self.stride, self.padding, self.output_shape)
+            raise RuntimeError(
+                "EncryptedConv2d does not support 4D input in pure HE mode. "
+                "Pre-process input using ctx.encrypt_cnn_input() to create a "
+                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+            )
             
         elif input_ndim == 3:
-            # 3D input: (channels, height, width) - treat as batch=1
-            channels, height, width = x.shape
-            self.input_shape = (1, channels, height, width)
-            out_h, out_w = self.get_output_size(height, width)
-            self.output_shape = (1, self.out_channels, out_h, out_w)
-            
-            # Use conv2d method
-            return x.conv2d(self.weight_matrix, self.bias, self.kernel_size,
-                           self.stride, self.padding, self.output_shape)
+            raise RuntimeError(
+                "EncryptedConv2d does not support 3D input in pure HE mode. "
+                "Pre-process input using ctx.encrypt_cnn_input() to create a "
+                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+            )
             
         elif input_ndim == 2:
             # 2D input: (num_patches, patch_features) - pre-unfolded via encrypt_cnn_input
@@ -134,11 +132,11 @@ class EncryptedConv2d(EncryptedModule):
                 # Each row of patches needs to be multiplied by weight matrix
                 return self._forward_he_packed(x)
             else:
-                # Fallback: mock matmul_2d
-                num_patches, _ = x.shape
-                self.input_shape = x.shape
-                self.output_shape = (num_patches, self.out_channels)
-                return x.matmul_2d(self.weight_matrix, self.bias)
+                raise RuntimeError(
+                    "EncryptedConv2d requires CNN layout for 2D input. "
+                    "Pre-process input using ctx.encrypt_cnn_input() to set "
+                    "_cnn_layout metadata."
+                )
         
         elif input_ndim == 1:
             # 1D input: single flattened patch
@@ -172,9 +170,14 @@ class EncryptedConv2d(EncryptedModule):
         kH, kW = self.kernel_size
         sH, sW = self.stride
         pH, pW = self.padding
+        dH, dW = self.dilation
         
-        out_h = (input_height + 2 * pH - kH) // sH + 1
-        out_w = (input_width + 2 * pW - kW) // sW + 1
+        # Compute effective kernel size with dilation
+        effective_kH = dH * (kH - 1) + 1
+        effective_kW = dW * (kW - 1) + 1
+        
+        out_h = (input_height + 2 * pH - effective_kH) // sH + 1
+        out_w = (input_width + 2 * pW - effective_kW) // sW + 1
         
         return out_h, out_w
     
@@ -286,13 +289,9 @@ class EncryptedConv2d(EncryptedModule):
         Returns:
             EncryptedConv2d with copied weights.
         """
-        if conv.groups != 1:
-            raise NotImplementedError("Grouped convolutions not supported yet")
-        if conv.dilation != (1, 1):
-            raise NotImplementedError("Dilation not supported yet")
-        
         kernel_size = cast(Tuple[int, int], conv.kernel_size)
         stride = cast(Tuple[int, int], conv.stride)
+        dilation = cast(Tuple[int, int], conv.dilation)
         
         if isinstance(conv.padding, str):
             if conv.padding == 'same':
@@ -310,11 +309,18 @@ class EncryptedConv2d(EncryptedModule):
             bias=conv.bias.data if conv.bias is not None else None,
             stride=stride,
             padding=padding,
+            groups=conv.groups,
+            dilation=dilation,
         )
     
     def extra_repr(self) -> str:
-        return (
+        s = (
             f"{self.in_channels}, {self.out_channels}, "
             f"kernel_size={self.kernel_size}, stride={self.stride}, "
             f"padding={self.padding}, bias={self.bias is not None}"
         )
+        if self.groups != 1:
+            s += f", groups={self.groups}"
+        if self.dilation != (1, 1):
+            s += f", dilation={self.dilation}"
+        return s

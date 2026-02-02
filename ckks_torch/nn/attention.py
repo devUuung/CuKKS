@@ -3,12 +3,13 @@ EncryptedApproxAttention - Approximate attention using polynomial softmax.
 
 For CKKS encrypted inference, exact softmax is not possible.
 We approximate softmax using Taylor expansion of exp(x).
+All attention computations run in pure HE using cipher-cipher operations.
 """
 
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union, cast
 
 import torch
 
@@ -44,6 +45,11 @@ class EncryptedApproxAttention(EncryptedModule):
     Uses polynomial approximation for softmax since CKKS only supports
     polynomial operations. The softmax is approximated using Taylor
     expansion of exp(x).
+    
+    Supports both single-token (seq_len=1) and multi-token (seq_len>1) attention:
+    - seq_len=1: Uses Taylor polynomial softmax approximation
+    - seq_len>1: Uses Power-Softmax (p=2) with crypto_reciprocal for normalization
+      Maximum seq_len is 8 due to multiplicative depth constraints.
     
     Note:
         This is an approximation - accuracy depends on input range
@@ -106,6 +112,48 @@ class EncryptedApproxAttention(EncryptedModule):
         if weight is None:
             return x
         return x.matmul(weight, bias)
+
+    def _ct_dot(
+        self, a: "EncryptedTensor", b: "EncryptedTensor", dim: int
+    ) -> "EncryptedTensor":
+        """Compute cipher-cipher dot product: sum(a * b)."""
+        product = a.mul(b).rescale()
+        return product.sum_and_broadcast(dim)
+
+    def _power_softmax(
+        self,
+        scores: List["EncryptedTensor"],
+        shift: float = 2.0,
+        eps: float = 0.01,
+    ) -> List["EncryptedTensor"]:
+        """Compute Power-Softmax (p=2) for attention weights.
+
+        t_j = s_j + shift
+        u_j = t_j^2
+        Z = sum(u_j)
+        w_j = u_j / Z
+        """
+        from ckks_torch.stats.crypto_reciprocal import crypto_reciprocal_shallow
+
+        shifted = [s.add(shift) for s in scores]
+        squared = [t.mul(t).rescale() for t in shifted]
+
+        z_sum = squared[0]
+        for u in squared[1:]:
+            z_sum = z_sum.add(u)
+
+        z_sum_safe = z_sum.add(eps)
+        inv_z_sum = crypto_reciprocal_shallow(z_sum_safe, domain=(0.5, 150.0))
+
+        weights = [u.mul(inv_z_sum).rescale() for u in squared]
+
+        weight_sum = weights[0]
+        for weight in weights[1:]:
+            weight_sum = weight_sum.add(weight)
+
+        inv_weight_sum = crypto_reciprocal_shallow(weight_sum, domain=(0.5, 10.0))
+        weights = [weight.mul(inv_weight_sum).rescale() for weight in weights]
+        return weights
     
     def _approx_exp(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Approximate exp(x) using Taylor series.
@@ -157,69 +205,112 @@ class EncryptedApproxAttention(EncryptedModule):
         return exp_scores.mul(norm_factor)
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
-        raise NotImplementedError(
-            "Use attention(query, key, value) instead of attention(x). "
-            "See forward_attention() for the actual implementation."
-        )
+        """Self-attention forward pass.
+        
+        For self-attention, uses x as query, key, and value.
+        Raises NotImplementedError when seq_len > 1.
+        """
+        return cast("EncryptedTensor", self.forward_attention(x, x, x))
     
+    def _forward_attention_multi(
+        self,
+        query: List["EncryptedTensor"],
+        key: List["EncryptedTensor"],
+        value: List["EncryptedTensor"],
+    ) -> List["EncryptedTensor"]:
+        seq_len = len(query)
+        
+        if seq_len > 8:
+            raise NotImplementedError(
+                f"seq_len={seq_len} not supported. Maximum is 8 for Power-Softmax attention."
+            )
+        
+        if seq_len != len(key) or seq_len != len(value):
+            raise ValueError("query, key, value must have same length.")
+        
+        q_list = [self._apply_projection(q, self.q_weight, self.q_bias) for q in query]
+        k_list = [self._apply_projection(k, self.k_weight, self.k_bias) for k in key]
+        v_list = [self._apply_projection(v, self.v_weight, self.v_bias) for v in value]
+        
+        outputs = []
+        for i in range(seq_len):
+            scores = []
+            for j in range(seq_len):
+                s_ij = self._ct_dot(q_list[i], k_list[j], self.embed_dim)
+                s_ij = s_ij.mul(self.scale).rescale()
+                scores.append(s_ij)
+            
+            weights = self._power_softmax(scores)
+            
+            y_i = weights[0].mul(v_list[0]).rescale()
+            for j in range(1, seq_len):
+                y_i = y_i.add(weights[j].mul(v_list[j]).rescale())
+            
+            y_i = self._apply_projection(y_i, self.out_weight, self.out_bias)
+            outputs.append(y_i)
+        
+        return outputs
+
     def forward_attention(
         self,
-        query: "EncryptedTensor",
-        key: "EncryptedTensor",
-        value: "EncryptedTensor",
-    ) -> "EncryptedTensor":
-        """Forward pass of approximate attention.
+        query: Union["EncryptedTensor", List["EncryptedTensor"]],
+        key: Union["EncryptedTensor", List["EncryptedTensor"]],
+        value: Union["EncryptedTensor", List["EncryptedTensor"]],
+    ) -> Union["EncryptedTensor", List["EncryptedTensor"]]:
+        """Forward pass of approximate attention using pure HE operations.
         
-        Computes: Attention(Q, K, V) = approx_softmax(Q @ K^T / sqrt(d_k)) @ V
+        Computes single-token attention using cipher-cipher multiplications
+        and sum_and_broadcast for dot products. No decryption occurs.
+        
+        Currently supports seq_len=1 only. For seq_len>1, encrypted
+        matrix multiplication would require more complex rotation-based
+        algorithms.
         
         Args:
-            query: Query tensor, shape (seq_len, embed_dim) or (embed_dim,).
+            query: Query tensor, shape (embed_dim,) for seq_len=1.
             key: Key tensor, same shape as query.
             value: Value tensor, same shape as query.
             
         Returns:
             Attention output with same shape as input.
+            
+        Raises:
+            NotImplementedError: If seq_len > 1 (input is 2D with first dim > 1).
         """
+        if isinstance(query, list):
+            if not isinstance(key, list) or not isinstance(value, list):
+                raise ValueError("query, key, value must have same length.")
+            return self._forward_attention_multi(query, key, value)
+        if isinstance(key, list) or isinstance(value, list):
+            raise ValueError("query, key, value must have same length.")
+        
+        # Guard: only seq_len=1 supported
+        if len(query.shape) > 1 and query.shape[0] > 1:
+            raise NotImplementedError(
+                "EncryptedApproxAttention only supports seq_len=1 in pure HE mode. "
+                f"Got query shape {query.shape} with seq_len={query.shape[0]}."
+            )
+        
         # Apply input projections if weights are set
         q = self._apply_projection(query, self.q_weight, self.q_bias)
         k = self._apply_projection(key, self.k_weight, self.k_bias)
         v = self._apply_projection(value, self.v_weight, self.v_bias)
         
-        # Infer sequence length from shape (used for normalization later)
-        _ = 1 if len(query.shape) == 1 else query.shape[0]
-        
-        # For single-head simplified attention:
-        # scores = Q @ K^T * scale
-        # We need K transposed - for encrypted, we precompute K^T as plaintext
-        # or use the encrypted tensor's matmul with transposed weight
-        
-        # Decrypt K temporarily for matmul (in real impl, this would be encrypted matmul)
-        # For now, we simulate attention computation
-        k_plain = k._context.decrypt(k)
-        k_t = k_plain.T.to(dtype=torch.float64)
-        
-        # Q @ K^T
-        scores = q.matmul(k_t)
-        
-        # Scale by 1/sqrt(d_k)
-        scores = scores.mul(self.scale)
+        # Q · K (element-wise cipher×cipher, then sum) = dot product
+        # For seq_len=1: Q and K are both shape (embed_dim,)
+        # Q @ K^T for 1D = sum(Q * K) which is a scalar score
+        qk = q.mul(k).rescale()
+        scores = qk.sum_and_broadcast(self.embed_dim).mul(self.scale)
         
         # Apply approximate softmax
-        # Get effective seq_len for normalization
-        if len(k_plain.shape) == 1:
-            effective_seq_len = 1
-        else:
-            effective_seq_len = k_plain.shape[0]
+        # For seq_len=1, softmax of a single score = 1.0, but we still apply
+        # the polynomial approximation for consistency
+        attn_weights = self._approx_softmax_row(scores, max(1, 1))
         
-        attn_weights = self._approx_softmax_row(scores, max(effective_seq_len, 1))
-        
-        # Apply attention weights to values
-        v_plain = v._context.decrypt(v)
-        v_plain = v_plain.to(dtype=torch.float64)
-        if v_plain.ndim == 1:
-            v_plain = v_plain.unsqueeze(0)
-        
-        output = attn_weights.matmul(v_plain)
+        # attn_weights · V (element-wise cipher×cipher)
+        # For seq_len=1: attn_weight is effectively a scalar broadcast to embed_dim slots
+        # Multiplying with V gives the weighted value
+        output = attn_weights.mul(v).rescale()
         
         # Apply output projection if set
         output = self._apply_projection(output, self.out_weight, self.out_bias)
@@ -229,12 +320,21 @@ class EncryptedApproxAttention(EncryptedModule):
     def mult_depth(self) -> int:
         """Estimate multiplicative depth of attention.
         
-        Includes:
-        - Q/K/V projections: 1 each (if used)
-        - Q @ K^T: 1
-        - Softmax polynomial: degree
-        - attn @ V: 1
+        For seq_len=1 (Taylor softmax):
+        - Q/K/V projections: 3 (if used)
+        - Q * K (cipher×cipher): 1
+        - Softmax polynomial: softmax_degree
+        - attn * V (cipher×cipher): 1
         - Output projection: 1 (if used)
+        
+        For seq_len>1 (Power-Softmax):
+        - Q/K/V projections: 3 (if used)
+        - Q * K dot products: 1 per pair
+        - Power-Softmax: square(1) + reciprocal(~4) + weight_mul(1) ≈ 6
+        - Weighted V sum: 1
+        - Output projection: 1 (if used)
+        
+        Returns depth for Power-Softmax case (~8-12 for typical configs).
         """
         depth = 0
         
@@ -242,13 +342,14 @@ class EncryptedApproxAttention(EncryptedModule):
         if self.q_weight is not None:
             depth += 3  # Q, K, V projections
         
-        # Q @ K^T
+        # Q * K cipher×cipher
         depth += 1
         
-        # Polynomial softmax approximation
-        depth += self.softmax_degree
+        # Power-Softmax: square + reciprocal + weight multiplication
+        # square: 1, reciprocal: ~4, weight_mul: 1
+        depth += 6
         
-        # Attention @ V
+        # Weighted V sum
         depth += 1
         
         # Output projection

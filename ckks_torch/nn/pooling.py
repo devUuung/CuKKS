@@ -1,8 +1,8 @@
 """
-Encrypted pooling layers.
+Encrypted pooling layers using pure HE operations.
 
-EncryptedAvgPool2d - Encrypted average pooling layer.
-EncryptedMaxPool2d - Encrypted max pooling using polynomial approximation.
+EncryptedAvgPool2d - Average pooling via HE rotations and masking.
+EncryptedMaxPool2d - Max pooling via polynomial approximation of |x|.
 """
 
 from __future__ import annotations
@@ -92,11 +92,14 @@ def _smooth_abs_coeffs(degree: int = 4) -> List[float]:
 
 
 class EncryptedAvgPool2d(EncryptedModule):
-    """Encrypted 2D average pooling.
+    """Encrypted 2D average pooling using pure HE operations.
     
     Average pooling can be implemented in CKKS as:
     1. Sum the elements in each pooling window
     2. Multiply by 1/kernel_area
+    
+    For 2D input with CNN layout, uses rotation-based optimization for 2x2 pooling
+    or sparse matrix multiplication for other kernel sizes.
     
     Args:
         kernel_size: Size of the pooling window.
@@ -104,11 +107,8 @@ class EncryptedAvgPool2d(EncryptedModule):
         padding: Padding to add. Default: 0.
         
     Note:
-        Like convolution, this expects pre-processed (windowed) input.
-        Each window should be sum-reduced before calling this layer.
-        
-        For 2x2 pooling, rotation-based optimization is automatically used
-        for better performance.
+        Requires pre-processed input via ctx.encrypt_cnn_input() for 2D CNN layout.
+        4D input is not supported in pure HE mode.
     """
     
     def __init__(
@@ -138,23 +138,29 @@ class EncryptedAvgPool2d(EncryptedModule):
         self.avg_factor = 1.0 / self.pool_area
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
-        """Apply average pooling.
+        """Apply average pooling using pure HE operations.
         
-        For 4D input, applies proper 2D average pooling via mock (decrypt/encrypt).
-        For 2D input with CNN layout, applies pooling via HE operations.
-        For other shapes, applies scalar multiplication by avg_factor.
+        For 2D input with CNN layout, applies pooling via HE rotations or matmul.
+        For pre-processed input without layout, applies scalar multiplication.
+        4D input is not supported in pure HE mode.
         
         Args:
             x: Encrypted input tensor.
                
         Returns:
             Averaged encrypted output.
+            
+        Raises:
+            RuntimeError: If input is 4D.
         """
         input_ndim = len(x.shape)
         
         if input_ndim == 4:
-            # 4D input: apply proper 2D average pooling
-            return x.avgpool2d(self.kernel_size, self.stride, self.padding)
+            raise RuntimeError(
+                "EncryptedAvgPool2d does not support 4D input in pure HE mode. "
+                "Pre-process input using ctx.encrypt_cnn_input() to create a "
+                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+            )
         elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             # 2D input with CNN layout: apply HE-based pooling
             # Use rotation-based optimization for 2x2 pooling (always faster)
@@ -405,12 +411,15 @@ class EncryptedAvgPool2d(EncryptedModule):
 
 
 class EncryptedMaxPool2d(EncryptedModule):
-    """Encrypted 2D max pooling using polynomial approximation.
+    """Encrypted 2D max pooling using polynomial approximation in pure HE mode.
     
     Since CKKS doesn't support comparison, max is approximated using:
         max(a, b) ≈ (a + b + |a - b|) / 2
     
     where |x| is approximated via polynomial fitting to sqrt(x^2 + eps).
+    
+    Requires 2D input with CNN layout metadata (_cnn_layout). 4D and 3D inputs
+    are not supported in pure HE mode.
     
     Warning:
         This is an APPROXIMATION. The output will differ from exact max pooling.
@@ -464,19 +473,70 @@ class EncryptedMaxPool2d(EncryptedModule):
         return result.mul(0.5).rescale()
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
-        """Apply approximate max pooling.
-        
-        For a 2x2 pooling window with elements [a, b, c, d], computes:
-            max(max(a, b), max(c, d))
-        using pairwise approximate max.
-        
-        Note:
-            Input should contain pre-extracted pooling windows (similar to im2col).
-            Each window's elements should be accessible for pairwise comparison.
-            
-        For simple cases, this just applies the approximation and returns.
-        """
-        return x
+        input_ndim = len(x.shape)
+
+        if input_ndim == 4:
+            raise RuntimeError(
+                "EncryptedMaxPool2d does not support 4D input in pure HE mode. "
+                "Pre-process input using ctx.encrypt_cnn_input() to create a "
+                "2D CNN layout with _cnn_layout metadata."
+            )
+        elif input_ndim == 3:
+            raise RuntimeError(
+                "EncryptedMaxPool2d does not support 3D input in pure HE mode. "
+                "Pre-process input using ctx.encrypt_cnn_input()."
+            )
+        elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
+            return self._forward_he_cnn(x)
+        else:
+            return x
+
+    def _forward_he_cnn(self, x: "EncryptedTensor") -> "EncryptedTensor":
+        layout = x._cnn_layout
+        num_patches = layout['num_patches']
+        channels = layout['patch_features']
+
+        hw = int(math.sqrt(num_patches))
+        H, W = hw, hw
+        kH, kW = self.kernel_size
+        sH, sW = self.stride
+
+        out_H = (H + 2 * self.padding[0] - kH) // sH + 1
+        out_W = (W + 2 * self.padding[1] - kW) // sW + 1
+        out_patches = out_H * out_W
+        total_in = num_patches * channels
+
+        offsets = []
+        for ky in range(kH):
+            for kx in range(kW):
+                if ky == 0 and kx == 0:
+                    continue
+                offsets.append((ky * W + kx) * channels)
+
+        result = x
+        for offset in offsets:
+            rotated = x.rotate(offset)
+            result = self._approx_max(result, rotated)
+
+        mask = torch.zeros(total_in, dtype=torch.float64)
+        for out_y in range(out_H):
+            for out_x in range(out_W):
+                in_y = out_y * sH
+                in_x = out_x * sW
+                idx = (in_y * W + in_x) * channels
+                for c in range(channels):
+                    mask[idx + c] = 1.0
+
+        result = result.mul(mask.tolist())
+        result = result.rescale()
+
+        result._cnn_layout = {
+            'num_patches': out_patches,
+            'patch_features': channels,
+            'original_shape': layout.get('original_shape'),
+        }
+        result._shape = (out_patches, channels)
+        return result
     
     def mult_depth(self) -> int:
         """Multiplicative depth depends on polynomial degree and pooling size.

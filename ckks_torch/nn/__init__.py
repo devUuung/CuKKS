@@ -25,6 +25,8 @@ Example:
 
 from .module import EncryptedModule, EncryptedIdentity
 from .linear import EncryptedLinear
+from .tt_linear import EncryptedTTLinear
+from .tt_conv import EncryptedTTConv2d
 from .activations import (
     EncryptedSquare,
     EncryptedReLU,
@@ -38,6 +40,8 @@ from .pooling import EncryptedAvgPool2d, EncryptedMaxPool2d
 from .flatten import EncryptedFlatten
 from .sequential import EncryptedSequential
 from .batchnorm import EncryptedBatchNorm1d, EncryptedBatchNorm2d
+from .layernorm import EncryptedLayerNorm
+from .dropout import EncryptedDropout
 from .residual import EncryptedResidualBlock
 from .attention import EncryptedApproxAttention
 
@@ -45,6 +49,8 @@ __all__ = [
     "EncryptedModule",
     "EncryptedIdentity",
     "EncryptedLinear",
+    "EncryptedTTLinear",
+    "EncryptedTTConv2d",
     "EncryptedSquare",
     "EncryptedReLU",
     "EncryptedGELU",
@@ -58,6 +64,8 @@ __all__ = [
     "EncryptedSequential",
     "EncryptedBatchNorm1d",
     "EncryptedBatchNorm2d",
+    "EncryptedLayerNorm",
+    "EncryptedDropout",
     "EncryptedResidualBlock",
     "EncryptedApproxAttention",
 ]
