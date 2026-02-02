@@ -16,8 +16,8 @@ import torch.nn as nn
 from .context import CKKSInferenceContext
 from .nn import (
     EncryptedModule,
-    EncryptedIdentity,
     EncryptedLinear,
+    EncryptedTTLinear,
     EncryptedConv2d,
     EncryptedAvgPool2d,
     EncryptedMaxPool2d,
@@ -31,6 +31,9 @@ from .nn import (
     EncryptedTanh,
     EncryptedBatchNorm1d,
     EncryptedBatchNorm2d,
+    EncryptedLayerNorm,
+    EncryptedDropout,
+    EncryptedApproxAttention,
 )
 from .nn.batchnorm import fold_batchnorm_into_linear, fold_batchnorm_into_conv
 
@@ -61,6 +64,7 @@ class ConversionOptions:
         activation_map: Mapping from PyTorch activations to encrypted versions.
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN-specific optimizations (Flatten absorption).
+        tt: If True, decompose Linear layers into TT format when possible.
     """
     
     def __init__(
@@ -70,12 +74,14 @@ class ConversionOptions:
         activation_map: Optional[Dict[Type[nn.Module], Type[EncryptedModule]]] = None,
         use_square_activation: bool = False,
         optimize_cnn: bool = True,
+        tt: bool = False,
     ):
         self.fold_batchnorm = fold_batchnorm
         self.activation_degree = activation_degree
         self.activation_map = activation_map or DEFAULT_ACTIVATION_MAP
         self.use_square_activation = use_square_activation
         self.optimize_cnn = optimize_cnn
+        self.tt = tt
 
 
 # =============================================================================
@@ -99,13 +105,15 @@ class ModelConverter:
         >>> enc_model = converter.convert(model)
     """
     
-    def __init__(self, options: Optional[ConversionOptions] = None):
+    def __init__(self, options: Optional[ConversionOptions] = None, input_shape: Optional[Tuple[int, ...]] = None):
         """Initialize the converter.
         
         Args:
             options: Conversion options. If None, uses defaults.
+            input_shape: Optional input shape tuple for layout computation.
         """
         self.options = options or ConversionOptions()
+        self.input_shape = input_shape
         
         # Layer converters: torch_type -> converter_function
         self._converters: Dict[Type[nn.Module], Callable] = {
@@ -117,7 +125,10 @@ class ModelConverter:
             nn.BatchNorm1d: self._convert_batchnorm1d,
             nn.BatchNorm2d: self._convert_batchnorm2d,
             nn.Dropout: self._convert_dropout,
+            nn.Dropout2d: self._convert_dropout,
             nn.MaxPool2d: self._convert_maxpool2d,
+            nn.LayerNorm: self._convert_layernorm,
+            nn.MultiheadAttention: self._convert_attention,
         }
         
         # Add activation converters
@@ -237,8 +248,13 @@ class ModelConverter:
                 raise
         return EncryptedSequential(converted)
     
-    def _convert_linear(self, module: nn.Linear) -> EncryptedLinear:
+    def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
         """Convert a Linear layer."""
+        if self.options.tt:
+            tt_layer = EncryptedTTLinear.from_torch(module)
+            if tt_layer is not None:
+                return tt_layer
+            # Fall back to regular Linear if TT returns None (layer too small)
         return EncryptedLinear.from_torch(module)
     
     def _convert_conv2d(self, module: nn.Conv2d) -> EncryptedConv2d:
@@ -335,19 +351,35 @@ class ModelConverter:
         if not hasattr(self, '_conv_params') or not self._conv_params:
             return None
         
-        # Assume 8x8 input for now (common for small CNN tests)
-        # In production, this should be passed as a parameter
         h, w = 8, 8
+        if self.input_shape is not None:
+            shape = tuple(self.input_shape)
+            if len(shape) >= 2:
+                h, w = int(shape[-2]), int(shape[-1])
         
         # Apply each conv and pool to track spatial dimensions
         channels = 1  # Start with 1 channel
         pool_idx = 0
         
         for conv in self._conv_params:
-            # Conv doesn't change spatial dims if padding='same' or padding=kernel//2
+            kernel_size = conv['kernel_size']
+            if isinstance(kernel_size, int):
+                kernel_size = (kernel_size, kernel_size)
+            stride = conv['stride']
+            if isinstance(stride, int):
+                stride = (stride, stride)
+            padding = conv['padding']
+            if isinstance(padding, int):
+                padding = (padding, padding)
+
+            kh, kw = kernel_size
+            sh, sw = stride
+            ph, pw = padding
+
+            h = (h + 2 * ph - kh) // sh + 1
+            w = (w + 2 * pw - kw) // sw + 1
             channels = conv['out_channels']
-            
-            # Check if there's a pool after this conv
+
             if hasattr(self, '_pool_params') and pool_idx < len(self._pool_params):
                 pool = self._pool_params[pool_idx]
                 sh, sw = pool['stride']
@@ -384,13 +416,20 @@ class ModelConverter:
         """Convert a BatchNorm2d layer."""
         return EncryptedBatchNorm2d.from_torch(module)
     
-    def _convert_dropout(self, module: nn.Dropout) -> EncryptedIdentity:
+    def _convert_dropout(self, module: nn.Module) -> EncryptedDropout:
         warnings.warn(
             "Dropout layers are ignored during inference (no-op)",
             UserWarning,
             stacklevel=3,
         )
-        return EncryptedIdentity()
+        p = getattr(module, 'p', 0.5)
+        return EncryptedDropout(p=p)
+    
+    def _convert_layernorm(self, module: nn.LayerNorm) -> EncryptedLayerNorm:
+        return EncryptedLayerNorm.from_torch(module)
+    
+    def _convert_attention(self, module: nn.MultiheadAttention) -> EncryptedApproxAttention:
+        return EncryptedApproxAttention.from_torch(module)
     
     def _convert_maxpool2d(self, module: nn.MaxPool2d) -> EncryptedMaxPool2d:
         """Convert a MaxPool2d layer."""
@@ -451,14 +490,60 @@ def _fold_bn_recursive(module: nn.Module) -> nn.Module:
 # Convenience Functions
 # =============================================================================
 
+def _build_cnn_config(
+    converter: ModelConverter,
+    input_shape: Optional[Tuple[int, ...]],
+) -> Optional[Dict[str, int]]:
+    """Build cnn_config dict from converter's collected CNN parameters.
+    
+    Args:
+        converter: The ModelConverter instance with CNN analysis.
+        input_shape: Optional input shape tuple (channels, height, width).
+        
+    Returns:
+        Dictionary with keys: image_height, image_width, channels, pool_size, pool_stride.
+        Returns None if CNN parameters are insufficient.
+    """
+    if not hasattr(converter, '_conv_params') or not converter._conv_params:
+        return None
+    
+    last_conv = converter._conv_params[-1]
+    channels = last_conv['out_channels']
+    
+    if input_shape is not None and len(input_shape) >= 2:
+        image_height = input_shape[-2]
+        image_width = input_shape[-1]
+    else:
+        image_height = 8
+        image_width = 8
+    
+    pool_size = 2
+    pool_stride = 2
+    if hasattr(converter, '_pool_params') and converter._pool_params:
+        last_pool = converter._pool_params[-1]
+        pool_size = last_pool['kernel_size'][0] if isinstance(last_pool['kernel_size'], tuple) else last_pool['kernel_size']
+        pool_stride = last_pool['stride'][0] if isinstance(last_pool['stride'], tuple) else last_pool['stride']
+    
+    return {
+        'image_height': image_height,
+        'image_width': image_width,
+        'channels': channels,
+        'pool_size': pool_size,
+        'pool_stride': pool_stride,
+    }
+
+
 def convert(
     model: nn.Module,
     ctx: Optional[CKKSInferenceContext] = None,
     *,
+    input_shape: Optional[Tuple[int, ...]] = None,
     fold_batchnorm: bool = True,
     activation_degree: int = 4,
     use_square_activation: bool = False,
     optimize_cnn: bool = True,
+    tt: bool = False,
+    enable_gpu: bool = True,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -467,10 +552,13 @@ def convert(
     Args:
         model: The PyTorch model to convert.
         ctx: Optional CKKS context. If None, one will be created.
+        input_shape: Optional input shape tuple (e.g., (1, 28, 28) for MNIST images).
+                     Used for layout computation in CNN models.
         fold_batchnorm: Whether to fold BatchNorm into preceding layers.
         activation_degree: Default polynomial degree for activations.
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN optimizations (Flatten absorption into FC).
+        tt: If True, decompose Linear layers into TT format when possible.
         
     Returns:
         Tuple of (encrypted_model, context).
@@ -500,14 +588,21 @@ def convert(
         activation_degree=activation_degree,
         use_square_activation=use_square_activation,
         optimize_cnn=optimize_cnn,
+        tt=tt,
     )
     
-    converter = ModelConverter(options)
+    converter = ModelConverter(options, input_shape=input_shape)
     enc_model = converter.convert(model, ctx)
     
-    # Create context if not provided
+    cnn_config = None
+    if optimize_cnn and converter._is_cnn_model:
+        cnn_config = _build_cnn_config(converter, input_shape)
+    
     if ctx is None:
-        ctx = CKKSInferenceContext.for_model(model)
+        ctx = CKKSInferenceContext.for_model(model, enable_gpu=enable_gpu, cnn_config=cnn_config)
+    
+    if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:
+        enc_model._cnn_layout = converter._last_cnn_layout
     
     return enc_model, ctx
 

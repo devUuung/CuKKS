@@ -17,11 +17,13 @@ requiring the bootstrap operation that triggers the OpenFHE GPU bug.
 """
 
 from .crypto_inv_sqrt import crypto_inv_sqrt, crypto_inv_sqrt_shallow
+from .crypto_reciprocal import crypto_reciprocal_shallow
 from .normalization import encrypted_mean, encrypted_std, encrypted_variance
 
 __all__ = [
     "crypto_inv_sqrt",
     "crypto_inv_sqrt_shallow",
+    "crypto_reciprocal_shallow",
     "encrypted_mean",
     "encrypted_variance",
     "encrypted_std",

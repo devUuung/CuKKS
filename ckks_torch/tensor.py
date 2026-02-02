@@ -211,8 +211,17 @@ class EncryptedTensor:
         return self.mul(1.0 / divisor)
     
     def square(self) -> "EncryptedTensor":
-        """Square the tensor (element-wise)."""
-        new_cipher = self._cipher.mul(self._cipher)
+        """Square the tensor (element-wise).
+        
+        Uses dedicated GPU square operation when available, which is more
+        efficient and stable than cipher-cipher multiplication with self.
+        """
+        # Use dedicated square() if available (GPU-optimized path)
+        if hasattr(self._cipher, 'square'):
+            new_cipher = self._cipher.square()
+        else:
+            # Fallback for backends without dedicated square
+            new_cipher = self._cipher.mul(self._cipher)
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth + 1)
         result._needs_rescale = True  # Mark for lazy rescale
         # Propagate CNN layout if present
@@ -260,6 +269,22 @@ class EncryptedTensor:
         """
         new_cipher = self._cipher.sum_slots()
         return EncryptedTensor(new_cipher, (1,), self._context, self._depth)
+    
+    def sum_and_broadcast(self, n: int) -> "EncryptedTensor":
+        """Sum first n slots and replicate the result across all n positions.
+        
+        Uses log(n) rotation-and-add operations. In real CKKS, this naturally
+        fills all slots with the sum. Required for LayerNorm and Attention
+        operations that need reduction followed by element-wise operations.
+        
+        Args:
+            n: Number of active elements to sum and broadcast.
+            
+        Returns:
+            EncryptedTensor of same shape with sum replicated in first n slots.
+        """
+        new_cipher = self._cipher.sum_and_broadcast(n)
+        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
     
     def conjugate(self) -> "EncryptedTensor":
         """Apply complex conjugation to slots."""
@@ -396,36 +421,56 @@ class EncryptedTensor:
         return EncryptedTensor(new_cipher, self._shape, self._context, self._depth + poly_depth)
 
     def inv_sqrt(
-        self, domain: tuple[float, float] = (0.1, 100.0)
+        self, domain: tuple[float, float] | None = None, shallow: bool = False
     ) -> "EncryptedTensor":
         """Compute 1/sqrt(x) using CryptoInvSqrt.
 
         Uses Chebyshev polynomial approximation followed by Newton-Raphson
-        refinement to approximate the inverse square root.
+        refinement to approximate the inverse square root. Supports both
+        Mock and OpenFHE backends.
 
         Args:
-            domain: Input domain (a, b). Must be (0.1, 100.0) in v1.
+            domain: Input domain (a, b). 
+                - For shallow=False: Must be (0.1, 100.0) in v1 (default).
+                - For shallow=True: Default (1.0, 10.0) for polynomial-only mode.
+            shallow: If True, use polynomial-only approximation without bootstrap.
+                Use this for OpenFHE GPU contexts where bootstrap is unavailable 
+                or has known issues. If False (default), use full method
+                with Newton refinement and bootstrap.
 
         Returns:
             EncryptedTensor with 1/sqrt(x) approximation.
 
         Raises:
-            NotImplementedError: If domain != (0.1, 100.0)
-            RuntimeError: If enable_bootstrap=False
+            NotImplementedError: If domain != (0.1, 100.0) for shallow=False
+            RuntimeError: If shallow=False and enable_bootstrap=False
 
-        Warning:
-            v1 ONLY supports Mock backend.
-            OpenFHE is NOT supported in v1.
+        Example:
+            >>> # Full method (requires bootstrap)
+            >>> inv_sqrt_x = x.inv_sqrt()
+            >>>
+            >>> # Shallow method (no bootstrap, suitable for GPU)
+            >>> inv_sqrt_x = x.inv_sqrt(domain=(1.0, 10.0), shallow=True)
 
         Note:
-            Uses 2 bootstrap operations internally.
+            - shallow=False: Uses 2 bootstrap operations internally.
+            - shallow=True: No bootstrap required, narrower domain for accuracy.
 
         Reference:
             Choi, H. (2025). PP-STAT. CIKM'25.
         """
-        from ckks_torch.stats.crypto_inv_sqrt import crypto_inv_sqrt
-
-        return crypto_inv_sqrt(self, domain=domain)
+        if shallow:
+            from ckks_torch.stats.crypto_inv_sqrt import crypto_inv_sqrt_shallow
+            
+            if domain is None:
+                domain = (1.0, 10.0)
+            return crypto_inv_sqrt_shallow(self, domain=domain)
+        else:
+            from ckks_torch.stats.crypto_inv_sqrt import crypto_inv_sqrt
+            
+            if domain is None:
+                domain = (0.1, 100.0)
+            return crypto_inv_sqrt(self, domain=domain)
 
     def sqrt(
         self, domain: tuple[float, float] = (0.1, 100.0)
@@ -474,13 +519,9 @@ class EncryptedTensor:
     ) -> "EncryptedTensor":
         """Apply 2D convolution using im2col method.
         
-        This is a high-level operation that:
-        1. Unfolds input to patches (im2col)
-        2. Performs matrix multiplication
-        3. Reshapes to output spatial dimensions
-        
-        For mock backend, this decrypts, computes, and re-encrypts.
-        For real HE backend, this would use optimized SIMD operations.
+        This method is not available in pure HE mode.
+        Use encrypt_cnn_input() to pre-apply im2col before encryption,
+        then use EncryptedConv2d with _cnn_layout input.
         
         Args:
             weight: Convolution weight matrix (out_channels, in_channels * kH * kW).
@@ -493,51 +534,11 @@ class EncryptedTensor:
         Returns:
             Encrypted output tensor with output_shape.
         """
-        import torch.nn.functional as F
-        
-        # Decrypt for computation (mock backend approach)
-        plaintext = self._context.decrypt(self)
-        
-        # Ensure 4D
-        original_ndim = plaintext.ndim
-        if plaintext.ndim == 3:
-            plaintext = plaintext.unsqueeze(0)
-        
-        # Apply padding if needed
-        if padding != (0, 0):
-            plaintext = F.pad(plaintext, (padding[1], padding[1], padding[0], padding[0]))
-        
-        # Unfold: (N, C, H, W) -> (N, C*kH*kW, num_patches)
-        patches = F.unfold(plaintext.to(torch.float64), kernel_size, stride=stride)
-        
-        # Transpose: (N, C*kH*kW, num_patches) -> (N, num_patches, C*kH*kW)
-        patches = patches.transpose(1, 2)
-        
-        # Squeeze batch if single sample: (num_patches, C*kH*kW)
-        patches = patches.squeeze(0)
-        
-        # Matrix multiply: (num_patches, patch_features) @ (out_channels, patch_features).T
-        # = (num_patches, out_channels)
-        # Ensure all tensors are on CPU for compatibility
-        patches = patches.cpu()
-        weight_2d = weight.to(dtype=torch.float64, device="cpu")
-        result = torch.mm(patches, weight_2d.T)
-        
-        # Add bias if present
-        if bias is not None:
-            result = result + bias.to(dtype=torch.float64, device="cpu")
-        
-        # Reshape to output: (num_patches, out_channels) -> (batch, out_channels, out_h, out_w)
-        batch_size = output_shape[0]
-        out_channels = output_shape[1]
-        out_h = output_shape[2]
-        out_w = output_shape[3]
-        
-        # result is (num_patches, out_channels), need (batch, C, H, W)
-        result = result.T.reshape(batch_size, out_channels, out_h, out_w)
-        
-        # Re-encrypt
-        return self._context.encrypt(result)
+        raise RuntimeError(
+            "conv2d() is not available in pure HE mode. "
+            "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
+            "then use EncryptedConv2d with _cnn_layout input."
+        )
     
     def matmul_2d(
         self,
@@ -546,9 +547,9 @@ class EncryptedTensor:
     ) -> "EncryptedTensor":
         """Matrix multiply for 2D input (num_patches, features).
         
-        Computes: input @ weight.T + bias
-        
-        For mock backend, decrypts and re-encrypts.
+        This method is not available in pure HE mode.
+        Use encrypt_cnn_input() to pre-apply im2col before encryption,
+        then use EncryptedLinear with packed BSGS matmul.
         
         Args:
             weight: Weight matrix (out_features, in_features).
@@ -557,19 +558,11 @@ class EncryptedTensor:
         Returns:
             Encrypted result of shape (num_patches, out_features).
         """
-        # Decrypt for computation
-        plaintext = self._context.decrypt(self)
-        
-        # Matrix multiply
-        weight_2d = weight.to(dtype=torch.float64)
-        result = torch.mm(plaintext.to(torch.float64), weight_2d.T)
-        
-        # Add bias if present
-        if bias is not None:
-            result = result + bias.to(dtype=torch.float64)
-        
-        # Re-encrypt
-        return self._context.encrypt(result)
+        raise RuntimeError(
+            "matmul_2d() is not available in pure HE mode. "
+            "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
+            "then use EncryptedLinear with packed BSGS matmul."
+        )
     
     def avgpool2d(
         self,
@@ -579,7 +572,9 @@ class EncryptedTensor:
     ) -> "EncryptedTensor":
         """Apply 2D average pooling.
         
-        For mock backend, decrypts, applies pooling, and re-encrypts.
+        This method is not available in pure HE mode.
+        Use encrypt_cnn_input() to pre-apply im2col before encryption,
+        then use EncryptedAvgPool2d with _cnn_layout input.
         
         Args:
             kernel_size: Pooling kernel size (kH, kW).
@@ -589,24 +584,11 @@ class EncryptedTensor:
         Returns:
             Encrypted output after average pooling.
         """
-        import torch.nn.functional as F
-        
-        # Decrypt for computation
-        plaintext = self._context.decrypt(self)
-        
-        # Ensure 4D
-        original_ndim = plaintext.ndim
-        if plaintext.ndim == 3:
-            plaintext = plaintext.unsqueeze(0)
-        
-        # Move to CPU for computation
-        plaintext = plaintext.cpu().to(torch.float64)
-        
-        # Apply average pooling
-        result = F.avg_pool2d(plaintext, kernel_size, stride=stride, padding=padding)
-        
-        # Re-encrypt
-        return self._context.encrypt(result)
+        raise RuntimeError(
+            "avgpool2d() is not available in pure HE mode. "
+            "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
+            "then use EncryptedAvgPool2d with _cnn_layout input."
+        )
     
     # -------------------------------------------------------------------------
     # Decryption
@@ -687,28 +669,23 @@ class EncryptedTensor:
         stride: Tuple[int, int] = (1, 1),
         padding: Tuple[int, int] = (0, 0),
     ) -> "EncryptedTensor":
-        import torch.nn.functional as F
+        """Unfold tensor into patches (im2col).
         
-        original_shape = self._shape
-        if len(original_shape) == 3:
-            pass
-        elif len(original_shape) == 4:
-            pass
-        else:
-            raise ValueError(f"unfold requires 3D or 4D input, got {len(original_shape)}D")
+        This method is not available in pure HE mode.
+        Use encrypt_cnn_input() to pre-apply im2col before encryption.
         
-        plaintext = self._context.decrypt(self)
-        if len(original_shape) == 3:
-            plaintext = plaintext.unsqueeze(0)
-        
-        if padding != (0, 0):
-            plaintext = F.pad(plaintext, (padding[1], padding[1], padding[0], padding[0]))
-        
-        patches = F.unfold(plaintext.to(torch.float64), kernel_size, stride=stride)
-        patches = patches.transpose(1, 2)
-        patches = patches.squeeze(0)
-        
-        return self._context.encrypt(patches)
+        Args:
+            kernel_size: Kernel size (kH, kW).
+            stride: Stride (sH, sW).
+            padding: Padding (pH, pW).
+            
+        Returns:
+            Encrypted patches tensor.
+        """
+        raise RuntimeError(
+            "unfold() is not available in pure HE mode. "
+            "Use encrypt_cnn_input() to pre-apply im2col before encryption."
+        )
     
     def clone(self) -> "EncryptedTensor":
         """Create a copy of this tensor.

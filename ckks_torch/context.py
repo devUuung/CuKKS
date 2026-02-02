@@ -264,6 +264,7 @@ class CKKSInferenceContext:
         auto_bootstrap: bool = False,
         bootstrap_threshold: int = 2,
         cnn_config: Optional[Dict[str, Any]] = None,
+        enable_gpu: bool = True,
     ):
         # For CNN inference, we need more multiplicative depth
         # Conv(1) + Square(1) + Pool(1) + FC(2) = 5 minimum
@@ -276,6 +277,7 @@ class CKKSInferenceContext:
         self._auto_bootstrap = auto_bootstrap
         self._bootstrap_threshold = bootstrap_threshold
         self._cnn_config = cnn_config
+        self._enable_gpu = enable_gpu
         
         if rotations is None:
             max_dim = max_rotation_dim or min(self.config.num_slots, 1024)
@@ -338,7 +340,7 @@ class CKKSInferenceContext:
             generate_conjugate_keys=True,
         )
         
-        self._ctx = CKKSContext(ckks_config, device=self.device)
+        self._ctx = CKKSContext(ckks_config, device=self.device, enable_gpu=self._enable_gpu)
         self._initialized = True
     
     @property
