@@ -141,19 +141,15 @@ void syncGPUtoCPU(GPUCiphertextHandle* handle) {
     if (!handle->gpu_loaded || !handle->gpu_ct) return;
     
     auto ctx = handle->context;
-    auto params = ctx->crypto_params;
-    auto allParams = params->GetElementParams();
-    
-    auto paramsVec = allParams->GetParams();
-    size_t numTowers = paramsVec.size() - handle->gpu_ct->level;
-    std::vector<std::shared_ptr<lbcrypto::ILNativeParams>> nativeParams;
-    for (size_t i = 0; i < numTowers; i++) {
-        nativeParams.push_back(paramsVec[i]);
+    std::shared_ptr<lbcrypto::M4DCRTParams> elementParams;
+    if (handle->ciphertext && !handle->ciphertext->GetElements().empty()) {
+        elementParams = handle->ciphertext->GetElements()[0].GetParams();
+    } else {
+        elementParams = ctx->crypto_params->GetElementParams();
     }
-    auto levelParams = std::make_shared<ILDCRTParams<BigInteger>>(allParams->GetCyclotomicOrder(), nativeParams);
     
-    DCRTPoly gpu_res_0 = loadIntoDCRTPoly(handle->gpu_ct->bx__, levelParams);
-    DCRTPoly gpu_res_1 = loadIntoDCRTPoly(handle->gpu_ct->ax__, levelParams);
+    DCRTPoly gpu_res_0 = loadIntoDCRTPoly(handle->gpu_ct->bx__, elementParams);
+    DCRTPoly gpu_res_1 = loadIntoDCRTPoly(handle->gpu_ct->ax__, elementParams);
     
     std::vector<DCRTPoly> elements = {gpu_res_0, gpu_res_1};
     handle->ciphertext->SetElements(elements);
@@ -469,9 +465,15 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
 ) {
     auto ctx = lhs->context;
     
-    // TODO(gpu-mul-plain): syncGPUtoCPU produces corrupted ciphertexts - use CPU fallback
-    if (lhs->gpu_loaded) {
-        lhs->syncFromGPU();
+    if (ctx->gpu_initialized) {
+        lhs->ensureGPU();
+        auto plaintext = make_plaintext(ctx, plain);
+        plaintext->Encode();
+        ckks::PtAccurate gpu_pt = LoadAccuratePlaintext(
+            plaintext, plaintext->GetElement<DCRTPoly>());
+        ckks::CtAccurate result = ctx->gpu_context->EvalMultPlainExt(
+            *lhs->gpu_ct, gpu_pt);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
     }
     
     auto plaintext = make_plaintext(ctx, plain);
@@ -520,7 +522,16 @@ std::shared_ptr<GPUCiphertextHandle> rotate_cipher(
 ) {
     auto ctx = tensor->context;
 
-    // TODO(gpu-rotation): syncGPUtoCPU produces corrupted ciphertexts - use CPU fallback
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        auto it = ctx->gpu_rot_keys->find(index);
+        if (it != ctx->gpu_rot_keys->end()) {
+            tensor->ensureGPU();
+            uint32_t auto_index = ctx->context->FindAutomorphismIndex(index);
+            ckks::CtAccurate result = ctx->gpu_context->EvalAtIndex(
+                *tensor->gpu_ct, it->second, auto_index);
+            return make_cipher_from_gpu_lazy(ctx, std::move(result), tensor->ciphertext);
+        }
+    }
 
     if (tensor->gpu_loaded) {
         tensor->syncFromGPU();
