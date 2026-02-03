@@ -135,7 +135,7 @@ set(_rpath "${OPENFHE_LIBRARY_DIR}")
 
 set_target_properties(ckks_openfhe_backend PROPERTIES
     BUILD_RPATH "${_rpath}"
-    INSTALL_RPATH "$ORIGIN/libs"
+    INSTALL_RPATH "$ORIGIN/../libs"
 )
 
 # ==============================================================================

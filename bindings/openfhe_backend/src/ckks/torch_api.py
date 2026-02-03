@@ -18,29 +18,42 @@ def _load_backends():
     if _backend is not None:
         return
     
+    _gpu_error = None
+    _cpu_error = None
+    
     try:
         from ckks.backends import ckks_openfhe_gpu_backend as gpu_mod
         _gpu_backend = gpu_mod
-    except Exception:
+    except Exception as e:
+        _gpu_error = f"ckks.backends.ckks_openfhe_gpu_backend: {e}"
         try:
             import ckks_openfhe_gpu_backend as gpu_mod
             _gpu_backend = gpu_mod
-        except ImportError:
+        except ImportError as e2:
+            _gpu_error += f"; direct import: {e2}"
             _gpu_backend = None
     
     try:
         from ckks.backends import ckks_openfhe_backend as cpu_mod
         _cpu_backend = cpu_mod
-    except Exception:
+    except Exception as e:
+        _cpu_error = f"ckks.backends.ckks_openfhe_backend: {e}"
         try:
             import ckks_openfhe_backend as cpu_mod
             _cpu_backend = cpu_mod
-        except ImportError:
+        except ImportError as e2:
+            _cpu_error += f"; direct import: {e2}"
             _cpu_backend = None
     
     if _gpu_backend is None and _cpu_backend is None:
+        error_details = []
+        if _gpu_error:
+            error_details.append(f"GPU: {_gpu_error}")
+        if _cpu_error:
+            error_details.append(f"CPU: {_cpu_error}")
         raise ImportError(
             "Neither ckks_openfhe_gpu_backend nor ckks_openfhe_backend native extension is available. "
+            f"Errors: {'; '.join(error_details)}. "
             "Build with `pip install -e bindings/openfhe_backend` first."
         )
     

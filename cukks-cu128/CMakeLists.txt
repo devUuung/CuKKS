@@ -179,7 +179,7 @@ list(REMOVE_DUPLICATES _rpath)
 
 set_target_properties(ckks_openfhe_backend PROPERTIES
     BUILD_RPATH "${_rpath}"
-    INSTALL_RPATH "$ORIGIN/libs"
+    INSTALL_RPATH "$ORIGIN/../libs"
 )
 
 set_target_properties(ckks_openfhe_gpu_backend PROPERTIES
