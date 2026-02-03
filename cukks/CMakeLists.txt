@@ -147,17 +147,24 @@ pybind11_strip(ckks_openfhe_backend)
 # ==============================================================================
 # Installation
 # ==============================================================================
+# Install native extension to ckks/backends/ so it can be imported as ckks.backends.ckks_openfhe_backend
 install(TARGETS ckks_openfhe_backend
     LIBRARY DESTINATION ckks/backends
     COMPONENT runtime
 )
 
-install(DIRECTORY "${SOURCE_DIR}/ckks/"
+# Install ckks Python package (from bindings/openfhe_backend/src/ckks/)
+install(FILES "${SOURCE_DIR}/ckks/__init__.py"
     DESTINATION ckks
     COMPONENT runtime
-    FILES_MATCHING
-        PATTERN "*.py"
-        PATTERN "__pycache__" EXCLUDE
+)
+install(FILES "${SOURCE_DIR}/ckks/torch_api.py"
+    DESTINATION ckks
+    COMPONENT runtime
+)
+install(FILES "${SOURCE_DIR}/ckks/backends/__init__.py"
+    DESTINATION ckks/backends
+    COMPONENT runtime
 )
 
 # Bundle OpenFHE libraries
