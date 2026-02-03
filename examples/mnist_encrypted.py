@@ -362,7 +362,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("CKKS-Torch: MNIST Encrypted Inference Example")
+    print("CuKKS: MNIST Encrypted Inference Example")
     print("=" * 60)
     
     log_memory("startup")

@@ -1,5 +1,5 @@
 /**
- * CKKS GPU Backend for ckks-torch
+ * CKKS GPU Backend for CuKKS
  * 
  * This backend uses the ckks::Context GPU API directly for maximum performance.
  * All cryptographic operations run on GPU.

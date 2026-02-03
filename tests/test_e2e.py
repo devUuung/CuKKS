@@ -1,4 +1,4 @@
-"""End-to-end tests for CKKS-Torch encrypted inference.
+"""End-to-end tests for CuKKS encrypted inference.
 
 This module tests complete inference pipelines:
 - MNIST-style MLP inference

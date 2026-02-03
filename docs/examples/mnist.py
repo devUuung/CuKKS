@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-# Import CKKS-Torch
+# Import CuKKS
 import ckks_torch
 from ckks_torch import CKKSInferenceContext
 from ckks_torch.nn import EncryptedModule
@@ -217,7 +217,7 @@ def compare_results(
 
 def main():
     print("=" * 60)
-    print("CKKS-Torch: MNIST Encrypted Inference Example")
+    print("CuKKS: MNIST Encrypted Inference Example")
     print("=" * 60)
     
     # Check backend availability

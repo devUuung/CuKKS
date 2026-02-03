@@ -1,6 +1,6 @@
 # API Reference
 
-This document provides complete API documentation for CKKS-Torch.
+This document provides complete API documentation for CuKKS.
 
 ## Table of Contents
 

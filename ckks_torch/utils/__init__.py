@@ -1,5 +1,5 @@
 """
-Utility functions for CKKS-Torch.
+Utility functions for CuKKS.
 """
 
 from .approximations import (

@@ -72,10 +72,10 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ckks-torch/ckks-torch"
-Documentation = "https://github.com/ckks-torch/ckks-torch#readme"
-Repository = "https://github.com/ckks-torch/ckks-torch"
-Issues = "https://github.com/ckks-torch/ckks-torch/issues"
+Homepage = "https://github.com/devUuung/CuKKS"
+Documentation = "https://github.com/devUuung/CuKKS#readme"
+Repository = "https://github.com/devUuung/CuKKS"
+Issues = "https://github.com/devUuung/CuKKS/issues"
 
 # ==============================================================================
 # scikit-build-core Configuration

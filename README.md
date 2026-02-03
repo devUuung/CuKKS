@@ -1,8 +1,8 @@
-# CKKS-Torch
+# CuKKS
 
 **PyTorch-compatible encrypted deep learning inference using CKKS homomorphic encryption with GPU acceleration.**
 
-CKKS-Torch enables you to run trained PyTorch models on encrypted data, preserving privacy while maintaining model accuracy. Built on top of OpenFHE with CUDA acceleration.
+CuKKS enables you to run trained PyTorch models on encrypted data, preserving privacy while maintaining model accuracy. Built on top of OpenFHE with CUDA acceleration.
 
 ## Features
 
@@ -92,8 +92,8 @@ prediction = ctx.decrypt(enc_output).argmax()
 ### Step 1: Install Python Package (High-Level API)
 
 ```bash
-git clone https://github.com/ckks-torch/ckks-torch.git
-cd ckks-torch
+git clone https://github.com/devUuung/CuKKS.git
+cd CuKKS
 pip install -e .
 ```
 
@@ -292,7 +292,7 @@ ckks_torch/
 
 ## GPU Acceleration
 
-CKKS-Torch supports GPU acceleration for homomorphic encryption operations:
+CuKKS supports GPU acceleration for homomorphic encryption operations:
 
 ### Enabling GPU
 
@@ -350,7 +350,7 @@ See [GPU Acceleration Guide](docs/gpu-acceleration.md) for detailed documentatio
 
 ### CNN-Specific Optimizations
 
-CKKS-Torch includes several CNN-specific optimizations that are automatically applied:
+CuKKS includes several CNN-specific optimizations that are automatically applied:
 
 #### Flatten Absorption
 The permutation operation in `Flatten` is absorbed into the following `Linear` layer's weights, eliminating a costly matmul operation at runtime.
@@ -378,7 +378,7 @@ Tested on 8×8 downsampled MNIST with Conv(8ch) → Square → AvgPool(2) → FC
 
 ### True HE CNN Inference
 
-CKKS-Torch implements *true* homomorphic CNN inference where all operations run on encrypted data without decryption:
+CuKKS implements *true* homomorphic CNN inference where all operations run on encrypted data without decryption:
 
 ```python
 # Manual HE CNN pipeline (for advanced users)
@@ -430,13 +430,13 @@ Apache License 2.0
 
 ## Citation
 
-If you use CKKS-Torch in your research, please cite:
+If you use CuKKS in your research, please cite:
 
 ```bibtex
-@software{ckks_torch,
-  title = {CKKS-Torch: PyTorch-compatible Encrypted Deep Learning},
+@software{cukks,
+  title = {CuKKS: PyTorch-compatible Encrypted Deep Learning},
   year = {2024},
-  url = {https://github.com/ckks-torch/ckks-torch}
+  url = {https://github.com/devUuung/CuKKS}
 }
 ```
 

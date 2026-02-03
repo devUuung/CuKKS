@@ -1,1 +1,1 @@
-"""CKKS-Torch benchmarks package."""
+"""CuKKS benchmarks package."""

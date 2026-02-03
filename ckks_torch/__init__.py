@@ -1,5 +1,5 @@
 """
-CKKS-Torch: PyTorch-compatible Encrypted Deep Learning Inference.
+CuKKS: PyTorch-compatible Encrypted Deep Learning Inference.
 
 This library provides a seamless interface for running trained PyTorch models
 on encrypted data using CKKS homomorphic encryption with GPU acceleration.

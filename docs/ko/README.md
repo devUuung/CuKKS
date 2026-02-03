@@ -1,8 +1,8 @@
-# CKKS-Torch
+# CuKKS
 
 **GPU 가속을 활용한 CKKS 동형암호 기반 PyTorch 호환 암호화 딥러닝 추론 라이브러리**
 
-CKKS-Torch는 학습된 PyTorch 모델을 암호화된 데이터에서 실행할 수 있게 해주며, 모델 정확도를 유지하면서 프라이버시를 보호합니다. CUDA 가속을 지원하는 OpenFHE 기반으로 구축되었습니다.
+CuKKS는 학습된 PyTorch 모델을 암호화된 데이터에서 실행할 수 있게 해주며, 모델 정확도를 유지하면서 프라이버시를 보호합니다. CUDA 가속을 지원하는 OpenFHE 기반으로 구축되었습니다.
 
 ## 주요 기능
 
@@ -92,8 +92,8 @@ prediction = ctx.decrypt(enc_output).argmax()
 ### 1단계: Python 패키지 설치 (고수준 API)
 
 ```bash
-git clone https://github.com/ckks-torch/ckks-torch.git
-cd ckks-torch
+git clone https://github.com/devUuung/CuKKS.git
+cd CuKKS
 pip install -e .
 ```
 
@@ -329,13 +329,13 @@ Apache License 2.0
 
 ## 인용
 
-연구에 CKKS-Torch를 사용하신다면 인용해 주세요:
+연구에 CuKKS를 사용하신다면 인용해 주세요:
 
 ```bibtex
-@software{ckks_torch,
-  title = {CKKS-Torch: PyTorch-compatible Encrypted Deep Learning},
+@software{cukks,
+  title = {CuKKS: PyTorch-compatible Encrypted Deep Learning},
   year = {2024},
-  url = {https://github.com/ckks-torch/ckks-torch}
+  url = {https://github.com/devUuung/CuKKS}
 }
 ```
 

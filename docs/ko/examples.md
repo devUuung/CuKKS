@@ -1,11 +1,11 @@
-# CKKS-Torch 예제 가이드
+# CuKKS 예제 가이드
 
-이 문서는 ckks-torch 라이브러리의 예제들을 한국어로 설명합니다.
+이 문서는 CuKKS 라이브러리의 예제들을 한국어로 설명합니다.
 
 ## 사전 요구사항
 
 ```bash
-# ckks-torch 설치
+# CuKKS 설치
 pip install -e .
 
 # GPU 예제를 위해 OpenFHE GPU 백엔드 빌드 필요

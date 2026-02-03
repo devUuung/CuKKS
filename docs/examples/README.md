@@ -1,11 +1,11 @@
-# CKKS-Torch Examples
+# CuKKS Examples
 
-This directory contains example scripts demonstrating various features of the ckks-torch library.
+This directory contains example scripts demonstrating various features of the CuKKS library.
 
 ## Prerequisites
 
 ```bash
-# Install ckks-torch
+# Install CuKKS
 pip install -e .
 
 # For GPU examples, ensure OpenFHE GPU backend is built

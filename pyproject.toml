@@ -3,10 +3,10 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ckks-torch"
+name = "cukks-torch"
 version = "0.1.0"
 description = "PyTorch-compatible encrypted deep learning inference using CKKS homomorphic encryption"
-authors = [{name = "CKKS-Torch Team"}]
+authors = [{name = "CuKKS Team"}]
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -50,12 +50,12 @@ backend = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ckks-torch/ckks-torch"
-Documentation = "https://github.com/ckks-torch/ckks-torch#readme"
-Repository = "https://github.com/ckks-torch/ckks-torch"
+Homepage = "https://github.com/devUuung/CuKKS"
+Documentation = "https://github.com/devUuung/CuKKS#readme"
+Repository = "https://github.com/devUuung/CuKKS"
 
 [project.scripts]
-ckks-torch-example = "ckks_torch.examples.encrypted_inference:main"
+cukks-example = "ckks_torch.examples.encrypted_inference:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

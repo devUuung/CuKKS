@@ -144,7 +144,7 @@ def demo_encrypted_inference(
     import ckks_torch
     
     print("=" * 60)
-    print("CKKS-Torch Encrypted Inference Demo")
+    print("CuKKS Encrypted Inference Demo")
     print("=" * 60)
     
     # Check backend availability
@@ -328,7 +328,7 @@ def demo_model_conversion():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CKKS-Torch Examples")
+    parser = argparse.ArgumentParser(description="CuKKS Examples")
     parser.add_argument(
         "--demo",
         choices=["inference", "conversion"],

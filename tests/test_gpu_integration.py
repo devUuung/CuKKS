@@ -1,4 +1,4 @@
-"""GPU Integration Tests for ckks-torch.
+"""GPU Integration Tests for CuKKS.
 
 These tests verify that MLP and CNN models work correctly with
 the real CKKS backend on GPU (CUDA).

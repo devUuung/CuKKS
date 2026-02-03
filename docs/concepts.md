@@ -238,7 +238,7 @@ Low-level ciphertext → Bootstrap → Fresh ciphertext with full levels
 | 5-8 layers | Consider larger ring dimension instead |
 | 9+ layers | Bootstrapping may be necessary |
 
-### Auto-Bootstrapping in CKKS-Torch
+### Auto-Bootstrapping in CuKKS
 
 ```python
 ctx = CKKSInferenceContext(
@@ -437,7 +437,7 @@ CKKS operations are memory-intensive:
 
 ### Libraries
 
-- [OpenFHE](https://github.com/openfheorg/openfhe-development): The backend used by CKKS-Torch
+- [OpenFHE](https://github.com/openfheorg/openfhe-development): The backend used by CuKKS
 - [Microsoft SEAL](https://github.com/microsoft/SEAL): Alternative HE library
 - [TenSEAL](https://github.com/OpenMined/TenSEAL): Python bindings for SEAL
 

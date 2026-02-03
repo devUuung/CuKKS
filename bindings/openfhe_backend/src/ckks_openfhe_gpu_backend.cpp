@@ -1,5 +1,5 @@
 /**
- * CKKS OpenFHE GPU Backend for ckks-torch
+ * CKKS OpenFHE GPU Backend for CuKKS
  * 
  * Hybrid CPU/GPU implementation:
  * - CPU (OpenFHE): Encryption, Decryption, Key Generation

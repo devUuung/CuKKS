@@ -238,7 +238,7 @@ result = result.rescale()  # scale: Δ² → Δ, 1 레벨 소비
 | 5-8 레이어 | 대신 더 큰 링 차원 고려 |
 | 9+ 레이어 | 부트스트래핑 필요할 수 있음 |
 
-### CKKS-Torch에서의 자동 부트스트래핑
+### CuKKS에서의 자동 부트스트래핑
 
 ```python
 ctx = CKKSInferenceContext(
@@ -437,7 +437,7 @@ CKKS 연산은 메모리 집약적입니다:
 
 ### 라이브러리
 
-- [OpenFHE](https://github.com/openfheorg/openfhe-development): CKKS-Torch가 사용하는 백엔드
+- [OpenFHE](https://github.com/openfheorg/openfhe-development): CuKKS가 사용하는 백엔드
 - [Microsoft SEAL](https://github.com/microsoft/SEAL): 대안 HE 라이브러리
 - [TenSEAL](https://github.com/OpenMined/TenSEAL): SEAL용 Python 바인딩
 

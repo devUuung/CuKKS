@@ -1,8 +1,8 @@
-# GPU Acceleration for ckks-torch
+# GPU Acceleration for CuKKS
 
 ## Overview
 
-ckks-torch supports GPU acceleration for homomorphic encryption operations using the OpenFHE-GPU library. The implementation uses a hybrid CPU/GPU approach:
+CuKKS supports GPU acceleration for homomorphic encryption operations using the OpenFHE-GPU library. The implementation uses a hybrid CPU/GPU approach:
 
 - **GPU accelerated**: Add, Sub, Mul, Square, Rotate, Rescale, Bootstrap operations
 - **CPU operations**: Encrypt, Decrypt (require secret key), Matrix-vector multiplication (BSGS algorithm)

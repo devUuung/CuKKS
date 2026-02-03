@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark script for CKKS-Torch inference.
+"""Benchmark script for CuKKS inference.
 
 This script measures:
 - Model conversion time
@@ -461,7 +461,7 @@ def run_benchmarks(
 ) -> None:
     """Run the complete benchmark suite."""
     print("=" * 70)
-    print("CKKS-Torch Inference Benchmarks")
+    print("CuKKS Inference Benchmarks")
     print("=" * 70)
     print()
 
@@ -592,7 +592,7 @@ def run_benchmarks(
 
 def main() -> None:
     """Entry point for benchmark script."""
-    parser = argparse.ArgumentParser(description="CKKS-Torch Inference Benchmarks")
+    parser = argparse.ArgumentParser(description="CuKKS Inference Benchmarks")
     parser.add_argument(
         "--hidden",
         type=int,
