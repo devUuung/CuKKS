@@ -71,7 +71,7 @@ jobs:
                 -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120" \
                 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
                 -DOPENFHE_SKIP_EXPORT=ON
-            make -j$(nproc)
+            make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
             make install
             ldconfig
           CIBW_ENVIRONMENT_LINUX: >
