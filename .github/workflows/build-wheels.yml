@@ -14,9 +14,13 @@ jobs:
     permissions:
       packages: write
     outputs:
-      image-tag: ghcr.io/${{ github.repository }}/manylinux-cuda128:${{ github.sha }}
+      image-tag: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Get lowercase repo name
+        id: repo
+        run: echo "lowercase=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -35,8 +39,8 @@ jobs:
           file: docker/manylinux-cuda128.Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/manylinux-cuda128:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/manylinux-cuda128:latest
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
