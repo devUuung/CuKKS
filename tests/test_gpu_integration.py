@@ -189,14 +189,16 @@ class TestGPU_CNN:
             def __init__(self):
                 super().__init__()
                 self.conv = nn.Conv2d(1, 4, kernel_size=3, padding=1)  # 8x8 -> 8x8
+                self.act = nn.ReLU()  # Placeholder, will be replaced with Square by converter
                 self.pool = nn.AvgPool2d(2)  # 8x8 -> 4x4
+                self.flatten = nn.Flatten()
                 self.fc = nn.Linear(4 * 4 * 4, 10)  # 64 -> 10
             
             def forward(self, x):
                 x = self.conv(x)
-                x = x ** 2  # Square activation
+                x = self.act(x)
                 x = self.pool(x)
-                x = x.flatten(1)
+                x = self.flatten(x)
                 x = self.fc(x)
                 return x
         
@@ -247,7 +249,24 @@ class TestGPU_CNN:
         conv_params = [
             {'kernel_size': (3, 3), 'stride': (1, 1), 'padding': (1, 1), 'out_channels': 4}
         ]
-        cnn_layout = {'num_patches': 16, 'patch_features': 4}  # After pool: 4x4
+        
+        # Compute sparse layout for pool output (8x8 -> 4x4 with stride 2)
+        H, W, channels = 8, 8, 4
+        out_H, out_W = 4, 4
+        sparse_positions = []
+        for out_y in range(out_H):
+            for out_x in range(out_W):
+                in_patch_idx = (2 * out_y) * W + (2 * out_x)
+                for c in range(channels):
+                    sparse_positions.append(in_patch_idx * channels + c)
+        
+        cnn_layout = {
+            'num_patches': out_H * out_W,
+            'patch_features': channels,
+            'sparse': True,
+            'sparse_positions': sparse_positions,
+            'total_slots': H * W * channels,
+        }
         
         enc_conv = EncryptedConv2d.from_torch(simple_cnn.conv)
         enc_square = EncryptedSquare()
@@ -288,9 +307,13 @@ class TestGPU_CNN:
         # Create input
         image = torch.randn(1, 1, 8, 8)
         
-        # Plaintext inference
+        # Plaintext inference with Square activation (matching HE)
         with torch.no_grad():
-            plain_output = simple_cnn(image).flatten().to(torch.float64)
+            x = simple_cnn.conv(image)
+            x = x ** 2  # Square instead of ReLU
+            x = simple_cnn.pool(x)
+            x = simple_cnn.flatten(x)
+            plain_output = simple_cnn.fc(x).flatten().to(torch.float64)
         
         # HE inference
         conv_params = [

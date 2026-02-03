@@ -333,10 +333,12 @@ class EncryptedTensor:
         if use_bsgs:
             weight_list = weight_2d.tolist()
             max_dim = getattr(tensor._context, '_max_rotation_dim', None)
-            # Use actual input dimension, capped by max_rotation_dim if set
             in_features = weight_2d.shape[1]
-            actual_dim = min(in_features, max_dim) if max_dim else in_features
-            bsgs_n1 = max(1, int(math.ceil(math.sqrt(actual_dim))))
+            # IMPORTANT: bsgs_n1 must match the n1 used when generating rotation keys
+            # to ensure the required rotations (baby steps 0..n1-1, giant steps n1, 2*n1, ...)
+            # are available. Use max_dim for n1 calculation, not actual in_features.
+            bsgs_dim = max_dim if max_dim else in_features
+            bsgs_n1 = max(1, int(math.ceil(math.sqrt(bsgs_dim))))
             bsgs_n2 = (in_features + bsgs_n1 - 1) // bsgs_n1
             new_cipher = tensor._cipher.matmul_bsgs(weight_list, bsgs_n1, bsgs_n2)
             result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)

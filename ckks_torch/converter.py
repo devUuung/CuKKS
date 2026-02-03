@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import warnings
 from collections import OrderedDict
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import torch.nn as nn
 
@@ -239,7 +239,36 @@ class ModelConverter:
     ) -> EncryptedSequential:
         """Convert a container module with children."""
         converted = OrderedDict()
-        for name, child in children:
+        skip_next = False
+        
+        for i, (name, child) in enumerate(children):
+            if skip_next:
+                skip_next = False
+                continue
+            
+            # CNN optimization: Flatten + Linear -> optimized Linear
+            if (self.options.optimize_cnn and 
+                self._is_cnn_model and
+                isinstance(child, nn.Flatten) and 
+                i + 1 < len(children)):
+                
+                _, next_child = children[i + 1]
+                if isinstance(next_child, nn.Linear):
+                    cnn_layout = self._compute_cnn_layout_from_linear(next_child)
+                    
+                    if cnn_layout is not None:
+                        converted[name] = EncryptedFlatten._with_absorbed_permutation(
+                            child.start_dim, 
+                            child.end_dim
+                        )
+                        next_name = children[i + 1][0]
+                        converted[next_name] = EncryptedLinear.from_torch_cnn(
+                            next_child, 
+                            cnn_layout
+                        )
+                        skip_next = True
+                        continue
+            
             try:
                 converted[name] = self._convert_module(child)
             except NotImplementedError:
@@ -320,27 +349,67 @@ class ModelConverter:
         
         Uses the last conv's output channels and Linear's input features
         to infer num_patches = in_features / channels.
+        
+        If pooling was used, computes sparse layout info since pool outputs
+        values at sparse positions in the pre-pool sized vector.
         """
         if not hasattr(self, '_conv_params') or not self._conv_params:
             return None
         
-        # Get the last conv's output channels
         last_conv = self._conv_params[-1]
         channels = last_conv['out_channels']
-        
-        # Linear input features = num_patches * channels
         in_features = linear.in_features
         
         if in_features % channels != 0:
-            # Can't divide evenly, skip optimization
             return None
         
         num_patches = in_features // channels
         
-        return {
+        layout: Dict[str, Any] = {
             'num_patches': num_patches,
             'patch_features': channels,
         }
+        
+        if hasattr(self, '_pool_params') and self._pool_params:
+            h, w = 8, 8
+            if self.input_shape is not None:
+                shape = tuple(self.input_shape)
+                if len(shape) >= 2:
+                    h, w = int(shape[-2]), int(shape[-1])
+            
+            for conv in self._conv_params:
+                kernel_size = conv['kernel_size']
+                if isinstance(kernel_size, int):
+                    kernel_size = (kernel_size, kernel_size)
+                stride = conv['stride']
+                if isinstance(stride, int):
+                    stride = (stride, stride)
+                padding = conv['padding']
+                if isinstance(padding, int):
+                    padding = (padding, padding)
+                h = (h + 2 * padding[0] - kernel_size[0]) // stride[0] + 1
+                w = (w + 2 * padding[1] - kernel_size[1]) // stride[1] + 1
+            
+            last_pool = self._pool_params[-1]
+            pool_stride = last_pool['stride']
+            if isinstance(pool_stride, int):
+                pool_stride = (pool_stride, pool_stride)
+            
+            out_h = h // pool_stride[0]
+            out_w = w // pool_stride[1]
+            
+            sparse_positions = []
+            for out_y in range(out_h):
+                for out_x in range(out_w):
+                    in_patch_idx = (pool_stride[0] * out_y) * w + (pool_stride[1] * out_x)
+                    for c in range(channels):
+                        sparse_positions.append(in_patch_idx * channels + c)
+            
+            layout['sparse'] = True
+            layout['sparse_positions'] = sparse_positions
+            layout['total_slots'] = h * w * channels
+        
+        return layout
     
     def _compute_cnn_layout_before_flatten(self) -> Optional[Dict]:
         """Compute the CNN layout (num_patches, channels) before Flatten layer.

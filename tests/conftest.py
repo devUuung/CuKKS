@@ -101,6 +101,7 @@ def real_context():
         device="cpu",
         max_rotation_dim=2048,
         use_bsgs=True,
+        enable_gpu=False,  # Disable GPU for CPU-only tests
     )
     
     return ctx

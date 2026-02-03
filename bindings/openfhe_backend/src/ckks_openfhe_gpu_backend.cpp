@@ -469,15 +469,9 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
 ) {
     auto ctx = lhs->context;
     
-    if (ctx->gpu_initialized) {
-        lhs->ensureGPU();
-        auto plaintext = make_plaintext(ctx, plain);
-        plaintext->Encode();
-        ckks::PtAccurate gpu_pt = LoadAccuratePlaintext(
-            plaintext, plaintext->GetElement<DCRTPoly>());
-        ckks::CtAccurate result = ctx->gpu_context->EvalMultPlainExt(
-            *lhs->gpu_ct, gpu_pt);
-        return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
+    // TODO(gpu-mul-plain): syncGPUtoCPU produces corrupted ciphertexts - use CPU fallback
+    if (lhs->gpu_loaded) {
+        lhs->syncFromGPU();
     }
     
     auto plaintext = make_plaintext(ctx, plain);
@@ -526,20 +520,8 @@ std::shared_ptr<GPUCiphertextHandle> rotate_cipher(
 ) {
     auto ctx = tensor->context;
 
-    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
-        auto it = ctx->gpu_rot_keys->find(index);
-        if (it != ctx->gpu_rot_keys->end()) {
-            // GPU path: use existing GPU rotation kernel
-            tensor->ensureGPU();
-            uint32_t auto_index = ctx->context->FindAutomorphismIndex(index);
-            ckks::CtAccurate result = ctx->gpu_context->EvalAtIndex(
-                *tensor->gpu_ct, it->second, auto_index);
-            return make_cipher_from_gpu_lazy(ctx, std::move(result), tensor->ciphertext);
-        }
-        // Key not found for this rotation index - fall through to CPU with warning
-    }
+    // TODO(gpu-rotation): syncGPUtoCPU produces corrupted ciphertexts - use CPU fallback
 
-    // CPU fallback (existing behavior)
     if (tensor->gpu_loaded) {
         tensor->syncFromGPU();
     }
