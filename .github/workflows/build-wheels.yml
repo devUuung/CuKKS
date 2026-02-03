@@ -105,12 +105,26 @@ jobs:
         with:
           python-version: "3.11"
       
-      - name: Test GPU wheel (import only, no GPU required)
+      - name: Test GPU wheel structure (no GPU available)
         run: |
+          set -ex
           python -m venv test-env
           source test-env/bin/activate
           pip install wheelhouse/*.whl
-          python -c "from ckks import CKKSContext, CKKSConfig; print('GPU import OK')"
+          
+          # Verify package structure (import will fail without CUDA drivers)
+          SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "Checking installed package at: $SITE_PACKAGES/ckks"
+          
+          # Check that required files exist
+          test -f "$SITE_PACKAGES/ckks/__init__.py"
+          test -f "$SITE_PACKAGES/ckks/torch_api.py"
+          test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
+          test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_backend.cpython-311-x86_64-linux-gnu.so"
+          test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_gpu_backend.cpython-311-x86_64-linux-gnu.so"
+          
+          echo "All required files present!"
+          echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
 
   publish:
     if: github.event_name == 'release'
