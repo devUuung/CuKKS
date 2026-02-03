@@ -44,46 +44,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  build-cpu:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Build CPU wheels
-        uses: pypa/cibuildwheel@v2.21.3
-        with:
-          package-dir: cukks
-        env:
-          CIBW_BUILD: cp311-manylinux_x86_64
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          CIBW_BEFORE_ALL_LINUX: |
-            set -ex
-            yum install -y cmake3 openssl-devel ninja-build autoconf automake libtool
-            ln -sf /usr/bin/cmake3 /usr/bin/cmake || true
-            cd /project/openfhe-gpu-public
-            # Patch CMakeLists.txt to skip CUDA/DeviceFunctions section (lines 676-713)
-            sed -i '676,713s/^/#CPU_SKIP# /' CMakeLists.txt
-            # Patch third-party/CMakeLists.txt to skip rmm (lines 16-25)
-            sed -i '16,25s/^/#CPU_SKIP# /' third-party/CMakeLists.txt
-            mkdir -p build-cpu && cd build-cpu
-            cmake .. \
-                -DWITH_OPENMP=ON \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_INSTALL_PREFIX=/usr/local \
-                -DBUILD_SHARED=ON
-            make -j$(nproc)
-            make install
-            ldconfig
-          CIBW_ENVIRONMENT_LINUX: >
-            OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
-            OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build-cpu
-          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
-      
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-cpu
-          path: wheelhouse/*.whl
-
   build-gpu:
     needs: build-docker
     runs-on: ubuntu-latest
@@ -122,27 +82,6 @@ jobs:
           name: wheels-gpu
           path: wheelhouse/*.whl
 
-  test-cpu:
-    needs: build-cpu
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: wheels-cpu
-          path: wheelhouse
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      
-      - name: Test CPU wheel
-        run: |
-          python -m venv test-env
-          source test-env/bin/activate
-          pip install wheelhouse/*.whl
-          python -c "from ckks import CKKSContext, CKKSConfig; print('CPU import OK')"
-
   test-gpu:
     needs: build-gpu
     runs-on: ubuntu-latest
@@ -166,16 +105,15 @@ jobs:
 
   publish:
     if: github.event_name == 'release'
-    needs: [test-cpu, test-gpu]
+    needs: test-gpu
     runs-on: ubuntu-latest
     permissions:
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
+          name: wheels-gpu
           path: dist
-          merge-multiple: true
       
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
