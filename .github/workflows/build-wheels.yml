@@ -73,12 +73,11 @@ jobs:
                 -DOPENFHE_SKIP_EXPORT=ON
             make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
             # Manual install - avoid 'make install' which tries to build benchmarks
-            mkdir -p /usr/local/lib /usr/local/include
+            mkdir -p /usr/local/lib /usr/local/include/openfhe
             cp -a lib/*.so* /usr/local/lib/
             cp -a ../src/core/include/* /usr/local/include/
             cp -a ../src/pke/include/* /usr/local/include/
             cp -a ../src/binfhe/include/* /usr/local/include/
-            # Copy generated config headers
             cp -a src/core/config_core.h /usr/local/include/openfhe/
             ldconfig
           CIBW_ENVIRONMENT_LINUX: >
