@@ -67,7 +67,8 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr/local \
                 -DBUILD_SHARED=ON \
-                -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120"
+                -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120" \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5
             make -j$(nproc)
             make install
             ldconfig
