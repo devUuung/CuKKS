@@ -63,16 +63,15 @@ jobs:
             cd /project/openfhe-gpu-public
             # Patch CMakeLists.txt to skip CUDA/DeviceFunctions section (lines 676-713)
             sed -i '676,713s/^/#CPU_SKIP# /' CMakeLists.txt
-            # Verify patch applied
-            grep -n "CPU_SKIP" CMakeLists.txt | head -5 || echo "Patch not applied"
+            # Patch third-party/CMakeLists.txt to skip rmm (lines 16-25)
+            sed -i '16,25s/^/#CPU_SKIP# /' third-party/CMakeLists.txt
             mkdir -p build-cpu && cd build-cpu
             cmake .. \
                 -DWITH_OPENMP=ON \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr/local \
-                -DBUILD_SHARED=ON \
-                2>&1 | tee cmake_output.log || (cat cmake_output.log && exit 1)
-            make -j$(nproc) VERBOSE=1 2>&1 | tee make_output.log || (tail -100 make_output.log && exit 1)
+                -DBUILD_SHARED=ON
+            make -j$(nproc)
             make install
             ldconfig
           CIBW_ENVIRONMENT_LINUX: >
