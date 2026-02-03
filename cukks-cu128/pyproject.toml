@@ -1,0 +1,109 @@
+# ==============================================================================
+# CuKKS-cu128 - GPU-accelerated CKKS Backend Package (CUDA 12.8)
+# ==============================================================================
+# pip install cukks-cu128
+# ==============================================================================
+
+[build-system]
+requires = [
+    "scikit-build-core>=0.5.0",
+    "pybind11>=2.11",
+    "cmake>=3.18",
+    "ninja",
+]
+build-backend = "scikit_build_core.build"
+
+# ==============================================================================
+# Project Metadata
+# ==============================================================================
+
+[project]
+name = "cukks-cu128"
+version = "0.1.0"
+description = "CKKS Homomorphic Encryption backend with CUDA 12.8 GPU acceleration"
+readme = "../README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "CuKKS Authors"}
+]
+keywords = [
+    "homomorphic-encryption",
+    "CKKS",
+    "OpenFHE",
+    "GPU",
+    "CUDA",
+    "privacy",
+    "cryptography",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security :: Cryptography",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy>=1.23",
+    "torch>=2.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/devUuung/CuKKS"
+Repository = "https://github.com/devUuung/CuKKS"
+Issues = "https://github.com/devUuung/CuKKS/issues"
+
+# ==============================================================================
+# scikit-build-core Configuration
+# ==============================================================================
+
+[tool.scikit-build]
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+wheel.install-dir = "."
+build.verbose = true
+
+# ==============================================================================
+# CMake Configuration Variables
+# ==============================================================================
+
+[tool.scikit-build.cmake.define]
+CUKKS_ENABLE_GPU = "ON"
+OPENFHE_GPU_ROOT = "../openfhe-gpu-public"
+CMAKE_CUDA_ARCHITECTURES = "80;86;89;90;120"
+
+# ==============================================================================
+# cibuildwheel Configuration (GPU)
+# ==============================================================================
+
+[tool.cibuildwheel]
+build = "cp311-manylinux_x86_64"
+skip = "*-musllinux*"
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "ghcr.io/devuuung/cukks/manylinux-cuda128:latest"
+
+before-all = """
+set -ex
+cd /project/openfhe-gpu-public
+mkdir -p build && cd build
+cmake .. \
+    -DWITH_CUDA=ON \
+    -DWITH_OPENMP=ON \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr/local \
+    -DBUILD_SHARED=ON \
+    -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120"
+make -j$(nproc)
+make install
+ldconfig
+"""
+
+environment = { OPENFHE_GPU_ROOT = "/project/openfhe-gpu-public", OPENFHE_GPU_BUILD_DIR = "/project/openfhe-gpu-public/build", CUDA_HOME = "/usr/local/cuda-12.8" }
+
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"

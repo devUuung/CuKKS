@@ -1,7 +1,9 @@
 #include <openfhe.h>
 #include "scheme/ckksrns/ckksrns-cryptoparameters.h"
 #include "scheme/ckksrns/ckksrns-fhe.h"
+#if CUKKS_ENABLE_GPU
 #include "gpu/Utils.h"
+#endif
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <limits>
@@ -20,10 +22,12 @@ struct ContextHandle {
     std::vector<uint32_t> level_budget;
     bool bootstrap_enabled;
     
+#if CUKKS_ENABLE_GPU
     // GPU bootstrap support
     std::unique_ptr<ckks::Context> gpu_context;
     std::unique_ptr<ckks::EvaluationKey> gpu_evk;
     std::unique_ptr<std::map<uint32_t, ckks::EvaluationKey>> gpu_rot_keys;
+#endif
 };
 
 struct KeySetHandle {

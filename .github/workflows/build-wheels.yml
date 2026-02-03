@@ -1,0 +1,176 @@
+name: Build Wheels
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build-docker:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      image-tag: ghcr.io/${{ github.repository }}/manylinux-cuda128:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push CUDA image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/manylinux-cuda128.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/manylinux-cuda128:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/manylinux-cuda128:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build CPU wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: cukks
+        env:
+          CIBW_BUILD: cp311-manylinux_x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            yum install -y cmake3 openssl-devel ninja-build autoconf automake libtool
+            ln -sf /usr/bin/cmake3 /usr/bin/cmake || true
+            cd /project/openfhe-gpu-public
+            mkdir -p build-cpu && cd build-cpu
+            cmake .. \
+                -DWITH_CUDA=OFF \
+                -DWITH_OPENMP=ON \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DBUILD_SHARED=ON
+            make -j$(nproc)
+            make install
+            ldconfig
+          CIBW_ENVIRONMENT_LINUX: >
+            OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
+            OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build-cpu
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-cpu
+          path: wheelhouse/*.whl
+
+  build-gpu:
+    needs: build-docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build GPU wheels
+        uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: cukks-cu128
+        env:
+          CIBW_BUILD: cp311-manylinux_x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ needs.build-docker.outputs.image-tag }}
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            cd /project/openfhe-gpu-public
+            mkdir -p build && cd build
+            cmake .. \
+                -DWITH_CUDA=ON \
+                -DWITH_OPENMP=ON \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DBUILD_SHARED=ON \
+                -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120"
+            make -j$(nproc)
+            make install
+            ldconfig
+          CIBW_ENVIRONMENT_LINUX: >
+            OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
+            OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
+            CUDA_HOME=/usr/local/cuda-12.8
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel}
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-gpu
+          path: wheelhouse/*.whl
+
+  test-cpu:
+    needs: build-cpu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-cpu
+          path: wheelhouse
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Test CPU wheel
+        run: |
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*.whl
+          python -c "from ckks import CKKSContext, CKKSConfig; print('CPU import OK')"
+
+  test-gpu:
+    needs: build-gpu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-gpu
+          path: wheelhouse
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      
+      - name: Test GPU wheel (import only, no GPU required)
+        run: |
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*.whl
+          python -c "from ckks import CKKSContext, CKKSConfig; print('GPU import OK')"
+
+  publish:
+    if: github.event_name == 'release'
+    needs: [test-cpu, test-gpu]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
