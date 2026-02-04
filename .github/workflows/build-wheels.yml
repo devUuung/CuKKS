@@ -13,8 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+    strategy:
+      matrix:
+        cuda_version: ["118", "121", "124"]
     outputs:
-      image-tag: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:${{ github.sha }}
+      image-tag-118: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda118:${{ github.sha }}
+      image-tag-121: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda121:${{ github.sha }}
+      image-tag-124: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda124:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       
@@ -32,47 +37,67 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Build and push CUDA image
+      - name: Build and push CUDA ${{ matrix.cuda_version }} image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/manylinux-cuda128.Dockerfile
+          file: docker/manylinux-cuda${{ matrix.cuda_version }}.Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:${{ github.sha }}
-            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
+          cache-from: type=gha,scope=cuda${{ matrix.cuda_version }}
+          cache-to: type=gha,mode=max,scope=cuda${{ matrix.cuda_version }}
 
   build-gpu:
     needs: build-docker
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cuda_version: "118"
+            cuda_path: "11.8"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu118"
+          - cuda_version: "121"
+            cuda_path: "12.1"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu121"
+          - cuda_version: "124"
+            cuda_path: "12.4"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu124"
     steps:
       - uses: actions/checkout@v4
       
-      - name: Build GPU wheels
+      - name: Get lowercase repo name
+        id: repo
+        run: echo "lowercase=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+      
+      - name: Build GPU wheels (CUDA ${{ matrix.cuda_version }})
         uses: pypa/cibuildwheel@v2.21.3
         with:
-          package-dir: cukks-cu128
+          package-dir: ${{ matrix.package_dir }}
         env:
           CIBW_BUILD: cp311-manylinux_x86_64
-          CIBW_MANYLINUX_X86_64_IMAGE: ${{ needs.build-docker.outputs.image-tag }}
+          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
             cd /project/openfhe-gpu-public
             mkdir -p build && cd build
             cmake .. \
+                -DWITH_CUDA=ON \
                 -DWITH_OPENMP=ON \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr/local \
                 -DBUILD_SHARED=ON \
                 -DBUILD_EXAMPLES=OFF \
                 -DBUILD_UNITTESTS=OFF \
-                -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120" \
+                -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.cuda_arch }}" \
                 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
                 -DOPENFHE_SKIP_EXPORT=ON
             make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
-            # Manual install - avoid 'make install' which tries to build benchmarks
             mkdir -p /usr/local/lib /usr/local/include/openfhe
             cp -a lib/*.so* /usr/local/lib/
             cp -a ../src/core/include/* /usr/local/include/
@@ -83,21 +108,24 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >
             OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
             OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
-            CUDA_HOME=/usr/local/cuda-12.8
+            CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_path }}
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1
       
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-gpu
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
           path: wheelhouse/*.whl
 
   test-gpu:
     needs: build-gpu
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cuda_version: ["118", "121", "124"]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: wheels-gpu
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
           path: wheelhouse
       
       - name: Set up Python
@@ -105,25 +133,23 @@ jobs:
         with:
           python-version: "3.11"
       
-      - name: Test GPU wheel structure (no GPU available)
+      - name: Test GPU wheel structure (CUDA ${{ matrix.cuda_version }})
         run: |
           set -ex
           python -m venv test-env
           source test-env/bin/activate
           pip install wheelhouse/*.whl
           
-          # Verify package structure (import will fail without CUDA drivers)
           SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "Checking installed package at: $SITE_PACKAGES/ckks"
           
-          # Check that required files exist
           test -f "$SITE_PACKAGES/ckks/__init__.py"
           test -f "$SITE_PACKAGES/ckks/torch_api.py"
           test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
           test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_backend.cpython-311-x86_64-linux-gnu.so"
           test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_gpu_backend.cpython-311-x86_64-linux-gnu.so"
           
-          echo "All required files present!"
+          echo "All required files present for CUDA ${{ matrix.cuda_version }}!"
           echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
 
   publish:
@@ -135,8 +161,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: wheels-gpu
+          pattern: wheels-gpu-*
           path: dist
+          merge-multiple: true
       
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
