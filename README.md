@@ -93,6 +93,7 @@ pip install cukks
 pip install cukks-cu118  # CUDA 11.8
 pip install cukks-cu121  # CUDA 12.1
 pip install cukks-cu124  # CUDA 12.4
+pip install cukks-cu128  # CUDA 12.8 (RTX 50xx support)
 ```
 
 ### CUDA Version Compatibility
@@ -102,18 +103,20 @@ pip install cukks-cu124  # CUDA 12.4
 | `cukks-cu118` | 11.8 | 2.0-2.2 | `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime`<br>`nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
 | `cukks-cu121` | 12.1 | 2.1-2.3 | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime`<br>`nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04` |
 | `cukks-cu124` | 12.4 | 2.4+ | `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`<br>`nvidia/cuda:12.4.0-cudnn9-runtime-ubuntu22.04` |
+| `cukks-cu128` | 12.8 | 2.6+ | `nvidia/cuda:12.8.0-cudnn9-runtime-ubuntu22.04` |
 | `cukks` | - | 2.0+ | Any (CPU only) |
 
 #### Supported GPUs (SM Architectures)
 
-| Architecture | GPUs | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 |
-|--------------|------|-----------|-----------|-----------|
-| sm_70 | V100 | ✅ | ✅ | ✅ |
-| sm_75 | T4, RTX 20xx | ✅ | ✅ | ✅ |
-| sm_80 | A100, A30 | ✅ | ✅ | ✅ |
-| sm_86 | RTX 30xx, A40 | ✅ | ✅ | ✅ |
-| sm_89 | RTX 40xx, L40 | ✅ | ✅ | ✅ |
-| sm_90 | H100 | ✅ | ✅ | ✅ |
+| Architecture | GPUs | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 | CUDA 12.8 |
+|--------------|------|-----------|-----------|-----------|-----------|
+| sm_70 | V100 | ✅ | ✅ | ✅ | ✅ |
+| sm_75 | T4, RTX 20xx | ✅ | ✅ | ✅ | ✅ |
+| sm_80 | A100, A30 | ✅ | ✅ | ✅ | ✅ |
+| sm_86 | RTX 30xx, A40 | ✅ | ✅ | ✅ | ✅ |
+| sm_89 | RTX 40xx, L40 | ✅ | ✅ | ✅ | ✅ |
+| sm_90 | H100 | ✅ | ✅ | ✅ | ✅ |
+| sm_120 | **RTX 50xx** | ❌ | ❌ | ❌ | ✅ |
 
 #### Docker Usage Examples
 

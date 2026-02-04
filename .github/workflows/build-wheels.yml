@@ -15,11 +15,12 @@ jobs:
       packages: write
     strategy:
       matrix:
-        cuda_version: ["118", "121", "124"]
+        cuda_version: ["118", "121", "124", "128"]
     outputs:
       image-tag-118: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda118:${{ github.sha }}
       image-tag-121: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda121:${{ github.sha }}
       image-tag-124: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda124:${{ github.sha }}
+      image-tag-128: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda128:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       
@@ -68,6 +69,10 @@ jobs:
             cuda_path: "12.4"
             cuda_arch: "70;75;80;86;89;90"
             package_dir: "cukks-cu124"
+          - cuda_version: "128"
+            cuda_path: "12.8"
+            cuda_arch: "70;75;80;86;89;90;120"
+            package_dir: "cukks-cu128"
     steps:
       - uses: actions/checkout@v4
       
@@ -121,7 +126,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        cuda_version: ["118", "121", "124"]
+        cuda_version: ["118", "121", "124", "128"]
     steps:
       - uses: actions/download-artifact@v4
         with:
