@@ -3,199 +3,133 @@
   <a href="README.ko.md">한국어</a>
 </p>
 
-# CuKKS
+<h1 align="center">CuKKS</h1>
 
-**PyTorch-compatible encrypted deep learning inference using CKKS homomorphic encryption with GPU acceleration.**
+<p align="center">
+  <strong>GPU-accelerated CKKS Homomorphic Encryption for PyTorch</strong>
+</p>
 
-CuKKS enables you to run trained PyTorch models on encrypted data, preserving privacy while maintaining model accuracy. Built on top of OpenFHE with CUDA acceleration.
+<p align="center">
+  <a href="https://github.com/devUuung/CuKKS/actions"><img src="https://github.com/devUuung/CuKKS/actions/workflows/build-wheels.yml/badge.svg" alt="Build Status"></a>
+  <a href="https://github.com/devUuung/CuKKS/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11-blue.svg" alt="Python 3.11"></a>
+</p>
 
-## Features
+<p align="center">
+  Run trained PyTorch models on <strong>encrypted data</strong> — preserving privacy while maintaining accuracy.<br>
+  Built on OpenFHE with CUDA acceleration.
+</p>
 
-- **PyTorch-like API**: Familiar interface for deep learning practitioners
-- **Automatic Model Conversion**: Convert trained PyTorch models with one function call
-- **GPU Acceleration**: CUDA-accelerated CKKS operations via OpenFHE
-- **Polynomial Activations**: Pre-computed approximations for ReLU, GELU, SiLU, etc.
-- **BatchNorm Folding**: Automatic optimization for efficient inference
-- **Batch Processing**: Pack multiple samples into a single ciphertext for SIMD parallelism
-- **Flexible Configuration**: Easy parameter tuning for different security/performance tradeoffs
+---
 
 ## Quick Start
-
-### MLP Example
 
 ```python
 import torch.nn as nn
 import ckks_torch
 
-# 1. Train your model normally in PyTorch
-model = nn.Sequential(
-    nn.Linear(784, 128),
-    nn.ReLU(),
-    nn.Linear(128, 10)
-)
-train(model, data)
+# 1. Define and train your model (standard PyTorch)
+model = nn.Sequential(nn.Linear(784, 128), nn.ReLU(), nn.Linear(128, 10))
 
 # 2. Convert to encrypted model
 enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
 
-# 3. Encrypt input and run inference
+# 3. Run encrypted inference
 enc_input = ctx.encrypt(test_input)
 enc_output = enc_model(enc_input)
-
-# 4. Decrypt output
 output = ctx.decrypt(enc_output)
 ```
 
-### CNN Example
-
-```python
-import torch.nn as nn
-import ckks_torch
-
-# Define CNN with all operations as layer attributes
-class MNISTCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()           # Will be replaced with x^2
-        self.pool1 = nn.AvgPool2d(2)
-        self.flatten = nn.Flatten()     # Must be a layer attribute
-        self.fc = nn.Linear(8 * 14 * 14, 10)
-    
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.act1(x)
-        x = self.pool1(x)
-        x = self.flatten(x)
-        x = self.fc(x)
-        return x
-
-model = MNISTCNN()
-model.eval()
-
-# Convert to encrypted model
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
-
-# Encrypt and run inference
-enc_input = ctx.encrypt(image)  # shape: (1, 1, 28, 28)
-enc_output = enc_model(enc_input)
-prediction = ctx.decrypt(enc_output).argmax()
-```
-
-> **Important**: All operations in `forward()` must be layer attributes (e.g., `self.act1`, `self.flatten`), not inline operations like `x ** 2` or `x.flatten(1)`.
-
 ## Installation
 
-### Quick Install (Recommended)
-
-Install pre-built wheels from PyPI:
-
 ```bash
-# CPU only
-pip install cukks
-
-# GPU (choose your CUDA version)
-pip install cukks-cu118  # CUDA 11.8
-pip install cukks-cu121  # CUDA 12.1
-pip install cukks-cu124  # CUDA 12.4
-pip install cukks-cu128  # CUDA 12.8 (RTX 50xx support)
+pip install cukks-cu121  # For CUDA 12.1 (most common)
 ```
 
-### CUDA Version Compatibility
+<details>
+<summary><strong>Other CUDA versions</strong></summary>
 
-| Package | CUDA | PyTorch | Compatible Docker Images |
-|---------|------|---------|-------------------------|
-| `cukks-cu118` | 11.8 | 2.0-2.2 | `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime`<br>`nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
-| `cukks-cu121` | 12.1 | 2.1-2.3 | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime`<br>`nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04` |
-| `cukks-cu124` | 12.4 | 2.4+ | `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`<br>`nvidia/cuda:12.4.0-cudnn9-runtime-ubuntu22.04` |
-| `cukks-cu128` | 12.8 | 2.6+ | `nvidia/cuda:12.8.0-cudnn9-runtime-ubuntu22.04` |
-| `cukks` | - | 2.0+ | Any (CPU only) |
-
-#### Supported GPUs (SM Architectures)
-
-| Architecture | GPUs | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 | CUDA 12.8 |
-|--------------|------|-----------|-----------|-----------|-----------|
-| sm_70 | V100 | ✅ | ✅ | ✅ | ✅ |
-| sm_75 | T4, RTX 20xx | ✅ | ✅ | ✅ | ✅ |
-| sm_80 | A100, A30 | ✅ | ✅ | ✅ | ✅ |
-| sm_86 | RTX 30xx, A40 | ✅ | ✅ | ✅ | ✅ |
-| sm_89 | RTX 40xx, L40 | ✅ | ✅ | ✅ | ✅ |
-| sm_90 | H100 | ✅ | ✅ | ✅ | ✅ |
-| sm_120 | **RTX 50xx** | ❌ | ❌ | ❌ | ✅ |
-
-#### Docker Usage Examples
+| Package | CUDA | Supported GPUs |
+|---------|------|----------------|
+| `cukks-cu118` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `cukks-cu121` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `cukks-cu124` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `cukks-cu128` | 12.8 | All above + **RTX 50xx** |
+| `cukks` | - | CPU only |
 
 ```bash
-# PyTorch official image (CUDA 12.1)
+pip install cukks-cu118  # CUDA 11.8
+pip install cukks-cu124  # CUDA 12.4
+pip install cukks-cu128  # CUDA 12.8 (RTX 50xx)
+pip install cukks        # CPU only
+```
+
+</details>
+
+<details>
+<summary><strong>Docker images</strong></summary>
+
+| CUDA | Compatible Docker Images |
+|------|-------------------------|
+| 11.8 | `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime` |
+| 12.1 | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` |
+| 12.4 | `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime` |
+| 12.8 | `nvidia/cuda:12.8.0-cudnn9-runtime-ubuntu22.04` |
+
+```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
 pip install cukks-cu121
-
-# NVIDIA CUDA image (CUDA 11.8)
-docker run --gpus all -it nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 bash
-apt update && apt install -y python3-pip
-pip install cukks-cu118 torch --index-url https://download.pytorch.org/whl/cu118
 ```
 
-### Build from Source
+</details>
 
-#### Requirements
-
-- Python 3.11
-- PyTorch 2.0+
-- CUDA Toolkit (matching your cukks-cuXXX version)
-- CMake 3.18+
-- GCC 9+ or Clang 10+
-
-#### Step 1: Install Python Package (High-Level API)
+<details>
+<summary><strong>Build from source</strong></summary>
 
 ```bash
-git clone https://github.com/devUuung/CuKKS.git
-cd CuKKS
+git clone https://github.com/devUuung/CuKKS.git && cd CuKKS
 pip install -e .
-```
 
-### Step 2: Build OpenFHE Backend (Required for Encryption)
+# Build OpenFHE backend
+cd openfhe-gpu-public && mkdir build && cd build
+cmake .. -DWITH_CUDA=ON && make -j$(nproc)
 
-The OpenFHE GPU source is vendored under `openfhe-gpu-public/`. Build it locally:
-
-```bash
-# Build OpenFHE with GPU support
-cd openfhe-gpu-public
-mkdir build && cd build
-cmake .. -DWITH_CUDA=ON
-make -j$(nproc)
-
-# Build Python bindings
 cd ../../bindings/openfhe_backend
-export LD_LIBRARY_PATH="$PWD/../../openfhe-gpu-public/build/lib:$LD_LIBRARY_PATH"
 pip install -e .
 ```
 
-### Verify Installation
+</details>
 
-```python
-import ckks_torch
+## Features
 
-# Check if backend is available
-print(ckks_torch.is_available())  # True if OpenFHE backend is installed
-print(ckks_torch.get_backend_info())
-```
-
-## Documentation
-
-- **[API Reference](docs/api.md)**: Complete API documentation
-- **[GPU Acceleration](docs/gpu-acceleration.md)**: GPU setup and performance tuning
-- **[CKKS Concepts](docs/concepts.md)**: Understanding homomorphic encryption
-- **[Examples](docs/examples/)**: Working code examples
+| Feature | Description |
+|---------|-------------|
+| **PyTorch API** | Familiar interface — just call `ckks_torch.convert(model)` |
+| **GPU Acceleration** | CUDA-accelerated HE operations via OpenFHE |
+| **Auto Optimization** | BatchNorm folding, BSGS matrix multiplication |
+| **Wide Layer Support** | Linear, Conv2d, ReLU/GELU/SiLU, Pool, LayerNorm, Attention |
 
 ## Supported Layers
+
+| Layer | Encrypted Version | Notes |
+|-------|------------------|-------|
+| `nn.Linear` | `EncryptedLinear` | BSGS optimization |
+| `nn.Conv2d` | `EncryptedConv2d` | im2col method |
+| `nn.ReLU/GELU/SiLU` | Polynomial approx | Or use `x²` for exact |
+| `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
+| `nn.BatchNorm` | Folded | Merged into prev layer |
+| `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial approx |
+| `nn.Attention` | `EncryptedApproxAttention` | seq_len=1 |
+
+<details>
+<summary><strong>Full layer support table</strong></summary>
 
 | PyTorch Layer | Encrypted Version | Notes |
 |--------------|-------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | Full support with BSGS optimization |
-| `nn.Linear` | `EncryptedTTLinear` | TT-decomposed for large layers (memory efficient) |
+| `nn.Linear` | `EncryptedTTLinear` | TT-decomposed for large layers |
 | `nn.Conv2d` | `EncryptedConv2d` | Via im2col method |
-| `nn.Conv2d` | `EncryptedTTConv2d` | TT-decomposed for large kernels (memory efficient) |
+| `nn.Conv2d` | `EncryptedTTConv2d` | TT-decomposed for large kernels |
 | `nn.ReLU` | `EncryptedReLU` | Polynomial approximation |
 | `nn.GELU` | `EncryptedGELU` | Polynomial approximation |
 | `nn.SiLU` | `EncryptedSiLU` | Polynomial approximation |
@@ -208,286 +142,123 @@ print(ckks_torch.get_backend_info())
 | `nn.Sequential` | `EncryptedSequential` | Full support |
 | `nn.Dropout` | `EncryptedDropout` | No-op during inference |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Pure HE polynomial approximation |
-| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Polynomial softmax approximation (seq_len=1) |
+| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Polynomial softmax (seq_len=1) |
+
+</details>
 
 ## Activation Functions
 
-CKKS only supports polynomial operations, so non-linear activations must be approximated:
-
-### Option 1: Square Activation (Recommended for Maximum Accuracy)
+CKKS only supports polynomial operations. Choose one:
 
 ```python
-# Use x^2 activation - exact in CKKS, no approximation error
+# Option 1: Square activation (recommended - exact, no error)
 enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
-```
 
-### Option 2: Polynomial Approximation
-
-```python
-# Use Chebyshev polynomial approximation of ReLU
-enc_model, ctx = ckks_torch.convert(
-    model,
-    use_square_activation=False,
-    activation_degree=4  # Higher = more accurate but deeper circuit
-)
-```
-
-## Configuration
-
-### Inference Context
-
-```python
-from ckks_torch import CKKSInferenceContext, InferenceConfig
-
-# Auto-configure based on model
-ctx = CKKSInferenceContext.for_model(model)
-
-# Or manually configure
-config = InferenceConfig(
-    poly_mod_degree=16384,      # Ring dimension (power of 2)
-    scale_bits=40,              # Precision bits
-    security_level="128_classic",
-    mult_depth=6,               # Multiplicative depth
-    enable_bootstrap=False,     # For very deep networks
-)
-ctx = CKKSInferenceContext(config)
-```
-
-### Conversion Options
-
-```python
-from ckks_torch.converter import ModelConverter, ConversionOptions
-
-options = ConversionOptions(
-    fold_batchnorm=True,        # Fold BN into preceding layers
-    activation_degree=4,        # Polynomial degree for activations
-    use_square_activation=False # Use x^2 instead of approximations
-)
-
-converter = ModelConverter(options)
-enc_model = converter.convert(model)
-```
-
-## Examples
-
-### Run the Demo
-
-```bash
-# Model conversion demo (no GPU required)
-python -m ckks_torch.examples.encrypted_inference --demo conversion
-
-# Full encrypted inference (requires CKKS backend)
-python -m ckks_torch.examples.encrypted_inference --demo inference
-```
-
-### MNIST Encrypted Inference
-
-```bash
-# Run MNIST example with synthetic data
-python examples/mnist_encrypted.py --hidden 64 --samples 5
-
-# Use real MNIST dataset
-python examples/mnist_encrypted.py --use-mnist --samples 10
-```
-
-See [docs/examples/mnist.py](docs/examples/mnist.py) for a simplified example.
-
-### Custom Polynomial Activations
-
-```python
-from ckks_torch.utils.approximations import chebyshev_coefficients
-
-# Compute custom ReLU approximation
-def relu(x):
-    return torch.maximum(x, torch.zeros_like(x))
-
-coeffs = chebyshev_coefficients(relu, degree=7, domain=(-1, 1))
-
-# Use in model
-from ckks_torch.nn import EncryptedPolynomial
-custom_activation = EncryptedPolynomial(coeffs)
-```
-
-### Batch Processing
-
-```python
-# Pack multiple samples into a single ciphertext
-samples = [torch.randn(784) for _ in range(8)]
-enc_batch = ctx.encrypt_batch(samples)
-
-# Run inference on all 8 samples at once
-enc_output = enc_model(enc_batch)
-
-# Decrypt individual results
-outputs = ctx.decrypt_batch(enc_output, num_samples=8)
-```
-
-## Architecture
-
-```
-ckks_torch/
-├── __init__.py          # Main exports
-├── context.py           # CKKSInferenceContext
-├── tensor.py            # EncryptedTensor
-├── converter.py         # PyTorch → Encrypted conversion
-├── batching/            # Batch processing utilities
-│   └── packing.py       # SlotPacker for SIMD batching
-├── nn/                  # Encrypted neural network layers
-│   ├── module.py        # Base class
-│   ├── linear.py        # EncryptedLinear
-│   ├── conv.py          # EncryptedConv2d (groups, dilation supported)
-│   ├── activations.py   # Polynomial activations
-│   ├── pooling.py       # EncryptedAvgPool2d, EncryptedMaxPool2d
-│   ├── batchnorm.py     # BatchNorm (for folding)
-│   ├── layernorm.py     # EncryptedLayerNorm
-│   ├── dropout.py       # EncryptedDropout
-│   ├── residual.py      # EncryptedResidualBlock
-│   └── attention.py     # EncryptedApproxAttention
-└── utils/
-    └── approximations.py # Polynomial fitting utilities
+# Option 2: Polynomial approximation (closer to original ReLU/GELU)
+enc_model, ctx = ckks_torch.convert(model, use_square_activation=False, activation_degree=4)
 ```
 
 ## GPU Acceleration
 
-CuKKS supports GPU acceleration for homomorphic encryption operations:
-
-### Enabling GPU
+| Operation | Accelerated |
+|-----------|-------------|
+| Add/Sub/Mul/Square | ✅ GPU |
+| Rotate/Rescale | ✅ GPU |
+| Bootstrap | ✅ GPU |
+| Encrypt/Decrypt | CPU |
 
 ```python
 from ckks.torch_api import CKKSContext, CKKSConfig
 
-config = CKKSConfig(
-    poly_mod_degree=8192,
-    scale_bits=40,
-    rotations=list(range(-16, 17)),
-    coeff_mod_bits=[60, 40, 40, 40, 40, 60],
-)
-
-# GPU enabled by default
-ctx = CKKSContext(config, enable_gpu=True)
-print(f"GPU enabled: {ctx.gpu_enabled}")
-
-# Disable GPU
-ctx = CKKSContext(config, enable_gpu=False)
+config = CKKSConfig(poly_mod_degree=8192, scale_bits=40)
+ctx = CKKSContext(config, enable_gpu=True)  # GPU enabled by default
 ```
 
-### GPU-Accelerated Operations
+## Examples
 
-| Operation | Acceleration |
-|-----------|-------------|
-| Add/Sub | GPU |
-| Mul/Square | GPU |
-| Rotate | GPU |
-| Rescale | GPU |
-| Bootstrap | GPU |
-| Encrypt/Decrypt | CPU |
-| BSGS MatMul | CPU (auto GPU reload) |
+```bash
+# Quick demo (no GPU required)
+python -m ckks_torch.examples.encrypted_inference --demo conversion
 
-### Lazy Synchronization
+# MNIST encrypted inference
+python examples/mnist_encrypted.py --hidden 64 --samples 5
+```
 
-GPU results are synced to CPU only when needed (e.g., for decryption), providing ~2x efficiency improvement for chained operations:
+<details>
+<summary><strong>CNN example</strong></summary>
 
 ```python
-# Efficient: chain operations, decrypt once
-enc_result = enc_x.add(enc_x).add(enc_x).add(enc_x)
-result = ctx.decrypt(enc_result)  # Sync happens here
+import torch.nn as nn
+import ckks_torch
+
+class MNISTCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
+        self.act1 = nn.ReLU()
+        self.pool1 = nn.AvgPool2d(2)
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(8 * 14 * 14, 10)
+    
+    def forward(self, x):
+        return self.fc(self.flatten(self.pool1(self.act1(self.conv1(x)))))
+
+model = MNISTCNN()
+enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+
+enc_input = ctx.encrypt(image)
+prediction = ctx.decrypt(enc_model(enc_input)).argmax()
 ```
 
-See [GPU Acceleration Guide](docs/gpu-acceleration.md) for detailed documentation.
+> **Note**: All operations in `forward()` must be layer attributes (e.g., `self.act1`), not inline operations like `x ** 2`.
+
+</details>
+
+<details>
+<summary><strong>Batch processing</strong></summary>
+
+```python
+# Pack multiple samples into a single ciphertext (SIMD)
+samples = [torch.randn(784) for _ in range(8)]
+enc_batch = ctx.encrypt_batch(samples)
+enc_output = enc_model(enc_batch)
+outputs = ctx.decrypt_batch(enc_output, num_samples=8)
+```
+
+</details>
 
 ## Performance Tips
 
-1. **Use square activation** when possible - it's exact in CKKS
-2. **Minimize multiplicative depth** - each mult consumes precision
-3. **Fold BatchNorm** before conversion (done automatically)
-4. **Choose appropriate ring dimension** - larger = more slots but slower
-5. **Use batch processing** - pack multiple samples for SIMD parallelism
-6. **Consider bootstrapping** for very deep networks (>10 layers)
-7. **Use BSGS optimization** for matrix-vector products (enabled by default)
-
-### CNN-Specific Optimizations
-
-CuKKS includes several CNN-specific optimizations that are automatically applied:
-
-#### Flatten Absorption
-The permutation operation in `Flatten` is absorbed into the following `Linear` layer's weights, eliminating a costly matmul operation at runtime.
-
-```python
-# Automatic optimization when converting CNN models
-enc_model, ctx = ckks_torch.convert(cnn_model, optimize_cnn=True)
-```
-
-#### Pool Rotation Optimization
-For 2x2 average pooling, rotation-based summation is used instead of sparse matrix multiplication, reducing the number of HE operations.
-
-#### Lazy Rescale
-Rescale operations are deferred until needed (e.g., before the next multiplication), reducing unnecessary rescale calls and preserving precision levels.
-
-### CNN Performance Benchmarks
-
-Tested on 8×8 downsampled MNIST with Conv(8ch) → Square → AvgPool(2) → FC(10):
-
-| Optimization | Time | Improvement |
-|--------------|------|-------------|
-| Baseline | 3.12s | - |
-| + Flatten Absorption | 2.81s | 10% |
-| + Pool Rotation + Lazy Rescale | 2.74s | **12%** |
-
-### True HE CNN Inference
-
-CuKKS implements *true* homomorphic CNN inference where all operations run on encrypted data without decryption:
-
-```python
-# Manual HE CNN pipeline (for advanced users)
-ctx = ckks_torch.CKKSInferenceContext(max_rotation_dim=576, use_bsgs=True)
-
-# Pre-apply im2col before encryption
-conv_params = [{'kernel_size': (3,3), 'stride': (1,1), 'padding': (1,1), 'out_channels': 8}]
-enc_x = ctx.encrypt_cnn_input(image, conv_params)
-
-# All operations run on encrypted data
-enc_out = EncryptedConv2d.from_torch(conv)(enc_x)   # HE matmul
-enc_out = EncryptedSquare()(enc_out)                 # HE square
-enc_out = EncryptedAvgPool2d.from_torch(pool)(enc_out)  # HE rotation-based pool
-enc_out = EncryptedFlatten(absorb_permutation=True)(enc_out)  # No-op
-enc_out = EncryptedLinear.from_torch_cnn(fc, cnn_layout)(enc_out)  # HE matmul with permuted weights
-
-result = ctx.decrypt(enc_out)
-```
+1. **Use `use_square_activation=True`** — exact in CKKS, no approximation error
+2. **Minimize network depth** — each multiplication consumes precision
+3. **Use batch processing** — pack multiple samples for SIMD parallelism
+4. **Choose appropriate `poly_mod_degree`** — larger = more slots but slower
 
 ## Limitations
 
-- **Inference only**: No encrypted training support
-- **Approximate activations**: ReLU/GELU are polynomial approximations
-- **Fixed precision**: Accumulated errors grow with network depth
-- **Memory intensive**: CKKS operations require significant GPU memory
+- **Inference only** — no encrypted training
+- **Approximate activations** — ReLU/GELU are polynomial approximations
+- **Memory intensive** — CKKS requires significant GPU memory
 
 ## Troubleshooting
 
-### Common Issues
+| Issue | Solution |
+|-------|----------|
+| Out of Memory | Reduce `poly_mod_degree` (8192 instead of 16384) |
+| Low Accuracy | Use `use_square_activation=True` or increase `activation_degree` |
+| Slow Performance | Enable batch processing, reduce network depth |
 
-**Out of Memory (OOM)**:
-- Reduce `poly_mod_degree` (e.g., 8192 instead of 16384)
-- Reduce `mult_depth` if possible
-- Use fewer rotation keys
+## Documentation
 
-**Low Accuracy**:
-- Increase `activation_degree` for better approximations
-- Consider using `use_square_activation=True`
-- Normalize inputs to [-1, 1] range
-
-**Slow Performance**:
-- Enable BSGS optimization (default)
-- Use batch processing for multiple samples
-- Reduce network depth if possible
+- [API Reference](docs/api.md)
+- [GPU Acceleration Guide](docs/gpu-acceleration.md)
+- [CKKS Concepts](docs/concepts.md)
 
 ## License
 
 Apache License 2.0
 
 ## Citation
-
-If you use CuKKS in your research, please cite:
 
 ```bibtex
 @software{cukks,
@@ -497,8 +268,8 @@ If you use CuKKS in your research, please cite:
 }
 ```
 
-## Related Resources
+## Related
 
-- [OpenFHE](https://github.com/openfheorg/openfhe-development): The underlying HE library
-- [CKKS Paper](https://eprint.iacr.org/2016/421): Original CKKS scheme
-- [Microsoft SEAL](https://github.com/microsoft/SEAL): Alternative HE library
+- [OpenFHE](https://github.com/openfheorg/openfhe-development) — Underlying HE library
+- [CKKS Paper](https://eprint.iacr.org/2016/421) — Original CKKS scheme
+- [Microsoft SEAL](https://github.com/microsoft/SEAL) — Alternative HE library
