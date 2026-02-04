@@ -242,6 +242,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 - **슬롯 수** = 암호문당 최대 요소 수 (SIMD 배치 크기)
 - **곱셈 깊이** = 부트스트래핑 없이 연속 곱셈 가능 횟수
 - 값이 클수록 메모리 사용량도 증가
+- **보안 레벨은 별도 설정** — `security_level` 파라미터로 지정 (기본값: 128비트)
 
 ## 제한사항
 
