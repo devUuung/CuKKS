@@ -53,8 +53,12 @@ vgcore.*
 # Data files (large binary datasets)
 data/
 
-# Sisyphus internal (optional - remove if you want to track plans)
-# .sisyphus/
+# Dotfiles (except .github, .gitignore)
+.*
+!.github/
+!.gitignore
+
+CHANGELOG.md
 
 # OS
 .DS_Store
