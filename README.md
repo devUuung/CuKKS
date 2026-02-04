@@ -81,15 +81,64 @@ prediction = ctx.decrypt(enc_output).argmax()
 
 ## Installation
 
-### Requirements
+### Quick Install (Recommended)
 
-- Python 3.8+
+Install pre-built wheels from PyPI:
+
+```bash
+# CPU only
+pip install cukks
+
+# GPU (choose your CUDA version)
+pip install cukks-cu118  # CUDA 11.8
+pip install cukks-cu121  # CUDA 12.1
+pip install cukks-cu124  # CUDA 12.4
+```
+
+### CUDA Version Compatibility
+
+| Package | CUDA | PyTorch | Compatible Docker Images |
+|---------|------|---------|-------------------------|
+| `cukks-cu118` | 11.8 | 2.0-2.2 | `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime`<br>`nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04` |
+| `cukks-cu121` | 12.1 | 2.1-2.3 | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime`<br>`nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04` |
+| `cukks-cu124` | 12.4 | 2.4+ | `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`<br>`nvidia/cuda:12.4.0-cudnn9-runtime-ubuntu22.04` |
+| `cukks` | - | 2.0+ | Any (CPU only) |
+
+#### Supported GPUs (SM Architectures)
+
+| Architecture | GPUs | CUDA 11.8 | CUDA 12.1 | CUDA 12.4 |
+|--------------|------|-----------|-----------|-----------|
+| sm_70 | V100 | ✅ | ✅ | ✅ |
+| sm_75 | T4, RTX 20xx | ✅ | ✅ | ✅ |
+| sm_80 | A100, A30 | ✅ | ✅ | ✅ |
+| sm_86 | RTX 30xx, A40 | ✅ | ✅ | ✅ |
+| sm_89 | RTX 40xx, L40 | ✅ | ✅ | ✅ |
+| sm_90 | H100 | ✅ | ✅ | ✅ |
+
+#### Docker Usage Examples
+
+```bash
+# PyTorch official image (CUDA 12.1)
+docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
+pip install cukks-cu121
+
+# NVIDIA CUDA image (CUDA 11.8)
+docker run --gpus all -it nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04 bash
+apt update && apt install -y python3-pip
+pip install cukks-cu118 torch --index-url https://download.pytorch.org/whl/cu118
+```
+
+### Build from Source
+
+#### Requirements
+
+- Python 3.11
 - PyTorch 2.0+
-- CUDA 11.0+ (for GPU acceleration)
-- CMake 3.16+ (for building OpenFHE backend)
+- CUDA Toolkit (matching your cukks-cuXXX version)
+- CMake 3.18+
 - GCC 9+ or Clang 10+
 
-### Step 1: Install Python Package (High-Level API)
+#### Step 1: Install Python Package (High-Level API)
 
 ```bash
 git clone https://github.com/devUuung/CuKKS.git
