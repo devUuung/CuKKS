@@ -236,9 +236,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## Limitations
 
-- **Inference only** — no encrypted training
 - **Approximate activations** — ReLU/GELU are polynomial approximations
-- **Memory intensive** — CKKS requires significant GPU memory
 
 ## Troubleshooting
 

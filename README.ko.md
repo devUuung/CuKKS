@@ -236,9 +236,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## 제한사항
 
-- **추론 전용** — 암호화된 학습 미지원
 - **근사 활성화** — ReLU/GELU는 다항식 근사
-- **메모리 집약적** — CKKS는 상당한 GPU 메모리 필요
 
 ## 문제 해결
 
