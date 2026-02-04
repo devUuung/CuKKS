@@ -227,25 +227,6 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 </details>
 
-## Performance Tips
-
-- **Use batch processing** — pack multiple samples for SIMD parallelism
-
-### Choosing `poly_mod_degree`
-
-| `poly_mod_degree` | Slots | Mult Depth | Speed | Use Case |
-|-------------------|-------|------------|-------|----------|
-| 8192 | 4096 | ~3-4 | Fast | Shallow networks (1-2 layers) |
-| 16384 | 8192 | ~6-8 | Medium | Most CNN/MLP models |
-| 32768 | 16384 | ~12-15 | Slow | Deep networks, Transformers |
-
-- **Slots** = max elements per ciphertext (batch size for SIMD)
-- **Mult Depth** = max consecutive multiplications before bootstrapping
-
-## Limitations
-
-- **Approximate activations** — ReLU/GELU are polynomial approximations
-
 ## Troubleshooting
 
 | Issue | Solution |
