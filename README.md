@@ -229,10 +229,8 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## Performance Tips
 
-1. **Use `use_square_activation=True`** — exact in CKKS, no approximation error
-2. **Minimize network depth** — each multiplication consumes precision
-3. **Use batch processing** — pack multiple samples for SIMD parallelism
-4. **Choose appropriate `poly_mod_degree`** — larger = more slots but slower
+- **Use batch processing** — pack multiple samples for SIMD parallelism
+- **Choose appropriate `poly_mod_degree`** — larger = more slots but slower
 
 ## Limitations
 

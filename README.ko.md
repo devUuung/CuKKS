@@ -229,10 +229,8 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## 성능 팁
 
-1. **`use_square_activation=True` 사용** — CKKS에서 정확, 근사 오차 없음
-2. **네트워크 깊이 최소화** — 각 곱셈은 정밀도를 소모
-3. **배치 처리 사용** — SIMD 병렬 처리를 위해 여러 샘플 패킹
-4. **적절한 `poly_mod_degree` 선택** — 클수록 슬롯이 많지만 느려짐
+- **배치 처리 사용** — SIMD 병렬 처리를 위해 여러 샘플 패킹
+- **적절한 `poly_mod_degree` 선택** — 클수록 슬롯이 많지만 느려짐
 
 ## 제한사항
 
