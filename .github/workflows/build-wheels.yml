@@ -48,7 +48,7 @@ jobs:
             ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
             ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
           cache-from: type=gha,scope=cuda${{ matrix.cuda_version }}
-          cache-to: type=gha,mode=max,scope=cuda${{ matrix.cuda_version }}
+          cache-to: type=gha,mode=max,scope=cuda${{ matrix.cuda_version }},ignore-error=true
 
   build-gpu:
     needs: build-docker
