@@ -241,8 +241,6 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 - **Slots** = max elements per ciphertext (batch size for SIMD)
 - **Mult Depth** = max consecutive multiplications before bootstrapping
-- Higher values also increase memory usage
-- **Security level is set separately** via `security_level` parameter — determines encryption strength (128/192/256-bit). Higher security = less available mult depth for same `poly_mod_degree`
 
 ## Limitations
 
