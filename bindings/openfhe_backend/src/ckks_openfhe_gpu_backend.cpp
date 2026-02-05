@@ -141,15 +141,26 @@ void syncGPUtoCPU(GPUCiphertextHandle* handle) {
     if (!handle->gpu_loaded || !handle->gpu_ct) return;
     
     auto ctx = handle->context;
-    std::shared_ptr<lbcrypto::M4DCRTParams> elementParams;
-    if (handle->ciphertext && !handle->ciphertext->GetElements().empty()) {
-        elementParams = handle->ciphertext->GetElements()[0].GetParams();
-    } else {
-        elementParams = ctx->crypto_params->GetElementParams();
+    auto params = ctx->crypto_params;
+    auto allParams = params->GetElementParams();
+    
+    auto paramsVec = allParams->GetParams();
+    
+    if (handle->gpu_ct->level > paramsVec.size()) {
+        throw std::runtime_error("syncGPUtoCPU: GPU level exceeds available towers");
     }
     
-    DCRTPoly gpu_res_0 = loadIntoDCRTPoly(handle->gpu_ct->bx__, elementParams);
-    DCRTPoly gpu_res_1 = loadIntoDCRTPoly(handle->gpu_ct->ax__, elementParams);
+    size_t numTowers = paramsVec.size() - handle->gpu_ct->level;
+    
+    std::vector<std::shared_ptr<lbcrypto::ILNativeParams>> nativeParams;
+    for (size_t i = 0; i < numTowers; i++) {
+        nativeParams.push_back(paramsVec[i]);
+    }
+    auto levelParams = std::make_shared<ILDCRTParams<BigInteger>>(
+        allParams->GetCyclotomicOrder(), nativeParams);
+    
+    DCRTPoly gpu_res_0 = loadIntoDCRTPoly(handle->gpu_ct->bx__, levelParams);
+    DCRTPoly gpu_res_1 = loadIntoDCRTPoly(handle->gpu_ct->ax__, levelParams);
     
     std::vector<DCRTPoly> elements = {gpu_res_0, gpu_res_1};
     handle->ciphertext->SetElements(elements);
@@ -185,9 +196,17 @@ Plaintext make_plaintext(
 py::dict cipher_metadata(const std::shared_ptr<GPUCiphertextHandle>& handle) {
     py::dict meta;
     auto cc = handle->context->context;
-    meta["scale"] = handle->ciphertext->GetScalingFactor();
-    meta["level"] = handle->ciphertext->GetLevel();
-    meta["noise_scale"] = handle->ciphertext->GetNoiseScaleDeg();
+    
+    if (handle->gpu_loaded && handle->gpu_ct) {
+        meta["scale"] = handle->gpu_ct->scalingFactor;
+        meta["level"] = handle->gpu_ct->level;
+        meta["noise_scale"] = handle->gpu_ct->noiseScaleDeg;
+    } else {
+        meta["scale"] = handle->ciphertext->GetScalingFactor();
+        meta["level"] = handle->ciphertext->GetLevel();
+        meta["noise_scale"] = handle->ciphertext->GetNoiseScaleDeg();
+    }
+    
     meta["slots"] = static_cast<std::uint32_t>(cc->GetRingDimension() / 2);
     meta["gpu_loaded"] = handle->gpu_loaded;
     meta["gpu_enabled"] = handle->context->gpu_initialized;
@@ -405,6 +424,9 @@ std::shared_ptr<GPUCiphertextHandle> add_plain(
     const std::vector<double>& plain
 ) {
     auto ctx = lhs->context;
+    if (lhs->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
+    }
     auto plaintext = make_plaintext(ctx, plain);
     auto result = ctx->context->EvalAdd(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
@@ -433,6 +455,9 @@ std::shared_ptr<GPUCiphertextHandle> sub_plain(
     const std::vector<double>& plain
 ) {
     auto ctx = lhs->context;
+    if (lhs->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
+    }
     auto plaintext = make_plaintext(ctx, plain);
     auto result = ctx->context->EvalSub(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
@@ -467,11 +492,12 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
     
     if (ctx->gpu_initialized) {
         lhs->ensureGPU();
-        auto plaintext = make_plaintext(ctx, plain);
+        uint32_t ct_level = lhs->gpu_ct->level;
+        auto plaintext = ctx->context->MakeCKKSPackedPlaintext(plain, 1, ct_level);
         plaintext->Encode();
         ckks::PtAccurate gpu_pt = LoadAccuratePlaintext(
             plaintext, plaintext->GetElement<DCRTPoly>());
-        ckks::CtAccurate result = ctx->gpu_context->EvalMultPlainExt(
+        ckks::CtAccurate result = ctx->gpu_context->EvalMultPlain(
             *lhs->gpu_ct, gpu_pt);
         return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
     }
@@ -544,6 +570,9 @@ std::shared_ptr<GPUCiphertextHandle> sum_slots_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     std::uint32_t slots = ctx->context->GetRingDimension() / 2;
     auto result = ctx->context->EvalSum(tensor->ciphertext, slots);
     return make_cipher(ctx, result);
@@ -554,6 +583,9 @@ std::shared_ptr<GPUCiphertextHandle> matvec_diag_cipher(
     const std::vector<std::vector<double>>& diagonals
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     auto cc = ctx->context;
     auto accumulator = cc->EvalMult(tensor->ciphertext, make_plaintext(ctx, diagonals.front()));
     for (std::size_t idx = 1; idx < diagonals.size(); ++idx) {
@@ -569,6 +601,9 @@ std::shared_ptr<GPUCiphertextHandle> poly_eval_cipher(
     const std::vector<double>& coeffs
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     auto result = ctx->context->EvalPoly(tensor->ciphertext, coeffs);
     return make_cipher(ctx, result);
 }
@@ -578,6 +613,9 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
     const std::vector<std::vector<double>>& matrix
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     auto cc = ctx->context;
     const std::size_t m = matrix.size();
     if (m == 0) throw std::invalid_argument("matrix must not be empty");
@@ -607,6 +645,9 @@ std::shared_ptr<GPUCiphertextHandle> conjugate_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
     auto ctx = tensor->context;
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
     auto cc = ctx->context;
     const auto& key_map = cc->GetEvalAutomorphismKeyMap(tensor->ciphertext->GetKeyTag());
     usint conj_index = static_cast<usint>(2 * cc->GetRingDimension() - 1);

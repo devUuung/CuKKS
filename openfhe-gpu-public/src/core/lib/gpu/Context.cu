@@ -378,7 +378,7 @@ void Context::GenModDownParams() {
 
 void Context::GenRescaleParams() {
   auto prime_begin = param__.primes_.begin();
-  for (int gap = 0; gap < param__.chain_length_- 2; gap++) {
+  for (int gap = 0; gap < param__.chain_length_ - 1; gap++) {
     int end_length = param__.chain_length_ - gap - 1;
     auto prime_end = prime_begin + end_length+1;
     auto start_begin = prime_end - 1;
@@ -2181,6 +2181,27 @@ CtAccurate Context::EvalMultPlainExt(const CtAccurate& ct, const PtAccurate& pt)
     primes__.data() + param__.chain_length_, barret_ratio__.data() + param__.chain_length_, barret_k__.data() + param__.chain_length_, 
     ct.ax__.data() + data_shift, ct.bx__.data() + data_shift, pt.mx__.data() + data_shift, 
     out.ax__.data() + data_shift, out.bx__.data() + data_shift);
+
+  out.level = ct.level;
+  out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
+  out.scalingFactor = ct.scalingFactor * pt.scalingFactor;
+
+  return out;
+}
+
+CtAccurate Context::EvalMultPlain(const CtAccurate& ct, const PtAccurate& pt) const {
+  const uint32_t numLimbs = ct.bx__.size() / degree__;
+
+  CtAccurate out;
+  out.ax__.resize(numLimbs * degree__);
+  out.bx__.resize(numLimbs * degree__);
+
+  const int block_dim = 256;
+  const int grid_dim = degree__ * numLimbs / block_dim;
+
+  evalMultPlainFused_<<<grid_dim, block_dim>>>(
+      param__.log_degree_, primes__.data(), barret_ratio__.data(), barret_k__.data(),
+      ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data());
 
   out.level = ct.level;
   out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
