@@ -188,9 +188,10 @@ std::shared_ptr<GPUCiphertextHandle> make_cipher_from_gpu_fast(
 
 Plaintext make_plaintext(
     const std::shared_ptr<GPUContextHandle>& ctx,
-    const std::vector<double>& values
+    const std::vector<double>& values,
+    uint32_t level = 0
 ) {
-    return ctx->context->MakeCKKSPackedPlaintext(values);
+    return ctx->context->MakeCKKSPackedPlaintext(values, 1, level);
 }
 
 py::dict cipher_metadata(const std::shared_ptr<GPUCiphertextHandle>& handle) {
@@ -427,7 +428,8 @@ std::shared_ptr<GPUCiphertextHandle> add_plain(
     if (lhs->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
     }
-    auto plaintext = make_plaintext(ctx, plain);
+    uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(ctx, plain, ct_level);
     auto result = ctx->context->EvalAdd(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
 }
@@ -458,7 +460,8 @@ std::shared_ptr<GPUCiphertextHandle> sub_plain(
     if (lhs->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
     }
-    auto plaintext = make_plaintext(ctx, plain);
+    uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(ctx, plain, ct_level);
     auto result = ctx->context->EvalSub(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
 }

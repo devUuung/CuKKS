@@ -385,6 +385,19 @@ class EncryptedTTConv2d(EncryptedModule):
             
         if tt_cores_per_group is None or tt_shapes is None:
             raise ValueError("tt_cores_per_group and tt_shapes are required")
+        
+        if not tt_cores_per_group:
+            raise ValueError("tt_cores_per_group cannot be empty")
+        if not tt_shapes:
+            raise ValueError("tt_shapes cannot be empty")
+        for g, group_cores in enumerate(tt_cores_per_group):
+            if not group_cores:
+                raise ValueError(f"tt_cores for group {g} cannot be empty")
+            if len(group_cores) != len(tt_shapes):
+                raise ValueError(
+                    f"tt_cores for group {g} and tt_shapes must have same length, "
+                    f"got {len(group_cores)} and {len(tt_shapes)}"
+                )
             
         self.tt_shapes = tt_shapes
         in_ch_per_group = in_channels // groups

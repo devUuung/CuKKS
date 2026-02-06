@@ -82,7 +82,8 @@ class EncryptedLayerNorm(EncryptedModule):
         Returns:
             Encrypted output after layer normalization.
         """
-        n = self.normalized_shape[0]
+        import math
+        n = math.prod(self.normalized_shape)
         
         # Step 1: Compute mean via sum_and_broadcast
         # sum_and_broadcast(n) sums first n slots and replicates to all n positions
@@ -104,7 +105,7 @@ class EncryptedLayerNorm(EncryptedModule):
         a, b = domain
         alpha = 2.0 / (b - a)
         beta_map = -(a + b) / (b - a)
-        t = var_eps.mul(alpha).add(beta_map)
+        t = var_eps.mul(alpha).rescale().add(beta_map)
         
         # Evaluate Chebyshev polynomial for 1/sqrt
         coeffs = _compute_inv_sqrt_coeffs(domain, degree=15)

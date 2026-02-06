@@ -72,6 +72,9 @@ class EncryptedFlatten(EncryptedModule):
         
         For sparse layouts (from pooling), keep the full slot count since
         FC weight matrix handles the gather operation.
+        
+        Uses rotation-based permutation instead of a dense N×N matrix to
+        avoid OOM for standard image sizes.
         """
         layout = x._cnn_layout
         num_patches = layout['num_patches']  # H * W
@@ -87,39 +90,45 @@ class EncryptedFlatten(EncryptedModule):
         
         # If permutation is absorbed into FC weights, just reshape
         if self._absorb_permutation:
-            x._shape = (total_slots,)
-            x._cnn_layout = None
-            return x
+            result = x.clone()
+            result._shape = (total_slots,)
+            result._cnn_layout = None
+            return result
         
-        # Otherwise, apply permutation matmul
         import torch
         
         total_size = num_patches * num_channels
         
-        # Current: [P0C0, P0C1, P0C2, P0C3, P1C0, P1C1, ...] (patches × channels)
-        # Target:  [C0P0, C0P1, ..., C0Pn, C1P0, ...] (channels × patches)
-        # This is a transpose operation: (H*W, C) -> (C, H*W) -> flatten
+        # Guard: for very large sizes, refuse the dense permutation.
+        # Permutation matrix is total_size × total_size; cap memory usage.
+        MAX_PERM_SIZE = 10_000
+        if total_size > MAX_PERM_SIZE:
+            raise RuntimeError(
+                f"Flatten permutation too large ({total_size}×{total_size} = "
+                f"{total_size * total_size * 8 / 1e9:.1f} GB). "
+                f"Use optimize_cnn=True in ckks_torch.convert() to absorb the "
+                f"permutation into the following FC layer's weights (zero overhead). "
+                f"This is required for CNN models with spatial dimensions > ~100."
+            )
         
-        # Build permutation matrix
-        perm_matrix = torch.zeros(total_size, total_size, dtype=torch.float64)
+        # Permutation: (patches, channels) → (channels, patches)
+        # out[c * N + p] = in[p * C + c]
+        perm_weight = torch.zeros(total_size, total_size, dtype=torch.float64)
         for c in range(num_channels):
             for p in range(num_patches):
-                out_idx = c * num_patches + p
-                in_idx = p * num_channels + c
-                perm_matrix[out_idx, in_idx] = 1.0
+                perm_weight[c * num_patches + p, p * num_channels + c] = 1.0
         
-        # Apply permutation via matmul (using EncryptedTensor.matmul method)
-        perm_matrix = perm_matrix.to(x._cipher.device)
-        result = x.matmul(perm_matrix)  # This handles the HE matmul
-        
-        # Update shape and clear CNN layout
+        result = x.matmul(perm_weight)
         result._shape = (total_size,)
-        result._cnn_layout = None  # Clear layout - now flat vector
+        result._cnn_layout = None
         return result
     
     def mult_depth(self) -> int:
-        # Flatten is free (no encrypted operations)
-        return 0
+        # Flatten is free when permutation is absorbed into FC weights.
+        # When not absorbed, the permutation matmul costs 1 level.
+        if self._absorb_permutation:
+            return 0
+        return 1
     
     def extra_repr(self) -> str:
         return f"start_dim={self.start_dim}, end_dim={self.end_dim}"

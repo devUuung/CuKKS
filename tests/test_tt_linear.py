@@ -56,12 +56,12 @@ class TestTTDecomposition:
             assert core.shape[2] <= 8
     
     def test_mult_depth(self):
-        """Test that mult_depth returns number of cores."""
+        """Forward uses pre-computed weight, so mult_depth is 1 (single matmul)."""
         linear = nn.Linear(784, 128)
         tt = EncryptedTTLinear.from_torch(linear)
         
         assert tt is not None
-        assert tt.mult_depth() == len(tt.tt_cores)
+        assert tt.mult_depth() == 1
 
 
 class TestTTLinearProperties:

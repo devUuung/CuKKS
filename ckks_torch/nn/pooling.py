@@ -121,12 +121,16 @@ class EncryptedAvgPool2d(EncryptedModule):
         
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
+        if kernel_size[0] <= 0 or kernel_size[1] <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         self.kernel_size = kernel_size
         
         if stride is None:
             stride = kernel_size
         elif isinstance(stride, int):
             stride = (stride, stride)
+        if stride[0] <= 0 or stride[1] <= 0:
+            raise ValueError(f"stride must be positive, got {stride}")
         self.stride = stride
         
         if isinstance(padding, int):
@@ -162,14 +166,11 @@ class EncryptedAvgPool2d(EncryptedModule):
                 "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
             )
         elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
-            # 2D input with CNN layout: apply HE-based pooling
-            # Use rotation-based optimization for 2x2 pooling (always faster)
             kH, kW = self.kernel_size
             sH, sW = self.stride
             if kH == 2 and kW == 2 and sH == 2 and sW == 2:
                 return self._forward_he_rotation(x)
-            else:
-                return self._forward_he_packed(x)
+            return self._forward_he_packed(x)
         else:
             # For pre-processed input, just multiply by averaging factor
             # Create a full-size plaintext with the avg_factor
@@ -195,14 +196,21 @@ class EncryptedAvgPool2d(EncryptedModule):
         import torch
         
         layout = x._cnn_layout
-        num_patches = layout['num_patches']  # H * W
-        channels = layout['patch_features']  # C (out_channels from conv)
+        num_patches = layout['num_patches']
+        channels = layout['patch_features']
         
-        # Infer H, W from num_patches (assuming square)
-        # For non-square, we'd need to store H, W in layout
-        import math
-        hw = int(math.sqrt(num_patches))
-        H, W = hw, hw
+        if 'height' in layout and 'width' in layout:
+            height, width = layout['height'], layout['width']
+        else:
+            import math
+            hw = int(math.sqrt(num_patches))
+            if hw * hw != num_patches:
+                raise ValueError(
+                    f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                    f"For rectangular inputs, set layout['height'] and layout['width'] explicitly."
+                )
+            height, width = hw, hw
+        H, W = height, width
         
         kH, kW = self.kernel_size
         sH, sW = self.stride
@@ -239,7 +247,7 @@ class EncryptedAvgPool2d(EncryptedModule):
                             pool_weight[out_flat_idx, in_flat_idx] = self.avg_factor
         
         # Apply pooling via matmul
-        x._shape = (total_in,)
+        x = x.view(total_in)
         result = x.matmul(pool_weight, None)
         
         # Update CNN layout for next layer
@@ -274,11 +282,20 @@ class EncryptedAvgPool2d(EncryptedModule):
         import math
         
         layout = x._cnn_layout
-        num_patches = layout['num_patches']  # H * W
-        channels = layout['patch_features']  # C
+        num_patches = layout['num_patches']
+        channels = layout['patch_features']
         
-        hw = int(math.sqrt(num_patches))
-        H, W = hw, hw
+        if 'height' in layout and 'width' in layout:
+            height, width = layout['height'], layout['width']
+        else:
+            hw = int(math.sqrt(num_patches))
+            if hw * hw != num_patches:
+                raise ValueError(
+                    f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                    f"For rectangular inputs, set layout['height'] and layout['width'] explicitly."
+                )
+            height, width = hw, hw
+        H, W = height, width
         
         kH, kW = self.kernel_size
         sH, sW = self.stride
@@ -292,7 +309,6 @@ class EncryptedAvgPool2d(EncryptedModule):
         out_patches = out_H * out_W
         
         total_in = num_patches * channels
-        total_out = out_patches * channels
         
         # Rotation offsets for 2x2 pooling
         # In flattened (H*W, C) layout:
@@ -311,8 +327,11 @@ class EncryptedAvgPool2d(EncryptedModule):
             rotated = x.rotate(offset)
             result = result + rotated
         
-        # Rescale before mask multiplication to avoid scale mismatch
-        result = result.rescale()
+        # Only rescale if input needed rescaling (e.g., came from a mul without rescale)
+        # If input was already rescaled (e.g., from EncryptedSquare), don't rescale again
+        # as that would drop the scale from Δ to ~1, causing precision loss
+        if x._needs_rescale:
+            result = result.rescale()
         
         # Now result has the sum of 4 neighbors at each position
         # But we only want every other position (stride 2 means skip)
@@ -330,7 +349,6 @@ class EncryptedAvgPool2d(EncryptedModule):
                     mask[in_patch_idx * channels + c] = self.avg_factor
         
         # Apply mask (multiply by avg_factor at valid positions, 0 elsewhere)
-        mask = mask.to(x._cipher.device)
         result = result.mul(mask.tolist())
         result = result.rescale()
         
@@ -444,12 +462,16 @@ class EncryptedMaxPool2d(EncryptedModule):
         
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
+        if kernel_size[0] <= 0 or kernel_size[1] <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         self.kernel_size = kernel_size
         
         if stride is None:
             stride = kernel_size
         elif isinstance(stride, int):
             stride = (stride, stride)
+        if stride[0] <= 0 or stride[1] <= 0:
+            raise ValueError(f"stride must be positive, got {stride}")
         self.stride = stride
         
         if isinstance(padding, int):
@@ -469,6 +491,10 @@ class EncryptedMaxPool2d(EncryptedModule):
         sum_ab = a.add(b)
         diff_ab = a.sub(b)
         abs_diff = self._approx_abs(diff_ab).rescale()
+        
+        if sum_ab._needs_rescale:
+            sum_ab = sum_ab.rescale()
+        
         result = sum_ab.add(abs_diff)
         return result.mul(0.5).rescale()
     
@@ -496,8 +522,17 @@ class EncryptedMaxPool2d(EncryptedModule):
         num_patches = layout['num_patches']
         channels = layout['patch_features']
 
-        hw = int(math.sqrt(num_patches))
-        H, W = hw, hw
+        if 'height' in layout and 'width' in layout:
+            height, width = layout['height'], layout['width']
+        else:
+            hw = int(math.sqrt(num_patches))
+            if hw * hw != num_patches:
+                raise ValueError(
+                    f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                    f"For rectangular inputs, set layout['height'] and layout['width'] explicitly."
+                )
+            height, width = hw, hw
+        H, W = height, width
         kH, kW = self.kernel_size
         sH, sW = self.stride
 

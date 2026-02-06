@@ -123,7 +123,7 @@ def crypto_inv_sqrt(
     a, b = 0.1, 100.0
     alpha = 2.0 / (b - a)
     beta = -(a + b) / (b - a)
-    t = x_orig.mul(alpha).add(beta)
+    t = x_orig.mul(alpha).rescale().add(beta)
 
     coeffs = _get_coeffs(domain)
 
@@ -132,10 +132,10 @@ def crypto_inv_sqrt(
     y = y.bootstrap()
 
     for _ in range(2):
-        y_sq = y.mul(y)
-        xy_sq = x_orig.mul(y_sq)
-        three_minus = xy_sq.mul(-1.0).add(3.0)
-        y = y.mul(three_minus).mul(0.5)
+        y_sq = y.mul(y).rescale()
+        xy_sq = x_orig.mul(y_sq).rescale()
+        three_minus = xy_sq.mul(-1.0).rescale().add(3.0)
+        y = y.mul(three_minus).rescale().mul(0.5).rescale()
 
     y = y.bootstrap()
 
@@ -176,7 +176,7 @@ def crypto_inv_sqrt_shallow(
     a, b = domain
     alpha = 2.0 / (b - a)
     beta = -(a + b) / (b - a)
-    t = x_orig.mul(alpha).add(beta)
+    t = x_orig.mul(alpha).rescale().add(beta)
 
     coeffs = _compute_inv_sqrt_coeffs(domain, degree)
 

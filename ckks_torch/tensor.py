@@ -7,8 +7,10 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
+import copy
 import math
 import pickle
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -106,13 +108,27 @@ class EncryptedTensor:
     # -------------------------------------------------------------------------
     
     def _to_plain_list(self, other: Union[torch.Tensor, float, int, List[float]]) -> List[float]:
-        """Convert a value to a list of floats for the backend."""
         if isinstance(other, (int, float)):
-            return [float(other)] * self.size
+            return [float(other)] * self._cipher.size
         elif isinstance(other, list):
+            if len(other) < self._cipher.size:
+                # Cyclically replicate to fill all slots (preserves BSGS invariant)
+                slot_count = self._cipher.size
+                n = len(other)
+                if n == 0:
+                    return [0.0] * slot_count
+                return [other[i % n] for i in range(slot_count)]
             return other
         else:
-            return torch.as_tensor(other, dtype=torch.float64).reshape(-1).tolist()
+            flat = torch.as_tensor(other, dtype=torch.float64).reshape(-1).tolist()
+            slot_count = self._cipher.size
+            n = len(flat)
+            if n < slot_count:
+                # Cyclically replicate to fill all slots (preserves BSGS invariant)
+                if n == 0:
+                    return [0.0] * slot_count
+                return [flat[i % n] for i in range(slot_count)]
+            return flat
     
     def add(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
         """Add another tensor or scalar.
@@ -124,14 +140,35 @@ class EncryptedTensor:
             New EncryptedTensor with the sum.
         """
         if isinstance(other, EncryptedTensor):
-            new_cipher = self._cipher.add(other._cipher)
-            new_depth = max(self._depth, other._depth)
+            if self.size != other.size:
+                raise ValueError(
+                    f"Size mismatch in add: {self._shape} ({self.size} elements) vs "
+                    f"{other._shape} ({other.size} elements)"
+                )
+            left = self
+            right = other
+            if left._needs_rescale and not right._needs_rescale:
+                left = left.rescale()
+            elif right._needs_rescale and not left._needs_rescale:
+                right = right.rescale()
+            new_cipher = left._cipher.add(right._cipher)
+            new_depth = max(left._depth, right._depth)
+            needs_rescale = left._needs_rescale and right._needs_rescale
+            result = EncryptedTensor(new_cipher, left._shape, left._context, new_depth)
+            result._needs_rescale = needs_rescale
+            if left._cnn_layout is not None:
+                result._cnn_layout = copy.deepcopy(left._cnn_layout)
+            return result
         else:
             plain = self._to_plain_list(other)
             new_cipher = self._cipher.add(plain)
             new_depth = self._depth
-        
-        return EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
+            needs_rescale = self._needs_rescale
+            result = EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
+            result._needs_rescale = needs_rescale
+            if self._cnn_layout is not None:
+                result._cnn_layout = copy.deepcopy(self._cnn_layout)
+            return result
     
     def sub(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
         """Subtract another tensor or scalar.
@@ -142,16 +179,37 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with the difference.
         """
-        # Try direct backend sub if available (more efficient than neg + add)
         if hasattr(self._cipher, 'sub'):
             if isinstance(other, EncryptedTensor):
-                new_cipher = self._cipher.sub(other._cipher)
-                new_depth = max(self._depth, other._depth)
+                if self.size != other.size:
+                    raise ValueError(
+                        f"Size mismatch in sub: {self._shape} ({self.size} elements) vs "
+                        f"{other._shape} ({other.size} elements)"
+                    )
+                left = self
+                right = other
+                if left._needs_rescale and not right._needs_rescale:
+                    left = left.rescale()
+                elif right._needs_rescale and not left._needs_rescale:
+                    right = right.rescale()
+                new_cipher = left._cipher.sub(right._cipher)
+                new_depth = max(left._depth, right._depth)
+                needs_rescale = left._needs_rescale and right._needs_rescale
+                result = EncryptedTensor(new_cipher, left._shape, left._context, new_depth)
+                result._needs_rescale = needs_rescale
+                if left._cnn_layout is not None:
+                    result._cnn_layout = copy.deepcopy(left._cnn_layout)
+                return result
             else:
                 plain = self._to_plain_list(other)
                 new_cipher = self._cipher.sub(plain)
                 new_depth = self._depth
-            return EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
+                needs_rescale = self._needs_rescale
+                result = EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
+                result._needs_rescale = needs_rescale
+                if self._cnn_layout is not None:
+                    result._cnn_layout = copy.deepcopy(self._cnn_layout)
+                return result
         
         # Fallback: negate and add
         if isinstance(other, EncryptedTensor):
@@ -177,6 +235,11 @@ class EncryptedTensor:
             Rescale is deferred (lazy) until needed by next operation.
         """
         if isinstance(other, EncryptedTensor):
+            if self.size != other.size:
+                raise ValueError(
+                    f"Size mismatch in mul: {self._shape} ({self.size} elements) vs "
+                    f"{other._shape} ({other.size} elements)"
+                )
             new_cipher = self._cipher.mul(other._cipher)
             new_depth = max(self._depth, other._depth) + 1
         else:
@@ -185,14 +248,26 @@ class EncryptedTensor:
             new_depth = self._depth + 1
         
         result = EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
-        result._needs_rescale = True  # Mark for lazy rescale
+        result._needs_rescale = True
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
         return result
     
     def neg(self) -> "EncryptedTensor":
-        """Negate the tensor."""
-        neg_plain = [-1.0] * self.size
-        new_cipher = self._cipher.mul(neg_plain)
-        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        """Negate the tensor (free operation - doesn't consume multiplicative depth)."""
+        if hasattr(self._cipher, 'neg'):
+            new_cipher = self._cipher.neg()
+            needs_rescale = self._needs_rescale
+        else:
+            neg_plain = [-1.0] * self._cipher.size
+            new_cipher = self._cipher.mul(neg_plain)
+            needs_rescale = True
+        
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = needs_rescale
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        return result
     
     def div(self, divisor: float) -> "EncryptedTensor":
         """Divide by plaintext scalar.
@@ -226,7 +301,7 @@ class EncryptedTensor:
         result._needs_rescale = True  # Mark for lazy rescale
         # Propagate CNN layout if present
         if self._cnn_layout is not None:
-            result._cnn_layout = self._cnn_layout.copy()
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
         return result
     
     # -------------------------------------------------------------------------
@@ -239,15 +314,39 @@ class EncryptedTensor:
         This should typically be called after multiplication to
         manage the scale growth.
         
+        Under FLEXIBLEAUTO scaling, some operations (e.g. CPU EvalMult,
+        EvalPoly) auto-rescale internally. Calling rescale() again would
+        waste a level. We detect this via noiseScaleDeg metadata: a value
+        of 1 means the ciphertext is already at nominal scale.
+        
         Returns:
             New EncryptedTensor with reduced scale.
         """
+        # Check if FLEXIBLEAUTO already rescaled this ciphertext.
+        # noiseScaleDeg == 1 means scale is already at the nominal level;
+        # calling ModReduce/Rescale again would wastefully consume a level.
+        meta = self.metadata
+        noise_scale_deg = meta.get("noise_scale", None)
+        if noise_scale_deg is not None and noise_scale_deg <= 1:
+            # Already at nominal scale — skip the redundant rescale.
+            result = EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
+            result._needs_rescale = False
+            if self._cnn_layout is not None:
+                result._cnn_layout = copy.deepcopy(self._cnn_layout)
+            return result
+
         new_cipher = self._cipher.rescale()
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = False
         # Propagate CNN layout if present
         if self._cnn_layout is not None:
-            result._cnn_layout = self._cnn_layout.copy()
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
         return result
+
+    def _ensure_rescaled(self) -> "EncryptedTensor":
+        if self._needs_rescale:
+            return self.rescale()
+        return self
     
     def rotate(self, steps: int) -> "EncryptedTensor":
         """Rotate slots by the given number of steps.
@@ -259,7 +358,11 @@ class EncryptedTensor:
             New EncryptedTensor with rotated slots.
         """
         new_cipher = self._cipher.rotate(steps)
-        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        return result
     
     def sum_slots(self) -> "EncryptedTensor":
         """Sum all slots into the first slot.
@@ -268,7 +371,9 @@ class EncryptedTensor:
             New EncryptedTensor with sum in first position.
         """
         new_cipher = self._cipher.sum_slots()
-        return EncryptedTensor(new_cipher, (1,), self._context, self._depth)
+        result = EncryptedTensor(new_cipher, (1,), self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        return result
     
     def sum_and_broadcast(self, n: int) -> "EncryptedTensor":
         """Sum first n slots and replicate the result across all n positions.
@@ -284,12 +389,20 @@ class EncryptedTensor:
             EncryptedTensor of same shape with sum replicated in first n slots.
         """
         new_cipher = self._cipher.sum_and_broadcast(n)
-        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        return result
     
     def conjugate(self) -> "EncryptedTensor":
         """Apply complex conjugation to slots."""
         new_cipher = self._cipher.conjugate()
-        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        return result
     
     def bootstrap(self) -> "EncryptedTensor":
         """Bootstrap to refresh the ciphertext.
@@ -303,8 +416,24 @@ class EncryptedTensor:
         new_cipher = self._cipher.bootstrap()
         return EncryptedTensor(new_cipher, self._shape, self._context, 0)
     
-    def maybe_bootstrap(self, context: "CKKSInferenceContext") -> "EncryptedTensor":
-        if context.auto_bootstrap and self._depth >= context.bootstrap_threshold:
+    def maybe_bootstrap(
+        self, context: Optional["CKKSInferenceContext"] = None
+    ) -> "EncryptedTensor":
+        """Bootstrap if auto_bootstrap is enabled and depth exceeds threshold.
+
+        Args:
+            context: CKKS context to check settings. If *None*, uses
+                ``self._context`` (set during encryption).
+
+        Returns:
+            A bootstrapped tensor if threshold was exceeded, else *self*.
+        """
+        ctx = context if context is not None else self._context
+        if ctx is None:
+            return self
+        if getattr(ctx, "auto_bootstrap", False) and self._depth >= getattr(
+            ctx, "bootstrap_threshold", 2
+        ):
             import logging
             logging.info(f"Auto-bootstrapping: depth={self._depth}")
             return self.bootstrap()
@@ -360,55 +489,6 @@ class EncryptedTensor:
         
         return result
     
-    def _matmul_bsgs(self, weight: torch.Tensor) -> "EncryptedTensor":
-        """BSGS diagonal matmul: O(√n) rotations instead of O(n)."""
-        out_features, in_features = weight.shape
-        slot_count = self._cipher.size
-        
-        max_dim = getattr(self._context, '_max_rotation_dim', in_features)
-        bsgs_n1 = max(1, int(math.ceil(math.sqrt(max_dim))))
-        bsgs_n2 = (in_features + bsgs_n1 - 1) // bsgs_n1
-        
-        baby_ciphers = []
-        for j in range(min(bsgs_n1, in_features)):
-            if j == 0:
-                baby_ciphers.append(self._cipher)
-            else:
-                baby_ciphers.append(self._cipher.rotate(j))
-        
-        indices = torch.arange(slot_count)
-        
-        acc = None
-        for k in range(bsgs_n2):
-            giant_step = k * bsgs_n1
-            rows_base = (indices - giant_step) % out_features
-            
-            block = None
-            for j in range(len(baby_ciphers)):
-                d = giant_step + j
-                if d >= in_features:
-                    break
-                cols = (indices + j) % in_features
-                diag = weight[rows_base, cols].tolist()
-                term = baby_ciphers[j].mul(diag)
-                block = term if block is None else block.add(term)
-            
-            if block is None:
-                continue
-            if k > 0:
-                block = block.rotate(giant_step)
-            acc = block if acc is None else acc.add(block)
-        
-        return EncryptedTensor(acc, (out_features,), self._context, self._depth + 1)
-    
-    def _compute_bsgs_diagonal(self, weight: torch.Tensor, giant_step: int, baby_step: int, slot_count: int) -> List[float]:
-        """Compute BSGS diagonal: W[(i - giant_step) % n, (i + baby_step) % m]."""
-        out_features, in_features = weight.shape
-        indices = torch.arange(slot_count)
-        rows = (indices - giant_step) % out_features
-        cols = (indices + baby_step) % in_features
-        return weight[rows, cols].tolist()
-    
     def poly_eval(self, coeffs: Sequence[float]) -> "EncryptedTensor":
         """Evaluate a polynomial on the encrypted values.
         
@@ -419,9 +499,16 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with polynomial evaluated element-wise.
         """
-        new_cipher = self._cipher.poly_eval(list(coeffs))
-        poly_depth = len(coeffs) - 1 if len(coeffs) > 1 else 0
-        return EncryptedTensor(new_cipher, self._shape, self._context, self._depth + poly_depth)
+        tensor = self._ensure_rescaled()
+        new_cipher = tensor._cipher.poly_eval(list(coeffs))
+        degree = len(coeffs) - 1 if len(coeffs) > 1 else 0
+        poly_depth = max(1, math.ceil(math.log2(degree + 1))) if degree > 0 else 0
+        result = EncryptedTensor(new_cipher, tensor._shape, tensor._context, tensor._depth + poly_depth)
+        if degree > 0:
+            result._needs_rescale = True
+        if tensor._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(tensor._cnn_layout)
+        return result
 
     def inv_sqrt(
         self, domain: tuple[float, float] | None = None, shallow: bool = False
@@ -656,7 +743,9 @@ class EncryptedTensor:
             raise ValueError(
                 f"Cannot reshape tensor of size {self.size} to shape {shape}"
             )
-        return EncryptedTensor(self._cipher, tuple(shape), self._context, self._depth)
+        result = EncryptedTensor(self._cipher, tuple(shape), self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        return result
     
     def reshape(self, shape: Union[int, Tuple[int, ...]]) -> "EncryptedTensor":
         if isinstance(shape, int):
@@ -696,7 +785,11 @@ class EncryptedTensor:
         Note: This creates a new Python wrapper but the underlying
         ciphertext may be shared (copy-on-write semantics).
         """
-        return EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
+        result = EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        if self._cnn_layout is not None:
+            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        return result
     
     def __repr__(self) -> str:
         meta = self.metadata
@@ -724,6 +817,8 @@ class EncryptedTensor:
             "shape": self._shape,
             "depth": self._depth,
             "cipher_data": cipher_data,
+            "needs_rescale": self._needs_rescale,
+            "cnn_layout": self._cnn_layout,
         }
         with open(path, "wb") as f:
             pickle.dump(tensor_data, f)
@@ -745,6 +840,13 @@ class EncryptedTensor:
         """
         with open(path, "rb") as f:
             tensor_data = pickle.load(f)
+
+        warnings.warn(
+            "EncryptedTensor.load() reconstructs ciphertexts by setting attributes on a "
+            "dummy encryption. This is only reliable with the mock backend. For real "
+            "OpenFHE backends, use the native serialization API instead.",
+            stacklevel=2,
+        )
         
         shape = tensor_data["shape"]
         depth = tensor_data["depth"]
@@ -759,4 +861,7 @@ class EncryptedTensor:
         else:
             raise ValueError("Cannot load tensor: cipher_data not available")
         
-        return cls(cipher, shape, context, depth)
+        result = cls(cipher, shape, context, depth)
+        result._needs_rescale = tensor_data.get("needs_rescale", False)
+        result._cnn_layout = tensor_data.get("cnn_layout", None)
+        return result

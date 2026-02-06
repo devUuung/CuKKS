@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import pickle
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -20,15 +21,13 @@ if TYPE_CHECKING:
 
 from .batching.packing import SlotPacker
 
-# Import the low-level backend
-try:
-    from ckks import CKKSConfig, CKKSContext
-    _BACKEND_AVAILABLE = True
-except ImportError:
-    # Fallback for development without compiled backend
-    CKKSConfig = None  # type: ignore
-    CKKSContext = None  # type: ignore
-    _BACKEND_AVAILABLE = False  # pyright: ignore[reportConstantRedefinition]
+# Low-level backend is imported lazily in _ensure_initialized() to avoid
+# loading the GPU C++ extension (and initializing CUDA) at module import time.
+# This prevents CUDA state corruption when mock tests import ckks_torch
+# without needing the real backend.
+CKKSConfig = None  # type: ignore
+CKKSContext = None  # type: ignore
+_BACKEND_AVAILABLE: bool | None = None
 
 
 @dataclass
@@ -88,67 +87,124 @@ class InferenceConfig:
         return None
     
     @classmethod
-    def for_depth(cls, depth: int, **kwargs: Any) -> "InferenceConfig":
-        """Create a config optimized for a specific network depth.
-        
+    def for_depth(cls, mult_depth: int, **kwargs: Any) -> "InferenceConfig":
+        """Create a config for a given multiplicative depth.
+
         Args:
-            depth: Number of layers with multiplicative operations.
-            **kwargs: Additional config overrides.
+            mult_depth: Total multiplicative levels the network needs.
+            **kwargs: Overrides forwarded to __init__.
+                Special keys consumed here:
+                - ``security_level`` (default ``"none"``)
+                - ``scale_bits`` (default ``50``)
+                - ``enable_bootstrap`` (default ``False``)
+                - ``level_budget`` (forwarded when bootstrapping)
         """
-        # Each layer typically needs 2 mults (linear + activation)
-        mult_depth = depth * 2 + 1
-        
-        # Choose ring dimension based on depth
-        if mult_depth <= 4:
-            poly_mod_degree = 8192
-        elif mult_depth <= 8:
-            poly_mod_degree = 16384
-        elif mult_depth <= 20:
-            poly_mod_degree = 32768
+        mult_depth = max(1, mult_depth)
+        enable_bootstrap = kwargs.pop("enable_bootstrap", False)
+        level_budget = kwargs.pop("level_budget", None)
+        security_level = kwargs.pop("security_level", "128_classic")
+        scale_bits = kwargs.pop("scale_bits", 50)
+
+        if enable_bootstrap:
+            # When bootstrapping is enabled the C++ backend overrides
+            # mult_depth to ``levelsAfterBootstrap + bootstrapDepth``.
+            # levelsAfterBootstrap is hardcoded to 10 in both backends,
+            # and bootstrapDepth ≈ 10-14 for level_budget=[3,3].
+            # We need poly_mod_degree large enough for ~20-24 total depth.
+            poly_mod_degree = kwargs.pop("poly_mod_degree", 65536)
+            # mult_depth passed to __init__ doesn't matter much (C++ will
+            # recompute), but set a reasonable value for coeff_mod_bits.
+            effective_depth = mult_depth + 2
         else:
-            poly_mod_degree = 65536
-        
-        security_level = kwargs.pop("security_level", "none")
-            
+            # +2 safety margin for add_plain level matching and rescale headroom
+            effective_depth = mult_depth + 2
+
+            if effective_depth <= 6:
+                poly_mod_degree = 16384
+            elif effective_depth <= 16:
+                poly_mod_degree = 32768
+            else:
+                poly_mod_degree = 65536
+            poly_mod_degree = kwargs.pop("poly_mod_degree", poly_mod_degree)
+
         return cls(
             poly_mod_degree=poly_mod_degree,
-            mult_depth=mult_depth,
+            mult_depth=effective_depth,
+            scale_bits=scale_bits,
             security_level=security_level,
-            **kwargs
+            enable_bootstrap=enable_bootstrap,
+            level_budget=level_budget,
+            **kwargs,
         )
     
     @classmethod
-    def for_model(cls, model: torch.nn.Module, **kwargs: Any) -> "InferenceConfig":
+    def for_model(
+        cls,
+        model: torch.nn.Module,
+        activation_degree: int = 4,
+        use_square_activation: bool = False,
+        **kwargs: Any,
+    ) -> "InferenceConfig":
         """Analyze a PyTorch model and create optimal config.
         
         Args:
             model: The PyTorch model to analyze.
-            **kwargs: Additional config overrides.
+            activation_degree: Polynomial degree for activation approximation.
+            use_square_activation: If True, activations use x^2 (1 level each).
+            **kwargs: Additional config overrides forwarded to for_depth().
         """
-        depth = _estimate_model_depth(model)
+        depth = _estimate_model_depth(
+            model,
+            activation_degree=activation_degree,
+            use_square_activation=use_square_activation,
+        )
         return cls.for_depth(depth, **kwargs)
 
 
-def _estimate_model_depth(model: torch.nn.Module, activation_degree: int = 5) -> int:
-    import math
+def _estimate_model_depth(
+    model: torch.nn.Module,
+    activation_degree: int = 4,
+    use_square_activation: bool = False,
+) -> int:
+    """Estimate multiplicative depth of a model.
+
+    Each Linear/Conv2d costs 1 level (cipher-plain matmul).
+    Each activation costs ceil(log2(degree+1)) levels via Paterson-Stockmeyer.
+    Square activation (x^2) costs exactly 1 level.
+    """
     depth = 0
-    poly_depth = max(1, int(math.ceil(math.log2(activation_degree))))
+    if use_square_activation:
+        poly_depth = 1
+    else:
+        poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
+
     for module in model.modules():
         if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
             depth += 1
-        elif isinstance(module, (torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU)):
+        elif isinstance(module, (
+            torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU,
+            torch.nn.Sigmoid, torch.nn.Tanh,
+        )):
             depth += poly_depth
     return max(1, depth)
 
 
-def _get_model_dimensions(model: torch.nn.Module) -> List[int]:
+def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[int, ...]] = None) -> List[int]:
     dims = []
+    has_conv = False
+    
     for module in model.modules():
         if isinstance(module, torch.nn.Linear):
             dims.append(module.in_features)
             dims.append(module.out_features)
         elif isinstance(module, torch.nn.Conv2d):
+            has_conv = True
             dims.append(module.in_channels * module.kernel_size[0] * module.kernel_size[1])
+            dims.append(module.out_channels * module.kernel_size[0] * module.kernel_size[1])
+    
+    if has_conv and not dims:
+        dims.append(4096)
+    
     return dims
 
 
@@ -279,8 +335,10 @@ class CKKSInferenceContext:
         self._cnn_config = cnn_config
         self._enable_gpu = enable_gpu
         
+        _resolved_max_dim = max_rotation_dim
         if rotations is None:
             max_dim = max_rotation_dim or min(self.config.num_slots, 1024)
+            _resolved_max_dim = max_dim
             if use_bsgs:
                 rotations = compute_bsgs_rotations(max_dim)
                 neg_rotations = [-r for r in rotations if r > 0]
@@ -314,34 +372,55 @@ class CKKSInferenceContext:
                 rotations = sorted(all_rots)
         
         self._rotations = rotations
-        self._max_rotation_dim = max_rotation_dim
+        self._max_rotation_dim = _resolved_max_dim
         self._initialized = False
+        self._init_lock = threading.Lock()
     
+    @staticmethod
+    def _load_backend():
+        """Import the CKKS backend on first use (lazy)."""
+        global CKKSConfig, CKKSContext, _BACKEND_AVAILABLE
+        if _BACKEND_AVAILABLE is not None:
+            return
+        try:
+            from ckks import CKKSConfig as _Cfg, CKKSContext as _Ctx
+            CKKSConfig = _Cfg
+            CKKSContext = _Ctx
+            _BACKEND_AVAILABLE = True
+        except ImportError:
+            _BACKEND_AVAILABLE = False
+
     def _ensure_initialized(self) -> None:
         """Lazy initialization of the CKKS context."""
         if self._initialized:
             return
         
-        if CKKSConfig is None or CKKSContext is None:
-            raise RuntimeError(
-                "CKKS backend not available. Please install openfhe_backend:\n"
-                "  pip install -e bindings/openfhe_backend"
+        with self._init_lock:
+            if self._initialized:
+                return
+            
+            self._load_backend()
+            
+            if CKKSConfig is None or CKKSContext is None:
+                raise RuntimeError(
+                    "CKKS backend not available. Please install openfhe_backend:\n"
+                    "  pip install -e bindings/openfhe_backend"
+                )
+            
+            ckks_config = CKKSConfig(
+                poly_mod_degree=self.config.poly_mod_degree,
+                coeff_mod_bits=self.config.coeff_mod_bits,
+                scale_bits=self.config.scale_bits,
+                security_level=self.config.security_level,
+                enable_bootstrap=self.config.enable_bootstrap,
+                level_budget=self.config.resolved_level_budget,
+                rotations=self._rotations,
+                relin=True,
+                generate_conjugate_keys=True,
             )
-        
-        ckks_config = CKKSConfig(
-            poly_mod_degree=self.config.poly_mod_degree,
-            coeff_mod_bits=self.config.coeff_mod_bits,
-            scale_bits=self.config.scale_bits,
-            security_level=self.config.security_level,
-            enable_bootstrap=self.config.enable_bootstrap,
-            level_budget=self.config.resolved_level_budget,
-            rotations=self._rotations,
-            relin=True,
-            generate_conjugate_keys=True,
-        )
-        
-        self._ctx = CKKSContext(ckks_config, device=self.device, enable_gpu=self._enable_gpu)
-        self._initialized = True
+            
+            self._ctx = CKKSContext(ckks_config, device=self.device, enable_gpu=self._enable_gpu)
+            self._initialized = True
     
     @property
     def num_slots(self) -> int:
@@ -406,10 +485,18 @@ class CKKSInferenceContext:
     ) -> torch.Tensor:
         self._ensure_initialized()
         
-        target_shape = tuple(shape) if shape else encrypted.shape
+        # Auto-rescale before decryption to avoid decode failures.
+        # Under FLEXIBLEAUTO the ciphertext may still carry an un-rescaled
+        # scale factor (noiseScaleDeg > 1) which causes OpenFHE's Decode()
+        # to fail with "approximation error is too high".
+        cipher = encrypted
+        if getattr(encrypted, '_needs_rescale', False):
+            cipher = encrypted.rescale()
+        
+        target_shape = tuple(shape) if shape else cipher.shape
         target_numel = int(math.prod(target_shape)) if target_shape else 1
         
-        result = self._ctx.decrypt(encrypted._cipher, shape=None)
+        result = self._ctx.decrypt(cipher._cipher, shape=None)
         result = result[:target_numel].reshape(target_shape)
         
         if self.device != "cpu":
@@ -451,6 +538,14 @@ class CKKSInferenceContext:
         from .tensor import EncryptedTensor
         
         self._ensure_initialized()
+
+        import warnings
+        warnings.warn(
+            "encrypt_batch() packs multiple samples into a single ciphertext. "
+            "Standard encrypted layers (EncryptedLinear, etc.) do not support batched layout "
+            "and will produce incorrect results. Use per-sample encryption for standard layers.",
+            stacklevel=2,
+        )
         
         if not samples:
             raise ValueError("Cannot encrypt empty list of samples")
@@ -616,12 +711,43 @@ class CKKSInferenceContext:
         cls,
         model: torch.nn.Module,
         use_bsgs: bool = True,
+        activation_degree: int = 4,
+        use_square_activation: bool = False,
         **kwargs: Any,
     ) -> "CKKSInferenceContext":
-        config = InferenceConfig.for_model(model)
+        """Create a context optimally configured for a specific model.
+
+        Args:
+            model: The PyTorch model to analyze.
+            use_bsgs: Whether to use Baby-step Giant-step for rotations.
+            activation_degree: Polynomial degree for activation approximation.
+            use_square_activation: If True, activations use x² (1 level each).
+            **kwargs: Additional arguments forwarded to __init__
+                (e.g. enable_gpu, cnn_config, auto_bootstrap, ...).
+        """
+        # Pop config-level kwargs before forwarding the rest to __init__
+        enable_bootstrap = kwargs.pop("enable_bootstrap", False)
+        level_budget = kwargs.pop("level_budget", None)
+        scale_bits = kwargs.pop("scale_bits", 50)
+        security_level = kwargs.pop("security_level", "128_classic")
+
+        config = InferenceConfig.for_model(
+            model,
+            activation_degree=activation_degree,
+            use_square_activation=use_square_activation,
+            enable_bootstrap=enable_bootstrap,
+            level_budget=level_budget,
+            scale_bits=scale_bits,
+            security_level=security_level,
+        )
         rotations = compute_rotations_for_model(model, use_bsgs=use_bsgs)
         dims = _get_model_dimensions(model)
         max_dim = max(dims) if dims else 1024
+        
+        has_conv = any(isinstance(m, torch.nn.Conv2d) for m in model.modules())
+        if has_conv:
+            max_dim = max(max_dim, 8192)
+        
         return cls(config, rotations=rotations, use_bsgs=use_bsgs, max_rotation_dim=max_dim, **kwargs)
     
     @classmethod
@@ -692,6 +818,12 @@ class CKKSInferenceContext:
         """
         with open(path, "rb") as f:
             config_data = pickle.load(f)
+        import warnings
+        warnings.warn(
+            "CKKSInferenceContext.load_context() uses pickle deserialization which can "
+            "execute arbitrary code. Only load context files from trusted sources.",
+            stacklevel=2,
+        )
         
         inference_config = InferenceConfig(
             poly_mod_degree=config_data["poly_mod_degree"],

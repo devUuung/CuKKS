@@ -136,6 +136,10 @@ class EncryptedApproxAttention(EncryptedModule):
         from ckks_torch.stats.crypto_reciprocal import crypto_reciprocal_shallow
 
         shifted = [s.add(shift) for s in scores]
+        # Ensure shifted scores are rescaled before squaring.
+        # If scores came from a mul (degree 2), squaring without rescale
+        # would produce degree 4, causing rapid noise growth or decryption failure.
+        shifted = [t._ensure_rescaled() for t in shifted]
         squared = [t.mul(t).rescale() for t in shifted]
 
         z_sum = squared[0]
@@ -173,36 +177,16 @@ class EncryptedApproxAttention(EncryptedModule):
         scores: "EncryptedTensor",
         seq_len: int,
     ) -> "EncryptedTensor":
-        """Approximate softmax over the last dimension.
+        """Approximate softmax over the last dimension."""
+        if seq_len <= 0:
+            raise ValueError(f"seq_len must be positive, got {seq_len}")
+        if seq_len == 1:
+            return scores.mul(0.0).add(1.0)
         
-        softmax(x)_i = exp(x_i) / sum_j(exp(x_j))
-        
-        For encrypted computation, we:
-        1. Apply polynomial exp approximation
-        2. Sum all values
-        3. Divide (multiply by approximate inverse)
-        
-        Note: This is a simplified version that works on flattened scores.
-        For production, more sophisticated normalization is needed.
-        
-        Args:
-            scores: Attention scores (flattened).
-            seq_len: Sequence length for normalization.
-            
-        Returns:
-            Approximate softmax probabilities.
-        """
-        # Apply approximate exp
         exp_scores = self._approx_exp(scores)
-        
-        # For simplicity, we use a fixed normalization factor
-        # In practice, we'd compute sum and divide
-        # But division in CKKS requires multiplicative inverse approximation
-        # Here we use 1/seq_len as a simple approximation
-        # This works reasonably for uniform-ish attention
         norm_factor = 1.0 / seq_len
         
-        return exp_scores.mul(norm_factor)
+        return exp_scores.mul(norm_factor).rescale()
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Self-attention forward pass.
@@ -219,6 +203,9 @@ class EncryptedApproxAttention(EncryptedModule):
         value: List["EncryptedTensor"],
     ) -> List["EncryptedTensor"]:
         seq_len = len(query)
+        
+        if seq_len == 0:
+            return []
         
         if seq_len > 8:
             raise NotImplementedError(
@@ -300,12 +287,9 @@ class EncryptedApproxAttention(EncryptedModule):
         # For seq_len=1: Q and K are both shape (embed_dim,)
         # Q @ K^T for 1D = sum(Q * K) which is a scalar score
         qk = q.mul(k).rescale()
-        scores = qk.sum_and_broadcast(self.embed_dim).mul(self.scale)
+        scores = qk.sum_and_broadcast(self.embed_dim).mul(self.scale).rescale()
         
-        # Apply approximate softmax
-        # For seq_len=1, softmax of a single score = 1.0, but we still apply
-        # the polynomial approximation for consistency
-        attn_weights = self._approx_softmax_row(scores, max(1, 1))
+        attn_weights = self._approx_softmax_row(scores, seq_len=1)
         
         # attn_weights · V (element-wise cipher×cipher)
         # For seq_len=1: attn_weight is effectively a scalar broadcast to embed_dim slots
@@ -338,9 +322,9 @@ class EncryptedApproxAttention(EncryptedModule):
         """
         depth = 0
         
-        # Input projections
+        # Input projections (parallel: Q, K, V all computed at same depth)
         if self.q_weight is not None:
-            depth += 3  # Q, K, V projections
+            depth += 1  # max of Q, K, V projections (parallel)
         
         # Q * K cipher×cipher
         depth += 1

@@ -225,9 +225,12 @@ class TestEncryptedFlatten:
     """Test EncryptedFlatten layer."""
     
     def test_mult_depth(self):
-        """Flatten is free (no multiplication)."""
+        """Flatten with absorbed permutation is free; without costs 1 level."""
         flatten = EncryptedFlatten()
-        assert flatten.mult_depth() == 0
+        assert flatten.mult_depth() == 1
+        
+        absorbed = EncryptedFlatten._with_absorbed_permutation()
+        assert absorbed.mult_depth() == 0
     
     def test_repr(self):
         """Test string representation."""
@@ -347,7 +350,7 @@ class TestAttention:
         enc_attn_with_proj = EncryptedApproxAttention.from_torch(torch_attn, softmax_degree=4)
         depth_with_proj = enc_attn_with_proj.mult_depth()
         
-        assert depth_with_proj == 12  # 3 (Q,K,V proj) + 1 + 6 + 1 + 1 (out proj)
+        assert depth_with_proj == 10  # 1 (Q,K,V proj parallel) + 1 + 6 + 1 + 1 (out proj)
 
     def test_attention_forward(self, mock_enc_context):
         """Test forward pass with encrypted tensors."""

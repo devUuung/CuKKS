@@ -81,10 +81,10 @@ def crypto_reciprocal_shallow(
     a, b = domain
     alpha = 2.0 / (b - a)
     beta = -(a + b) / (b - a)
-    t = x_orig.mul(alpha).add(beta)
+    t = x_orig.mul(alpha).rescale().add(beta)
 
     coeffs = _compute_reciprocal_coeffs(domain, degree)
 
-    y = t.poly_eval(coeffs)
+    y = t.poly_eval(coeffs).rescale()
 
     return y

@@ -126,6 +126,7 @@ class MockCKKSTensor:
         return {
             "scale": 2**40,
             "level": self._level,
+            "noise_scale": 2,
         }
 
     def add(self, other: "MockCKKSTensor | torch.Tensor | float | int") -> "MockCKKSTensor":
@@ -173,6 +174,12 @@ class MockCKKSTensor:
         """Negate the tensor."""
         result = MockCKKSTensor(self.context, -self.data, self.shape, self.device, self._depth)
         result._level = self._level
+        return result
+
+    def square(self) -> "MockCKKSTensor":
+        new_data = self.data * self.data
+        result = MockCKKSTensor(self.context, new_data, self.shape, self.device, self._depth + 1)
+        result._level = max(0, self._level - 1)
         return result
 
     def rotate(self, steps: int) -> "MockCKKSTensor":
@@ -280,11 +287,10 @@ class MockCKKSTensor:
             result = result * x + c
         
         degree = len(coeffs) - 1
-        depth_used = int(math.ceil(math.log2(degree + 1))) if degree > 0 else 0
-        poly_depth = degree if degree > 0 else 0
+        poly_depth = max(1, int(math.ceil(math.log2(degree + 1)))) if degree > 0 else 0
         
         new_tensor = MockCKKSTensor(self.context, result, self.shape, self.device, self._depth + poly_depth)
-        new_tensor._level = max(0, self._level - depth_used)
+        new_tensor._level = max(0, self._level - poly_depth)
         return new_tensor
 
     def bootstrap(self) -> "MockCKKSTensor":

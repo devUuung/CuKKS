@@ -78,7 +78,7 @@ class ConversionOptions:
     ):
         self.fold_batchnorm = fold_batchnorm
         self.activation_degree = activation_degree
-        self.activation_map = activation_map or DEFAULT_ACTIVATION_MAP
+        self.activation_map = activation_map if activation_map is not None else DEFAULT_ACTIVATION_MAP.copy()
         self.use_square_activation = use_square_activation
         self.optimize_cnn = optimize_cnn
         self.tt = tt
@@ -350,8 +350,8 @@ class ModelConverter:
         Uses the last conv's output channels and Linear's input features
         to infer num_patches = in_features / channels.
         
-        If pooling was used, computes sparse layout info since pool outputs
-        values at sparse positions in the pre-pool sized vector.
+        If 2x2/stride 2 pooling is used, computes sparse layout for rotation-based
+        pooling optimization.
         """
         if not hasattr(self, '_conv_params') or not self._conv_params:
             return None
@@ -371,45 +371,73 @@ class ModelConverter:
         }
         
         if hasattr(self, '_pool_params') and self._pool_params:
-            h, w = 8, 8
-            if self.input_shape is not None:
-                shape = tuple(self.input_shape)
-                if len(shape) >= 2:
-                    h, w = int(shape[-2]), int(shape[-1])
-            
-            for conv in self._conv_params:
-                kernel_size = conv['kernel_size']
-                if isinstance(kernel_size, int):
-                    kernel_size = (kernel_size, kernel_size)
-                stride = conv['stride']
-                if isinstance(stride, int):
-                    stride = (stride, stride)
-                padding = conv['padding']
-                if isinstance(padding, int):
-                    padding = (padding, padding)
-                h = (h + 2 * padding[0] - kernel_size[0]) // stride[0] + 1
-                w = (w + 2 * padding[1] - kernel_size[1]) // stride[1] + 1
-            
             last_pool = self._pool_params[-1]
-            pool_stride = last_pool['stride']
-            if isinstance(pool_stride, int):
-                pool_stride = (pool_stride, pool_stride)
+            kh, kw = last_pool['kernel_size']
+            sh, sw = last_pool['stride']
             
-            out_h = h // pool_stride[0]
-            out_w = w // pool_stride[1]
-            
-            sparse_positions = []
-            for out_y in range(out_h):
-                for out_x in range(out_w):
-                    in_patch_idx = (pool_stride[0] * out_y) * w + (pool_stride[1] * out_x)
-                    for c in range(channels):
-                        sparse_positions.append(in_patch_idx * channels + c)
-            
-            layout['sparse'] = True
-            layout['sparse_positions'] = sparse_positions
-            layout['total_slots'] = h * w * channels
+            if kh == 2 and kw == 2 and sh == 2 and sw == 2:
+                pre_pool_h, pre_pool_w = self._compute_pre_pool_dimensions()
+                if pre_pool_h is not None and pre_pool_w is not None:
+                    out_h = pre_pool_h // 2
+                    out_w = pre_pool_w // 2
+                    
+                    sparse_positions = []
+                    for out_y in range(out_h):
+                        for out_x in range(out_w):
+                            in_y = 2 * out_y
+                            in_x = 2 * out_x
+                            in_patch_idx = in_y * pre_pool_w + in_x
+                            for c in range(channels):
+                                sparse_positions.append(in_patch_idx * channels + c)
+                    
+                    layout['sparse'] = True
+                    layout['sparse_positions'] = sparse_positions
+                    layout['total_slots'] = pre_pool_h * pre_pool_w * channels
+                    layout['pre_pool_h'] = pre_pool_h
+                    layout['pre_pool_w'] = pre_pool_w
         
         return layout
+    
+    def _compute_pre_pool_dimensions(self) -> Tuple[Optional[int], Optional[int]]:
+        """Compute spatial dimensions before the last pooling layer."""
+        if not hasattr(self, '_conv_params') or not self._conv_params:
+            return None, None
+        
+        h, w = 8, 8
+        if self.input_shape is not None:
+            shape = tuple(self.input_shape)
+            if len(shape) >= 2:
+                h, w = int(shape[-2]), int(shape[-1])
+        
+        pool_idx = 0
+        num_pools = len(self._pool_params) if hasattr(self, '_pool_params') else 0
+        
+        for conv in self._conv_params:
+            kernel_size = conv['kernel_size']
+            if isinstance(kernel_size, int):
+                kernel_size = (kernel_size, kernel_size)
+            stride = conv['stride']
+            if isinstance(stride, int):
+                stride = (stride, stride)
+            padding = conv['padding']
+            if isinstance(padding, int):
+                padding = (padding, padding)
+            
+            kh, kw = kernel_size
+            sh, sw = stride
+            ph, pw = padding
+            
+            h = (h + 2 * ph - kh) // sh + 1
+            w = (w + 2 * pw - kw) // sw + 1
+            
+            if pool_idx < num_pools - 1:
+                pool = self._pool_params[pool_idx]
+                psh, psw = pool['stride']
+                h = h // psh
+                w = w // psw
+                pool_idx += 1
+        
+        return h, w
     
     def _compute_cnn_layout_before_flatten(self) -> Optional[Dict]:
         """Compute the CNN layout (num_patches, channels) before Flatten layer.
@@ -613,6 +641,9 @@ def convert(
     optimize_cnn: bool = True,
     tt: bool = False,
     enable_gpu: bool = True,
+    enable_bootstrap: Optional[bool] = None,
+    auto_bootstrap: Optional[bool] = None,
+    bootstrap_threshold: int = 8,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -628,6 +659,10 @@ def convert(
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN optimizations (Flatten absorption into FC).
         tt: If True, decompose Linear layers into TT format when possible.
+        enable_bootstrap: Enable bootstrapping. If None, auto-detected from depth.
+        auto_bootstrap: Call maybe_bootstrap() between layers. If None, follows
+            enable_bootstrap.
+        bootstrap_threshold: Depth at which auto-bootstrap triggers (default 8).
         
     Returns:
         Tuple of (encrypted_model, context).
@@ -652,6 +687,8 @@ def convert(
         >>> enc_output = enc_model(enc_input)
         >>> output = ctx.decrypt(enc_output)
     """
+    from .context import _estimate_model_depth
+
     options = ConversionOptions(
         fold_batchnorm=fold_batchnorm,
         activation_degree=activation_degree,
@@ -666,9 +703,33 @@ def convert(
     cnn_config = None
     if optimize_cnn and converter._is_cnn_model:
         cnn_config = _build_cnn_config(converter, input_shape)
-    
+
+    # Auto-detect whether bootstrapping is needed.
+    # The C++ backend gives 10 levels after bootstrap (levelsAfterBootstrap=10).
+    # Without bootstrap, 32768 poly_mod_degree supports ~16 effective levels.
+    # If estimated depth > 14, we need bootstrapping.
+    _AUTO_BOOTSTRAP_DEPTH_THRESHOLD = 14
+    if enable_bootstrap is None:
+        est_depth = _estimate_model_depth(
+            model,
+            activation_degree=activation_degree,
+            use_square_activation=use_square_activation,
+        )
+        enable_bootstrap = est_depth > _AUTO_BOOTSTRAP_DEPTH_THRESHOLD
+    if auto_bootstrap is None:
+        auto_bootstrap = enable_bootstrap
+
     if ctx is None:
-        ctx = CKKSInferenceContext.for_model(model, enable_gpu=enable_gpu, cnn_config=cnn_config)
+        ctx = CKKSInferenceContext.for_model(
+            model,
+            activation_degree=activation_degree,
+            use_square_activation=use_square_activation,
+            enable_gpu=enable_gpu,
+            cnn_config=cnn_config,
+            auto_bootstrap=auto_bootstrap,
+            bootstrap_threshold=bootstrap_threshold,
+            enable_bootstrap=enable_bootstrap,
+        )
     
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:
         enc_model._cnn_layout = converter._last_cnn_layout
@@ -676,21 +737,27 @@ def convert(
     return enc_model, ctx
 
 
-def estimate_depth(model: nn.Module) -> int:
+def estimate_depth(model: nn.Module, activation_degree: int = 4) -> int:
     """Estimate the multiplicative depth required for a model.
     
     Args:
         model: The PyTorch model to analyze.
+        activation_degree: Polynomial degree used for activation approximation.
+            Default is 4, matching ConversionOptions default.
         
     Returns:
         Estimated multiplicative depth.
     """
+    import math
+    
+    # Polynomial of degree d requires ceil(log2(d+1)) levels
+    # (Paterson-Stockmeyer or baby-step/giant-step evaluation)
+    poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
+    
     depth = 0
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv2d)):
             depth += 1  # matmul
-        elif isinstance(module, (nn.ReLU, nn.GELU, nn.SiLU)):
-            depth += 2  # polynomial approximation (varies by degree)
-        elif isinstance(module, nn.Sigmoid):
-            depth += 2
+        elif isinstance(module, (nn.ReLU, nn.GELU, nn.SiLU, nn.Sigmoid, nn.Tanh)):
+            depth += poly_depth  # polynomial approximation
     return max(1, depth)

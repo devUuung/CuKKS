@@ -156,9 +156,16 @@ class EncryptedBatchNorm1d(EncryptedModule):
             Encrypted output after affine transformation.
         """
         # y = scale * x + shift
-        result = x.mul(self.scale.tolist())
+        slot_count = x._cipher.size
+        scale_list = self.scale.tolist()
+        shift_list = self.shift.tolist()
+        if len(scale_list) < slot_count:
+            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
+        if len(shift_list) < slot_count:
+            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
+        result = x.mul(scale_list)
         result = result.rescale()
-        result = result.add(self.shift.tolist())
+        result = result.add(shift_list)
         return result
     
     def mult_depth(self) -> int:
@@ -216,9 +223,21 @@ class EncryptedBatchNorm2d(EncryptedModule):
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply the affine transformation."""
-        result = x.mul(self.scale.tolist())
+        if hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
+            raise RuntimeError(
+                "EncryptedBatchNorm2d does not support CNN packed layout. "
+                "Use fold_batchnorm=True in convert() to fold BatchNorm into Conv2d."
+            )
+        slot_count = x._cipher.size
+        scale_list = self.scale.tolist()
+        shift_list = self.shift.tolist()
+        if len(scale_list) < slot_count:
+            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
+        if len(shift_list) < slot_count:
+            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
+        result = x.mul(scale_list)
         result = result.rescale()
-        result = result.add(self.shift.tolist())
+        result = result.add(shift_list)
         return result
     
     def mult_depth(self) -> int:

@@ -76,6 +76,8 @@ class EncryptedModule(ABC):
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, EncryptedModule):
             self._modules[name] = value
+        elif hasattr(self, '_modules') and name in self._modules:
+            del self._modules[name]
         object.__setattr__(self, name, value)
     
     def __getattr__(self, name: str) -> Any:
@@ -83,6 +85,10 @@ class EncryptedModule(ABC):
             modules = self.__dict__['_modules']
             if name in modules:
                 return modules[name]
+        if '_parameters' in self.__dict__:
+            parameters = self.__dict__['_parameters']
+            if name in parameters:
+                return parameters[name]
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
     
     def modules(self) -> Iterator["EncryptedModule"]:

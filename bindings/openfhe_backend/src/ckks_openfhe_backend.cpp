@@ -49,8 +49,10 @@ std::shared_ptr<CiphertextHandle> make_cipher(const std::shared_ptr<ContextHandl
     return handle;
 }
 
-Plaintext make_plaintext(const std::shared_ptr<ContextHandle>& ctx, const std::vector<double>& values) {
-    auto plaintext = ctx->context->MakeCKKSPackedPlaintext(values);
+Plaintext make_plaintext(const std::shared_ptr<ContextHandle>& ctx,
+                         const std::vector<double>& values,
+                         uint32_t level = 0) {
+    auto plaintext = ctx->context->MakeCKKSPackedPlaintext(values, 1, level);
     return plaintext;
 }
 
@@ -110,7 +112,10 @@ std::shared_ptr<ContextHandle> create_context(std::uint32_t poly_mod_degree,
     if (enable_bootstrap) {
         context->Enable(FHE);
         if (!level_budget.empty()) {
-            context->EvalBootstrapSetup(level_budget);
+            std::vector<uint32_t> bsgsDim = {0, 0};
+            uint32_t bootstrap_slots = poly_mod_degree / 2;
+            uint32_t correctionFactor = 21;
+            context->EvalBootstrapSetup(level_budget, bsgsDim, bootstrap_slots, correctionFactor);
         }
     }
 
@@ -181,8 +186,9 @@ std::shared_ptr<CiphertextHandle> add_cipher(const std::shared_ptr<CiphertextHan
 }
 
 std::shared_ptr<CiphertextHandle> add_plain(const std::shared_ptr<CiphertextHandle>& lhs,
-                                            const std::vector<double>& plain) {
-    auto plaintext = make_plaintext(lhs->context, plain);
+                                             const std::vector<double>& plain) {
+    uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(lhs->context, plain, ct_level);
     auto result = lhs->context->context->EvalAdd(lhs->ciphertext, plaintext);
     return make_cipher(lhs->context, result);
 }
@@ -194,8 +200,9 @@ std::shared_ptr<CiphertextHandle> sub_cipher(const std::shared_ptr<CiphertextHan
 }
 
 std::shared_ptr<CiphertextHandle> sub_plain(const std::shared_ptr<CiphertextHandle>& lhs,
-                                            const std::vector<double>& plain) {
-    auto plaintext = make_plaintext(lhs->context, plain);
+                                             const std::vector<double>& plain) {
+    uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(lhs->context, plain, ct_level);
     auto result = lhs->context->context->EvalSub(lhs->ciphertext, plaintext);
     return make_cipher(lhs->context, result);
 }
@@ -207,8 +214,9 @@ std::shared_ptr<CiphertextHandle> mul_cipher(const std::shared_ptr<CiphertextHan
 }
 
 std::shared_ptr<CiphertextHandle> mul_plain(const std::shared_ptr<CiphertextHandle>& lhs,
-                                            const std::vector<double>& plain) {
-    auto plaintext = make_plaintext(lhs->context, plain);
+                                             const std::vector<double>& plain) {
+    uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(lhs->context, plain, ct_level);
     auto result = lhs->context->context->EvalMult(lhs->ciphertext, plaintext);
     return make_cipher(lhs->context, result);
 }

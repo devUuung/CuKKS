@@ -192,8 +192,8 @@ class TestPolyEvalDepth:
         # when
         result = enc.poly_eval(coeffs)
         
-        # then: degree 4 -> depth = 0 + 4 = 4
-        assert result.depth == 4
+        # then: degree 4 -> poly_depth = ceil(log2(5)) = 3, total depth = 0 + 3 = 3
+        assert result.depth == 3
 
 
 class TestOtherOperationsPreserveDepth:

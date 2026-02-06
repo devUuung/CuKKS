@@ -101,12 +101,19 @@ class EncryptedTTLinear(EncryptedModule):
         original_out_features: Optional[int] = None,
     ) -> None:
         super().__init__()
+        if not tt_cores:
+            raise ValueError("tt_cores cannot be empty")
+        if not tt_shapes:
+            raise ValueError("tt_shapes cannot be empty")
+        if len(tt_cores) != len(tt_shapes):
+            raise ValueError(
+                f"tt_cores and tt_shapes must have same length, got {len(tt_cores)} and {len(tt_shapes)}"
+            )
         self.in_features = in_features
         self.out_features = out_features
         self.tt_shapes = tt_shapes
         self._original_out_features = original_out_features or out_features
         
-        # Store TT-cores as float64 for CKKS precision
         self.tt_cores: List[torch.Tensor] = []
         for i, core in enumerate(tt_cores):
             core_param = core.detach().to(dtype=torch.float64, device="cpu")
@@ -158,8 +165,8 @@ class EncryptedTTLinear(EncryptedModule):
         return x.matmul(self._effective_weight, self.bias)
     
     def mult_depth(self) -> int:
-        """Each TT-core requires one matmul (depth 1)."""
-        return len(self.tt_cores)
+        """Single matmul on pre-computed effective weight."""
+        return 1
     
     @classmethod
     def from_torch(

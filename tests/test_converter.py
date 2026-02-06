@@ -171,8 +171,8 @@ class TestEstimateDepth:
             nn.Linear(10, 5),
             nn.ReLU(),
         )
-        # 2 linear (1 each) + 2 relu (2 each for polynomial approx) = 2 + 4 = 6
-        assert estimate_depth(model) == 6
+        # 2 linear (1 each) + 2 relu (ceil(log2(4+1))=3 each) = 2 + 6 = 8
+        assert estimate_depth(model) == 8
     
     def test_empty_model(self):
         """Empty model should return at least 1."""

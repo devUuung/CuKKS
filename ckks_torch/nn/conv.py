@@ -7,7 +7,6 @@ matrix-vector multiplication (im2col method).
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
@@ -183,38 +182,49 @@ class EncryptedConv2d(EncryptedModule):
     
     def _forward_he_packed(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Forward pass using real HE matmul for packed im2col patches.
-        
-        This performs convolution entirely in encrypted domain without decryption.
-        Uses block-diagonal matrix multiplication approach.
-        
-        Input: flattened patches of shape (num_patches * patch_features,)
-        Output: flattened output of shape (num_patches * out_channels,)
-        
-        The block-diagonal structure:
-        | W  0  0  |   | patch0 |   | out0 |
-        | 0  W  0  | @ | patch1 | = | out1 |
-        | 0  0  W  |   | patch2 |   | out2 |
-        
-        Args:
-            x: Encrypted im2col patches with _cnn_layout metadata.
-            
-        Returns:
-            Encrypted output of shape (num_patches * out_channels,).
+
+        Input layout (flattened):
+            [p0_f0 .. p0_fK, p1_f0 .. p1_fK, ...]  (K = patch_features)
+
+        Output layout (flattened):
+            [p0_o0 .. p0_oC, p1_o0 .. p1_oC, ...]  (C = out_channels)
+
+        For small inputs the block-diagonal matrix is materialized directly.
+        For large inputs (>100M elements) we use the compact BSGS matmul on
+        the small per-patch weight matrix W (out_channels × patch_features)
+        which avoids allocating the full N×N block-diagonal.
         """
         layout = x._cnn_layout
         num_patches = layout['num_patches']
         patch_features = layout['patch_features']
-        
+
         self.input_shape = (num_patches, patch_features)
         self.output_shape = (num_patches, self.out_channels)
-        
+
         total_out = num_patches * self.out_channels
         total_in = num_patches * patch_features
-        
-        # Update shape for matmul to understand the flat structure
-        x._shape = (total_in,)
-        
-        # Create block-diagonal weight matrix
+
+        matrix_elements = total_out * total_in
+        MAX_MATRIX_ELEMENTS = 100_000_000
+
+        if matrix_elements <= MAX_MATRIX_ELEMENTS:
+            return self._forward_he_packed_dense(x, num_patches, patch_features, total_out, total_in)
+
+        return self._forward_he_packed_compact(x, num_patches, patch_features)
+
+    def _forward_he_packed_dense(
+        self,
+        x: "EncryptedTensor",
+        num_patches: int,
+        patch_features: int,
+        total_out: int,
+        total_in: int,
+    ) -> "EncryptedTensor":
+        """Small-input path: materialize the full block-diagonal matrix."""
+        layout = x._cnn_layout
+
+        x = x.view(total_in)
+
         block_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
         for p in range(num_patches):
             row_start = p * self.out_channels
@@ -222,26 +232,109 @@ class EncryptedConv2d(EncryptedModule):
             col_start = p * patch_features
             col_end = (p + 1) * patch_features
             block_weight[row_start:row_end, col_start:col_end] = self.weight_matrix.to(torch.float64)
-        
-        # Create block-diagonal bias
+
+        block_bias: torch.Tensor | None = None
         if self.bias is not None:
             block_bias = self.bias.to(torch.float64).repeat(num_patches)
-        else:
-            block_bias = None
-        
-        # Use standard matmul with block-diagonal weights
-        # matmul expects (out_features, in_features) weight
+
         result = x.matmul(block_weight, block_bias)
-        
-        # Update CNN layout for next layer
+
         result._cnn_layout = {
             'num_patches': num_patches,
             'patch_features': self.out_channels,
             'original_shape': layout.get('original_shape'),
         }
         result._shape = (num_patches, self.out_channels)
-        
         return result
+
+    def _forward_he_packed_compact(
+        self,
+        x: "EncryptedTensor",
+        num_patches: int,
+        patch_features: int,
+    ) -> "EncryptedTensor":
+        """Large-input path: diagonal method without materializing block-diagonal.
+
+        For block-diagonal B (total_out × total_in) with repeated block W (C × K):
+            B[p*C+c, p*K+k] = W[c, k]   (same block p)
+            B[i, j] = 0                  (different blocks)
+
+        Standard diagonal encoding for rectangular M×N matrix:
+            diag_d[i] = M[i % M_rows, (i + d) % M_cols]
+
+        We compute each diagonal analytically from W, never allocating B.
+        Number of non-zero diagonals ≤ K × ceil(total_out / total_in + 1).
+        Memory per diagonal: O(num_slots).
+        """
+        layout = x._cnn_layout
+        total_out = num_patches * self.out_channels
+        total_in = num_patches * patch_features
+
+        slot_count = x._cipher.size
+        W = self.weight_matrix.to(torch.float64)
+        C = self.out_channels
+        K = patch_features
+
+        x_flat = x.view(total_in)
+
+        nonzero_diags = set()
+        for p in range(num_patches):
+            for delta in range(-(C - 1), K):
+                d = (p * (K - C) + delta) % total_in
+                nonzero_diags.add(d)
+
+        accumulator = None
+
+        for d in sorted(nonzero_diags):
+            diag_vals = torch.zeros(slot_count, dtype=torch.float64)
+            has_nonzero = False
+
+            for i in range(min(total_out, slot_count)):
+                row = i
+                col = (i + d) % total_in
+
+                row_patch = row // C
+                row_c = row % C
+                col_patch = col // K
+                col_k = col % K
+
+                if row_patch == col_patch:
+                    val = W[row_c, col_k].item()
+                    if abs(val) > 1e-30:
+                        diag_vals[i] = val
+                        has_nonzero = True
+
+            if not has_nonzero:
+                continue
+
+            rotated = x_flat.rotate(d) if d != 0 else x_flat
+            term = rotated.mul(diag_vals.tolist())
+            term = term.rescale()
+
+            if accumulator is None:
+                accumulator = term
+            else:
+                accumulator = accumulator.add(term)
+
+        if accumulator is None:
+            raise RuntimeError("Conv2d: all weight diagonals are zero")
+
+        if self.bias is not None:
+            bias_plain = [0.0] * slot_count
+            for p in range(num_patches):
+                for c in range(C):
+                    idx = p * C + c
+                    if idx < slot_count:
+                        bias_plain[idx] = self.bias[c].item()
+            accumulator = accumulator.add(bias_plain)
+
+        accumulator._cnn_layout = {
+            'num_patches': num_patches,
+            'patch_features': self.out_channels,
+            'original_shape': layout.get('original_shape'),
+        }
+        accumulator._shape = (num_patches, self.out_channels)
+        return accumulator
 
     @staticmethod
     def unfold_input(

@@ -847,30 +847,32 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const uint32_t auto_i
 }
 
 CtAccurate Context::EvalAtIndex(const CtAccurate& ct, const EvaluationKey& evk, const uint32_t auto_index) const {
-  CtAccurate rot_ct(ct);
-  AutomorphismTransformInPlace(rot_ct, auto_index);
+  // Correct order: KeySwitch THEN AutomorphismTransform
+  // (matches CPU EvalAutomorphism in base-leveledshe.cpp)
+  
+  // Step 1: ModUp on the original ax__ (not transformed)
+  DeviceVector raisedDigits = ModUp(ct.ax__);
 
-  DeviceVector raisedDigits = ModUp(rot_ct.ax__);
-
-  // if (verbose) std::cout << "\tFinished modup\n";
-
+  // Step 2: KeySwitch
   DeviceVector ks_a, ks_b;
-
   KeySwitch(raisedDigits, evk, ks_a, ks_b);
 
-  // if (verbose) std::cout << "\tFinished keyswitch\n";
+  // Step 3: ModDown
+  CtAccurate result;
+  ModDown(ks_a, result.ax__);
+  ModDown(ks_b, result.bx__);
 
-  CtAccurate toLoad;
-  ModDown(ks_a, toLoad.ax__);
-  ModDown(ks_b, toLoad.bx__);
+  // Step 4: Add back the original bx__ (scaled by P during ModDown)
+  AddCoreInPlace(result.bx__, ct.bx__);
 
-  AddCoreInPlace(toLoad.bx__, rot_ct.bx__);
+  // Step 5: Apply automorphism transform AFTER key switch
+  AutomorphismTransformInPlace(result, auto_index);
 
-  toLoad.level = ct.level;
-  toLoad.noiseScaleDeg = ct.noiseScaleDeg;
-  toLoad.scalingFactor = ct.scalingFactor;
+  result.level = ct.level;
+  result.noiseScaleDeg = ct.noiseScaleDeg;
+  result.scalingFactor = ct.scalingFactor;
 
-  return toLoad;
+  return result;
 }
 
 // CtAccurate Context::AutomorphismTransform(const CtAccurate& ct, const std::vector<uint32_t> inds) const {

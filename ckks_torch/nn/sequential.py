@@ -40,6 +40,10 @@ class EncryptedSequential(EncryptedModule):
         
         if len(args) == 1 and isinstance(args[0], OrderedDict):
             for name, module in args[0].items():
+                if not isinstance(module, EncryptedModule):
+                    raise TypeError(
+                        f"Expected EncryptedModule for key '{name}', got {type(module)}"
+                    )
                 self.add_module(name, module)
         else:
             for idx, module in enumerate(args):
@@ -67,6 +71,7 @@ class EncryptedSequential(EncryptedModule):
             Encrypted output after passing through all modules.
         """
         for module in self._modules.values():
+            x = x.maybe_bootstrap()
             x = module(x)
         return x
     

@@ -77,8 +77,6 @@ class EncryptedLinear(EncryptedModule):
         
         Uses O(out_features * log(in_features)) operations.
         """
-        import math
-        
         out_features = self.out_features
         in_features = self.in_features
         
@@ -103,8 +101,6 @@ class EncryptedLinear(EncryptedModule):
     
     def _reduce_sum(self, x: "EncryptedTensor", length: int) -> "EncryptedTensor":
         """Sum elements using rotation-based reduction. O(log n) rotations."""
-        import math
-        
         result = x
         step = 1
         while step < length:
@@ -115,9 +111,10 @@ class EncryptedLinear(EncryptedModule):
     
     def _pack_outputs(self, outputs: list, context) -> "EncryptedTensor":
         """Pack scalar outputs (sum in slot 0) into single ciphertext."""
-        from ..tensor import EncryptedTensor
-        
         out_features = len(outputs)
+        if out_features == 0:
+            raise ValueError("Cannot pack empty outputs list")
+        
         slot_count = outputs[0]._cipher.size
         
         result = None
@@ -137,6 +134,8 @@ class EncryptedLinear(EncryptedModule):
             else:
                 result = result + masked
         
+        # result is guaranteed to be non-None here since out_features > 0
+        assert result is not None
         result._shape = (out_features,)
         return result
     

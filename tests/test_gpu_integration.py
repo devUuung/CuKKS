@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import time
 
-from conftest import requires_gpu, requires_real_backend
+from conftest import requires_gpu, requires_real_backend, _has_real_backend, _has_cuda
 
 
 # Mark entire module as GPU tests
@@ -250,13 +250,15 @@ class TestGPU_CNN:
             {'kernel_size': (3, 3), 'stride': (1, 1), 'padding': (1, 1), 'out_channels': 4}
         ]
         
-        # Compute sparse layout for pool output (8x8 -> 4x4 with stride 2)
-        H, W, channels = 8, 8, 4
-        out_H, out_W = 4, 4
+        pre_pool_h, pre_pool_w = 8, 8
+        out_H, out_W, channels = 4, 4, 4
+        
         sparse_positions = []
         for out_y in range(out_H):
             for out_x in range(out_W):
-                in_patch_idx = (2 * out_y) * W + (2 * out_x)
+                in_y = 2 * out_y
+                in_x = 2 * out_x
+                in_patch_idx = in_y * pre_pool_w + in_x
                 for c in range(channels):
                     sparse_positions.append(in_patch_idx * channels + c)
         
@@ -265,7 +267,7 @@ class TestGPU_CNN:
             'patch_features': channels,
             'sparse': True,
             'sparse_positions': sparse_positions,
-            'total_slots': H * W * channels,
+            'total_slots': pre_pool_h * pre_pool_w * channels,
         }
         
         enc_conv = EncryptedConv2d.from_torch(simple_cnn.conv)
@@ -346,7 +348,19 @@ class TestGPU_CNN:
         conv_params = [
             {'kernel_size': (3, 3), 'stride': (1, 1), 'padding': (1, 1), 'out_channels': 4}
         ]
-        cnn_layout = {'num_patches': 16, 'patch_features': 4}
+        pre_pool_h, pre_pool_w = 8, 8
+        out_H, out_W, channels = 4, 4, 4
+        sparse_positions = []
+        for out_y in range(out_H):
+            for out_x in range(out_W):
+                in_patch_idx = (2 * out_y) * pre_pool_w + (2 * out_x)
+                for c in range(channels):
+                    sparse_positions.append(in_patch_idx * channels + c)
+        cnn_layout = {
+            'num_patches': 16, 'patch_features': 4,
+            'sparse': True, 'sparse_positions': sparse_positions,
+            'total_slots': pre_pool_h * pre_pool_w * channels,
+        }
         
         enc_conv = EncryptedConv2d.from_torch(simple_cnn.conv)
         enc_square = EncryptedSquare()
@@ -578,3 +592,143 @@ class TestGPUChainedOperations:
         
         # Just verify the chain completes without error
         assert hasattr(squared, 'square'), "Chained operations should return EncryptedTensor"
+
+
+# =============================================================================
+# Bootstrap E2E Tests
+# =============================================================================
+
+
+class TestGPUBootstrap:
+    """GPU E2E tests for bootstrapping on deep networks."""
+
+    @pytest.fixture(scope="class")
+    def bootstrap_context(self):
+        """CKKS context with bootstrapping enabled (expensive, class-scoped).
+
+        Uses security_level=None so OpenFHE does not inflate the ring
+        beyond what GPU memory can handle.  The C++ backend sets
+        mult_depth = levelsAfterBootstrap(10) + bootstrapDepth(~12) ≈ 22
+        automatically when enable_bootstrap=True.
+        """
+        if not _has_real_backend() or not _has_cuda():
+            pytest.skip("GPU bootstrap test requires real backend + CUDA")
+
+        from ckks_torch import CKKSInferenceContext, InferenceConfig
+        from ckks_torch.context import compute_bsgs_rotations
+
+        max_dim = 16
+        rotations = compute_bsgs_rotations(max_dim)
+        neg_rotations = [-r for r in rotations if r > 0]
+        rotations = sorted(set(rotations + neg_rotations))
+
+        config = InferenceConfig(
+            poly_mod_degree=65536,
+            scale_bits=45,
+            mult_depth=10,
+            enable_bootstrap=True,
+            level_budget=(3, 3),
+            security_level=None,
+        )
+
+        ctx = CKKSInferenceContext(
+            config=config,
+            device="cpu",
+            rotations=rotations,
+            use_bsgs=True,
+            max_rotation_dim=max_dim,
+            auto_bootstrap=True,
+            bootstrap_threshold=3,
+            enable_gpu=False,
+        )
+        return ctx
+
+    @requires_real_backend
+    def test_manual_bootstrap_refreshes_levels(self, bootstrap_context):
+        """Verify EvalBootstrap restores ciphertext levels."""
+        ctx = bootstrap_context
+        x = torch.randn(16, dtype=torch.float64)
+        enc = ctx.encrypt(x)
+
+        # Consume a few levels: mul → rescale × 3
+        # Keep it modest so degree stays within correction factor
+        for _ in range(3):
+            enc = enc.mul(1.5)
+            enc = enc.rescale()
+
+        # Bootstrap should reset depth
+        refreshed = enc.bootstrap()
+        assert refreshed._depth == 0, f"Expected depth 0 after bootstrap, got {refreshed._depth}"
+
+        # Values should still be recoverable
+        dec = ctx.decrypt(refreshed)
+        dec_cpu = dec.cpu() if dec.is_cuda else dec
+        assert dec_cpu[:16].shape == (16,)
+
+    @requires_real_backend
+    def test_deep_mlp_with_auto_bootstrap(self, bootstrap_context):
+        """Run an MLP (Linear→x²)×2→Linear through auto-bootstrap.
+
+        With threshold=3 the bootstrap fires after Linear(1)+Square(2)=depth 3
+        before the second block, proving the auto-bootstrap hook works on the
+        real OpenFHE backend.
+        """
+        from ckks_torch.nn import EncryptedLinear, EncryptedSquare, EncryptedSequential
+
+        ctx = bootstrap_context
+        torch.manual_seed(42)
+
+        dim = 16
+        layers = []
+        for _ in range(2):
+            w = torch.eye(dim, dtype=torch.float64) * 0.5
+            b = torch.zeros(dim, dtype=torch.float64)
+            layers.append(EncryptedLinear(dim, dim, w, b))
+            layers.append(EncryptedSquare())
+        w_out = torch.eye(dim, dtype=torch.float64)
+        b_out = torch.zeros(dim, dtype=torch.float64)
+        layers.append(EncryptedLinear(dim, dim, w_out, b_out))
+
+        seq = EncryptedSequential(*layers)
+
+        x = torch.full((dim,), 0.8, dtype=torch.float64)
+        enc_x = ctx.encrypt(x)
+        enc_out = seq(enc_x)
+
+        dec = ctx.decrypt(enc_out)
+        dec_cpu = dec.cpu() if dec.is_cuda else dec
+        dec_cpu = dec_cpu[:dim]
+
+        # Plaintext reference: ((0.8 * 0.5)²)² * 1.0
+        val = 0.8
+        for _ in range(2):
+            val = (val * 0.5) ** 2
+        expected = torch.full((dim,), val, dtype=torch.float64)
+
+        cos_sim = F.cosine_similarity(
+            expected.unsqueeze(0), dec_cpu.unsqueeze(0)
+        ).item()
+
+        print(f"\nDeep MLP bootstrap E2E: cosine={cos_sim:.6f}, "
+              f"expected={val:.6e}, got={dec_cpu[0].item():.6e}")
+
+        assert cos_sim > 0.80, f"Cosine similarity {cos_sim:.4f} < 0.80"
+
+    @requires_real_backend
+    def test_convert_deep_model_auto_bootstrap(self, bootstrap_context):
+        """Verify convert() auto-detects bootstrap need for a deep model."""
+        from ckks_torch import convert
+
+        torch.manual_seed(42)
+        layers = []
+        for _ in range(8):
+            layers.append(nn.Linear(16, 16))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(16, 4))
+        model = nn.Sequential(*layers).eval()
+
+        _, ctx = convert(model, activation_degree=4)
+
+        assert ctx.config.enable_bootstrap is True, "Deep model should auto-enable bootstrap"
+        assert ctx._auto_bootstrap is True, "Deep model should enable auto_bootstrap"
+        assert ctx.config.poly_mod_degree == 65536, "Bootstrap requires poly_mod_degree=65536"

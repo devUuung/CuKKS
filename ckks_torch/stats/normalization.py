@@ -28,7 +28,7 @@ def _check_size_limit(enc_tensor: EncryptedTensor) -> None:
     Raises:
         ValueError: If size > 1024
     """
-    size = enc_tensor.shape[0] if hasattr(enc_tensor, 'shape') else len(enc_tensor)
+    size = enc_tensor.shape[0]
     if size > 1024:
         raise ValueError(f"v1: size must be <= 1024, got {size}")
 
@@ -52,7 +52,7 @@ def encrypted_mean(enc_tensor: EncryptedTensor) -> EncryptedTensor:
     _check_size_limit(enc_tensor)
     n = enc_tensor.shape[0]
     sum_x = enc_tensor.sum_slots()
-    return sum_x.mul(1.0 / n)
+    return sum_x.mul(1.0 / n).rescale()
 
 
 def encrypted_variance(enc_tensor: EncryptedTensor) -> EncryptedTensor:
@@ -79,13 +79,13 @@ def encrypted_variance(enc_tensor: EncryptedTensor) -> EncryptedTensor:
     _check_size_limit(enc_tensor)
     n = enc_tensor.shape[0]
 
-    x_sq = enc_tensor.mul(enc_tensor)
+    x_sq = enc_tensor.mul(enc_tensor).rescale()
     sum_sq = x_sq.sum_slots()
-    e_x_sq = sum_sq.mul(1.0 / n)
+    e_x_sq = sum_sq.mul(1.0 / n).rescale()
 
     sum_x = enc_tensor.sum_slots()
-    mean = sum_x.mul(1.0 / n)
-    mean_sq = mean.mul(mean)
+    mean = sum_x.mul(1.0 / n).rescale()
+    mean_sq = mean.mul(mean).rescale()
 
     return e_x_sq.sub(mean_sq)
 
@@ -124,4 +124,4 @@ def encrypted_std(
     var = encrypted_variance(enc_tensor)
     var_eps = var.add(epsilon)
     inv_sqrt_var = crypto_inv_sqrt(var_eps)
-    return var_eps.mul(inv_sqrt_var)
+    return var_eps.mul(inv_sqrt_var).rescale()
