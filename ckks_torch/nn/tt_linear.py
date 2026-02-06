@@ -50,7 +50,15 @@ def _pad_to_factorizable(n: int) -> int:
 def _balance_factors(
     factors1: List[int],
     factors2: List[int],
+    max_cores: int = 4,
 ) -> Tuple[List[int], List[int]]:
+    """Balance two factor lists to have the same length, limited to *max_cores*.
+
+    Having fewer, larger cores keeps the intermediate TT-ranks small relative
+    to the matrix dimensions, which avoids rank truncation errors during the
+    SVD-based TT decomposition.  A target of 3–4 cores works well in practice
+    for dimensions up to ~1024.
+    """
     def merge_smallest(values: List[int]) -> List[int]:
         if len(values) < 2:
             return values
@@ -66,6 +74,10 @@ def _balance_factors(
     while len(left) > len(right):
         left = merge_smallest(left)
     while len(right) > len(left):
+        right = merge_smallest(right)
+
+    while len(left) > max_cores:
+        left = merge_smallest(left)
         right = merge_smallest(right)
 
     return left, right
@@ -235,8 +247,7 @@ class EncryptedTTLinear(EncryptedModule):
         weight_tensor = weight_tensor.permute(*permute_order).contiguous()
         weight_tensor = weight_tensor.reshape(*[n * m for n, m in tt_shapes])
 
-        rank_cap = 64 if max_rank is None else min(64, max_rank)
-        rank_cap = max(1, rank_cap)
+        rank_cap = max(1, max_rank) if max_rank is not None else 256
 
         tt_cores: List[torch.Tensor] = []
         r_prev = 1
