@@ -127,9 +127,7 @@ pip install -e .
 | PyTorch 레이어 | 암호화 버전 | 비고 |
 |--------------|-------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | BSGS 최적화로 완전 지원 |
-| `nn.Linear` | `EncryptedTTLinear` | 대형 레이어용 TT 분해 |
 | `nn.Conv2d` | `EncryptedConv2d` | im2col 방식 |
-| `nn.Conv2d` | `EncryptedTTConv2d` | 대형 커널용 TT 분해 |
 | `nn.ReLU` | `EncryptedReLU` | 다항식 근사 |
 | `nn.GELU` | `EncryptedGELU` | 다항식 근사 |
 | `nn.SiLU` | `EncryptedSiLU` | 다항식 근사 |
@@ -265,7 +263,3 @@ Apache License 2.0
 - [Homomorphic Encryption for Arithmetic of Approximate Numbers](https://eprint.iacr.org/2016/421) — Cheon et al. (CKKS)
 - [Bootstrapping for Approximate Homomorphic Encryption](https://eprint.iacr.org/2018/153) — Cheon et al.
 - [Faster Homomorphic Linear Transformations in HElib](https://eprint.iacr.org/2018/244) — Halevi & Shoup (BSGS)
-- [Tensor-Train Decomposition](https://epubs.siam.org/doi/10.1137/090752286) — Oseledets
-- [Tensorizing Neural Networks](https://proceedings.neurips.cc/paper/5787-tensorizing-neural-networks) — Novikov et al.
-- [Ultimate Tensorization: Compressing Convolutional and FC Layers Alike](https://arxiv.org/abs/1611.03214) — Garipov et al.
-- [CNN Compression via Tensor-Train Decomposition on Permuted Weight Tensor](https://doi.org/10.1016/j.neunet.2020.07.028) — Gabor & Zdunek

@@ -25,8 +25,6 @@ Example:
 
 from .module import EncryptedModule, EncryptedIdentity
 from .linear import EncryptedLinear
-from .tt_linear import EncryptedTTLinear
-from .tt_conv import EncryptedTTConv2d
 from .activations import (
     EncryptedSquare,
     EncryptedReLU,
@@ -49,8 +47,6 @@ __all__ = [
     "EncryptedModule",
     "EncryptedIdentity",
     "EncryptedLinear",
-    "EncryptedTTLinear",
-    "EncryptedTTConv2d",
     "EncryptedSquare",
     "EncryptedReLU",
     "EncryptedGELU",

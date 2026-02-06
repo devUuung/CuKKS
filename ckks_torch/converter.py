@@ -17,7 +17,6 @@ from .context import CKKSInferenceContext
 from .nn import (
     EncryptedModule,
     EncryptedLinear,
-    EncryptedTTLinear,
     EncryptedConv2d,
     EncryptedAvgPool2d,
     EncryptedMaxPool2d,
@@ -64,7 +63,6 @@ class ConversionOptions:
         activation_map: Mapping from PyTorch activations to encrypted versions.
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN-specific optimizations (Flatten absorption).
-        tt: If True, decompose Linear layers into TT format when possible.
     """
     
     def __init__(
@@ -74,14 +72,12 @@ class ConversionOptions:
         activation_map: Optional[Dict[Type[nn.Module], Type[EncryptedModule]]] = None,
         use_square_activation: bool = False,
         optimize_cnn: bool = True,
-        tt: bool = False,
     ):
         self.fold_batchnorm = fold_batchnorm
         self.activation_degree = activation_degree
         self.activation_map = activation_map if activation_map is not None else DEFAULT_ACTIVATION_MAP.copy()
         self.use_square_activation = use_square_activation
         self.optimize_cnn = optimize_cnn
-        self.tt = tt
 
 
 # =============================================================================
@@ -279,11 +275,6 @@ class ModelConverter:
     
     def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
         """Convert a Linear layer."""
-        if self.options.tt:
-            tt_layer = EncryptedTTLinear.from_torch(module)
-            if tt_layer is not None:
-                return tt_layer
-            # Fall back to regular Linear if TT returns None (layer too small)
         return EncryptedLinear.from_torch(module)
     
     def _convert_conv2d(self, module: nn.Conv2d) -> EncryptedConv2d:
@@ -639,7 +630,6 @@ def convert(
     activation_degree: int = 4,
     use_square_activation: bool = False,
     optimize_cnn: bool = True,
-    tt: bool = False,
     enable_gpu: bool = True,
     enable_bootstrap: Optional[bool] = None,
     auto_bootstrap: Optional[bool] = None,
@@ -658,7 +648,6 @@ def convert(
         activation_degree: Default polynomial degree for activations.
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN optimizations (Flatten absorption into FC).
-        tt: If True, decompose Linear layers into TT format when possible.
         enable_bootstrap: Enable bootstrapping. If None, auto-detected from depth.
         auto_bootstrap: Call maybe_bootstrap() between layers. If None, follows
             enable_bootstrap.
@@ -694,7 +683,6 @@ def convert(
         activation_degree=activation_degree,
         use_square_activation=use_square_activation,
         optimize_cnn=optimize_cnn,
-        tt=tt,
     )
     
     converter = ModelConverter(options, input_shape=input_shape)

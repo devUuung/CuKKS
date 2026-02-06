@@ -29,7 +29,7 @@ IACR ePrint: [2018/153](https://eprint.iacr.org/2018/153)
 CRYPTO 2018.
 IACR ePrint: [2018/244](https://eprint.iacr.org/2018/244)
 
-> Baby-step Giant-step (BSGS) algorithm for encrypted matrix-vector multiplication, reducing rotation count from O(n) to O(√n). Used in `EncryptedLinear`, `EncryptedTTLinear`, `EncryptedConv2d`, and `EncryptedTTConv2d`.
+> Baby-step Giant-step (BSGS) algorithm for encrypted matrix-vector multiplication, reducing rotation count from O(n) to O(√n). Used in `EncryptedLinear` and `EncryptedConv2d`.
 
 ---
 
@@ -50,44 +50,6 @@ USENIX Security 2018.
 CIKM'25.
 
 > Privacy-preserving encrypted statistical operations: mean, variance, standard deviation, inverse square root, and reciprocal. Used in `ckks_torch.stats` (normalization, crypto_inv_sqrt, crypto_reciprocal).
-
----
-
-## Tensor-Train Decomposition
-
-**[6]** Oseledets, I. V. (2011).
-*Tensor-Train Decomposition.*
-SIAM Journal on Scientific Computing, 33(5), 2295–2317.
-DOI: [10.1137/090752286](https://epubs.siam.org/doi/10.1137/090752286)
-
-> TT-SVD algorithm for decomposing high-dimensional tensors into a chain of 3D cores. Foundation for `EncryptedTTLinear` and `EncryptedTTConv2d`.
-
-**[7]** Novikov, A., Podoprikhin, D., Osokin, A., & Vetrov, D. (2015).
-*Tensorizing Neural Networks.*
-NeurIPS 2015.
-[proceedings](https://proceedings.neurips.cc/paper/5787-tensorizing-neural-networks)
-
-> TT-decomposition applied to fully-connected layers. Used in `EncryptedTTLinear`.
-
-**[8]** Garipov, T., Podoprikhin, D., Novikov, A., & Vetrov, D. (2016).
-*Ultimate Tensorization: Compressing Convolutional and FC Layers Alike.*
-arXiv: [1611.03214](https://arxiv.org/abs/1611.03214)
-
-> Extends TT-decomposition to convolutional kernels via kernel reshaping. Used in `EncryptedTTConv2d`.
-
-**[9]** Gabor, M. & Zdunek, R. (2022).
-*Convolutional Neural Network Compression via Tensor-Train Decomposition on Permuted Weight Tensor with Automatic Rank Determination.*
-ICCS 2022.
-DOI: [10.1007/978-3-031-08757-8_54](https://link.springer.com/chapter/10.1007/978-3-031-08757-8_54)
-
-> Permutation-based TT for better CNN compression with automatic rank selection. Used in `EncryptedTTConv2d` permutation optimization.
-
-**[10]** Wang, D., Zhao, G., Li, G., Deng, L., & Wu, Y. (2020).
-*Compressing 3DCNNs Based on Tensor Train Decomposition.*
-Neural Networks, Volume 131.
-DOI: [10.1016/j.neunet.2020.07.028](https://doi.org/10.1016/j.neunet.2020.07.028)
-
-> TT decomposition for higher-dimensional convolutional kernels. Referenced in `EncryptedTTConv2d`.
 
 ---
 
