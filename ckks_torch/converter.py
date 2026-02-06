@@ -35,6 +35,7 @@ from .nn import (
     EncryptedApproxAttention,
 )
 from .nn.batchnorm import fold_batchnorm_into_linear, fold_batchnorm_into_conv
+from .nn.block_diagonal import BlockDiagonalLinear
 
 
 # =============================================================================
@@ -114,6 +115,7 @@ class ModelConverter:
         # Layer converters: torch_type -> converter_function
         self._converters: Dict[Type[nn.Module], Callable] = {
             nn.Linear: self._convert_linear,
+            BlockDiagonalLinear: self._convert_block_diagonal,
             nn.Conv2d: self._convert_conv2d,
             nn.AvgPool2d: self._convert_avgpool2d,
             nn.Flatten: self._convert_flatten,
@@ -276,7 +278,11 @@ class ModelConverter:
     def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
         """Convert a Linear layer."""
         return EncryptedLinear.from_torch(module)
-    
+
+    def _convert_block_diagonal(self, module: BlockDiagonalLinear) -> EncryptedModule:
+        """Convert a BlockDiagonalLinear by expanding to dense weight."""
+        return EncryptedLinear.from_torch(module.to_linear())
+
     def _convert_conv2d(self, module: nn.Conv2d) -> EncryptedConv2d:
         """Convert a Conv2d layer."""
         return EncryptedConv2d.from_torch(module)

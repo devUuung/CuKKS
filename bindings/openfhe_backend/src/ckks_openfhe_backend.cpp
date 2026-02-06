@@ -276,9 +276,22 @@ std::shared_ptr<CiphertextHandle> matmul_dense_cipher(const std::shared_ptr<Ciph
         throw std::invalid_argument("matrix column dimension exceeds available CKKS slots");
     }
 
+    // Pre-scan: identify non-zero diagonals to skip zero diagonals
+    // (block-diagonal weight matrices have exact structural zeros)
+    std::vector<bool> diag_nonzero(n, false);
+    for (std::size_t k = 0; k < n; ++k) {
+        for (std::size_t i = 0; i < m; ++i) {
+            if (matrix[i][(i + k) % n] != 0.0) {
+                diag_nonzero[k] = true;
+                break;
+            }
+        }
+    }
+
     // Diagonal method for dense (possibly rectangular) matrix-vector multiply.
     Ciphertext<DCRTPoly> accumulator;
     for (std::size_t k = 0; k < n; ++k) {
+        if (!diag_nonzero[k]) continue;  // skip zero diagonal
         std::vector<double> diag(slots, 0.0);
         for (std::size_t i = 0; i < m; ++i) {
             diag[i] = matrix[i][(i + k) % n];
@@ -293,7 +306,7 @@ std::shared_ptr<CiphertextHandle> matmul_dense_cipher(const std::shared_ptr<Ciph
         }
     }
     if (!accumulator) {
-        throw std::runtime_error("failed to build accumulator");
+        throw std::runtime_error("failed to build accumulator (all-zero matrix)");
     }
     return make_cipher(tensor->context, accumulator);
 }
@@ -342,6 +355,18 @@ std::shared_ptr<CiphertextHandle> matmul_bsgs_cipher(const std::shared_ptr<Ciphe
         }
     }
     
+    // Pre-scan: identify non-zero diagonals to skip zero diagonals
+    // (block-diagonal weight matrices have exact structural zeros)
+    std::vector<bool> diag_nonzero(in_features, false);
+    for (std::size_t d = 0; d < in_features; ++d) {
+        for (std::size_t i = 0; i < out_features; ++i) {
+            if (matrix[i][(i + d) % in_features] != 0.0) {
+                diag_nonzero[d] = true;
+                break;
+            }
+        }
+    }
+
     Ciphertext<DCRTPoly> accumulator;
     
     for (std::uint32_t k = 0; k < bsgs_n2; ++k) {
@@ -351,6 +376,7 @@ std::shared_ptr<CiphertextHandle> matmul_bsgs_cipher(const std::shared_ptr<Ciphe
         for (std::uint32_t j = 0; j < baby_ciphers.size(); ++j) {
             std::uint32_t d = giant_step + j;
             if (d >= in_features) break;
+            if (!diag_nonzero[d]) continue;  // skip zero diagonal
             
             std::vector<double> diag(slots, 0.0);
             for (std::size_t i = 0; i < slots; ++i) {
@@ -383,7 +409,7 @@ std::shared_ptr<CiphertextHandle> matmul_bsgs_cipher(const std::shared_ptr<Ciphe
     }
     
     if (!accumulator) {
-        throw std::runtime_error("failed to build accumulator in BSGS matmul");
+        throw std::runtime_error("failed to build accumulator in BSGS matmul (all-zero matrix)");
     }
     return make_cipher(tensor->context, accumulator);
 }

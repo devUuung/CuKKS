@@ -178,8 +178,10 @@ def _estimate_model_depth(
     else:
         poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
 
+    from .nn.block_diagonal import BlockDiagonalLinear
+
     for module in model.modules():
-        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, BlockDiagonalLinear)):
             depth += 1
         elif isinstance(module, (
             torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU,
@@ -193,8 +195,13 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
     dims = []
     has_conv = False
     
+    from .nn.block_diagonal import BlockDiagonalLinear
+
     for module in model.modules():
-        if isinstance(module, torch.nn.Linear):
+        if isinstance(module, BlockDiagonalLinear):
+            dims.append(module.in_features)
+            dims.append(module.out_features)
+        elif isinstance(module, torch.nn.Linear):
             dims.append(module.in_features)
             dims.append(module.out_features)
         elif isinstance(module, torch.nn.Conv2d):
