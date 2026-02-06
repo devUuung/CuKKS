@@ -26,6 +26,8 @@ Example:
 from .module import EncryptedModule, EncryptedIdentity
 from .linear import EncryptedLinear
 from .block_diagonal import BlockDiagonalLinear
+from .block_diagonal_low_rank import BlockDiagLowRankLinear
+from .encrypted_block_diag_lr import EncryptedBlockDiagLowRank
 from .activations import (
     EncryptedSquare,
     EncryptedReLU,
@@ -49,6 +51,8 @@ __all__ = [
     "EncryptedIdentity",
     "EncryptedLinear",
     "BlockDiagonalLinear",
+    "BlockDiagLowRankLinear",
+    "EncryptedBlockDiagLowRank",
     "EncryptedSquare",
     "EncryptedReLU",
     "EncryptedGELU",

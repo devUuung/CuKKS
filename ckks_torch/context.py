@@ -179,9 +179,12 @@ def _estimate_model_depth(
         poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
 
     from .nn.block_diagonal import BlockDiagonalLinear
+    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 
     for module in model.modules():
-        if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, BlockDiagonalLinear)):
+        if isinstance(module, BlockDiagLowRankLinear):
+            depth += 2 if module.rank > 0 else 1
+        elif isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, BlockDiagonalLinear)):
             depth += 1
         elif isinstance(module, (
             torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU,
@@ -196,9 +199,10 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
     has_conv = False
     
     from .nn.block_diagonal import BlockDiagonalLinear
+    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 
     for module in model.modules():
-        if isinstance(module, BlockDiagonalLinear):
+        if isinstance(module, (BlockDiagonalLinear, BlockDiagLowRankLinear)):
             dims.append(module.in_features)
             dims.append(module.out_features)
         elif isinstance(module, torch.nn.Linear):
@@ -288,6 +292,8 @@ def compute_cnn_rotations(
 
 
 def compute_rotations_for_model(model: torch.nn.Module, use_bsgs: bool = True) -> List[int]:
+    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+
     dims = _get_model_dimensions(model)
     if not dims:
         return [1, -1]
@@ -299,6 +305,15 @@ def compute_rotations_for_model(model: torch.nn.Module, use_bsgs: bool = True) -
     else:
         rotations = list(range(1, max_dim))
     
+    # BD+LR layers need power-of-2 rotations for full-slot reduce-sum
+    for module in model.modules():
+        if isinstance(module, BlockDiagLowRankLinear) and module.rank > 0:
+            step = 1
+            while step <= max_dim * 64:  # cover up to num_slots
+                rotations.append(step)
+                step *= 2
+            break
+
     neg_rotations = [-r for r in rotations if r > 0]
     return sorted(set(rotations + neg_rotations))
 

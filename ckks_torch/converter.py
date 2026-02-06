@@ -36,6 +36,8 @@ from .nn import (
 )
 from .nn.batchnorm import fold_batchnorm_into_linear, fold_batchnorm_into_conv
 from .nn.block_diagonal import BlockDiagonalLinear
+from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+from .nn.encrypted_block_diag_lr import EncryptedBlockDiagLowRank
 
 
 # =============================================================================
@@ -116,6 +118,7 @@ class ModelConverter:
         self._converters: Dict[Type[nn.Module], Callable] = {
             nn.Linear: self._convert_linear,
             BlockDiagonalLinear: self._convert_block_diagonal,
+            BlockDiagLowRankLinear: self._convert_block_diag_low_rank,
             nn.Conv2d: self._convert_conv2d,
             nn.AvgPool2d: self._convert_avgpool2d,
             nn.Flatten: self._convert_flatten,
@@ -282,6 +285,10 @@ class ModelConverter:
     def _convert_block_diagonal(self, module: BlockDiagonalLinear) -> EncryptedModule:
         """Convert a BlockDiagonalLinear by expanding to dense weight."""
         return EncryptedLinear.from_torch(module.to_linear())
+
+    def _convert_block_diag_low_rank(self, module: BlockDiagLowRankLinear) -> EncryptedModule:
+        """Convert a BlockDiagLowRankLinear to encrypted BD + low-rank module."""
+        return EncryptedBlockDiagLowRank.from_module(module)
 
     def _convert_conv2d(self, module: nn.Conv2d) -> EncryptedConv2d:
         """Convert a Conv2d layer."""
