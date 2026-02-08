@@ -480,12 +480,7 @@ class EncryptedTensor:
         
         if bias is not None:
             bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
-            # Use result's slot count, not input's - output size may differ after matmul
-            slot_count = result._cipher.size
-            bias_padded = [0.0] * slot_count
-            for i, v in enumerate(bias_flat.tolist()):
-                bias_padded[i] = v
-            result = result.add(bias_padded)
+            result = result.add(bias_flat.tolist())
         
         return result
     

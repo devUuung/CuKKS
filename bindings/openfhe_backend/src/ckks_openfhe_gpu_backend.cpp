@@ -19,6 +19,11 @@
 #include <map>
 #include <memory>
 #include <chrono>
+#include <unordered_set>
+#include <unordered_map>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
 namespace py = pybind11;
 using namespace lbcrypto;
@@ -41,6 +46,11 @@ struct GPUContextHandle {
     
     // Crypto parameters for GPU operations
     std::shared_ptr<CryptoParametersCKKSRNS> crypto_params;
+
+    std::string key_tag;
+
+    // Cache for repeatedly used plaintext vectors (e.g., layer biases)
+    std::unordered_map<std::uint64_t, ckks::PtAccurate> gpu_plain_cache;
 };
 
 struct GPUKeySetHandle {
@@ -132,7 +142,7 @@ std::shared_ptr<GPUCiphertextHandle> make_cipher_from_gpu_lazy(
     handle->gpu_ct = std::make_unique<ckks::CtAccurate>(std::move(gpu_ct));
     handle->gpu_loaded = true;
     
-    handle->ciphertext = template_ct->Clone();
+    handle->ciphertext = template_ct->CloneZero();
     
     return handle;
 }
@@ -184,6 +194,201 @@ std::shared_ptr<GPUCiphertextHandle> make_cipher_from_gpu_fast(
     syncGPUtoCPU(handle.get());
     
     return handle;
+}
+
+bool has_gpu_rotation(const std::shared_ptr<GPUContextHandle>& ctx, int rotation) {
+    if (!ctx->gpu_rot_keys) return false;
+    return ctx->gpu_rot_keys->find(rotation) != ctx->gpu_rot_keys->end();
+}
+
+bool ensure_gpu_rotation_key(const std::shared_ptr<GPUContextHandle>& ctx, int rotation) {
+    if (!ctx->gpu_initialized || !ctx->gpu_rot_keys) return false;
+    if (has_gpu_rotation(ctx, rotation)) return true;
+    if (ctx->key_tag.empty()) return false;
+
+    try {
+        auto automorph_keys = ctx->context->GetEvalAutomorphismKeyMap(ctx->key_tag);
+        uint32_t auto_idx = ctx->context->FindAutomorphismIndex(rotation);
+        auto it = automorph_keys.find(auto_idx);
+        if (it == automorph_keys.end()) {
+            return false;
+        }
+        ctx->gpu_rot_keys->emplace(rotation, LoadRelinKey(it->second));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool env_flag(const char* name, bool default_value) {
+    const char* v = std::getenv(name);
+    if (v == nullptr) return default_value;
+    if (v[0] == '\0') return default_value;
+    return v[0] != '0';
+}
+
+bool use_gpu_plaintext_cache() {
+    static const bool enabled = env_flag("CUKKS_GPU_PTXT_CACHE", true);
+    return enabled;
+}
+
+bool use_tree_reduction() {
+    static const bool enabled = env_flag("CUKKS_GPU_TREE_REDUCTION", false);
+    return enabled;
+}
+
+bool use_batch_muladd() {
+    static const bool enabled = env_flag("CUKKS_GPU_BATCH_MULADD", true);
+    return enabled;
+}
+
+// ============== Profiling infrastructure ==============
+bool profiling_enabled() {
+    static const bool enabled = env_flag("CUKKS_PROFILE", false);
+    return enabled;
+}
+
+struct OpTimer {
+    const char* name;
+    std::chrono::high_resolution_clock::time_point start;
+    bool active;
+
+    explicit OpTimer(const char* op_name) : name(op_name), active(profiling_enabled()) {
+        if (active) {
+            start = std::chrono::high_resolution_clock::now();
+        }
+    }
+    ~OpTimer() {
+        if (active) {
+            auto end = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end - start).count();
+            std::cerr << "[CUKKS_PROFILE] " << name << ": " << ms << " ms" << std::endl;
+        }
+    }
+};
+
+std::uint64_t hash_plain_vector(const std::vector<double>& values, uint32_t level) {
+    std::uint64_t h = 1469598103934665603ULL;
+    auto mix = [&](std::uint64_t x) {
+        h ^= x;
+        h *= 1099511628211ULL;
+    };
+
+    mix(static_cast<std::uint64_t>(level));
+    mix(static_cast<std::uint64_t>(values.size()));
+    for (double v : values) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        mix(bits);
+    }
+    return h;
+}
+
+ckks::PtAccurate make_gpu_plaintext(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::vector<double>& values,
+    uint32_t level
+) {
+    auto plaintext = ctx->context->MakeCKKSPackedPlaintext(values, 1, level);
+    plaintext->Encode();
+    return LoadAccuratePlaintext(plaintext, plaintext->GetElement<DCRTPoly>());
+}
+
+const ckks::PtAccurate& get_cached_gpu_plaintext(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::vector<double>& values,
+    uint32_t level
+) {
+    const std::uint64_t key = hash_plain_vector(values, level);
+    auto it = ctx->gpu_plain_cache.find(key);
+    if (it != ctx->gpu_plain_cache.end()) {
+        return it->second;
+    }
+
+    if (ctx->gpu_plain_cache.size() >= 2048) {
+        ctx->gpu_plain_cache.clear();
+    }
+
+    ckks::PtAccurate gpu_pt = make_gpu_plaintext(ctx, values, level);
+    auto inserted = ctx->gpu_plain_cache.emplace(key, std::move(gpu_pt));
+    return inserted.first->second;
+}
+
+std::vector<ckks::PtAccurate> make_gpu_plaintext_cache(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::vector<std::vector<double>>& diagonals,
+    uint32_t level
+) {
+    std::vector<ckks::PtAccurate> cache;
+    cache.reserve(diagonals.size());
+    for (const auto& diag : diagonals) {
+        cache.push_back(make_gpu_plaintext(ctx, diag, level));
+    }
+    return cache;
+}
+
+ckks::CtAccurate reduce_add_gpu(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    std::vector<ckks::CtAccurate>& terms
+) {
+    if (terms.empty()) {
+        throw std::runtime_error("reduce_add_gpu received empty terms");
+    }
+    if (!use_tree_reduction() || terms.size() <= 128) {
+        ckks::CtAccurate acc = std::move(terms.front());
+        for (std::size_t i = 1; i < terms.size(); ++i) {
+            acc = ctx->gpu_context->Add(acc, terms[i]);
+        }
+        return acc;
+    }
+    while (terms.size() > 1) {
+        std::vector<ckks::CtAccurate> next;
+        next.reserve((terms.size() + 1) / 2);
+        for (std::size_t i = 0; i + 1 < terms.size(); i += 2) {
+            next.push_back(ctx->gpu_context->Add(terms[i], terms[i + 1]));
+        }
+        if (terms.size() % 2 == 1) {
+            next.push_back(std::move(terms.back()));
+        }
+        terms = std::move(next);
+    }
+    return std::move(terms.front());
+}
+
+ckks::CtAccurate batch_mult_plain_add_gpu(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::vector<const ckks::CtAccurate*>& cts,
+    const std::vector<const ckks::PtAccurate*>& pts
+) {
+    if (cts.empty() || pts.empty() || cts.size() != pts.size()) {
+        throw std::runtime_error("batch_mult_plain_add_gpu received invalid inputs");
+    }
+
+    const auto degree = ctx->gpu_context->GetDegree();
+    const int num_primes = static_cast<int>(cts.front()->ax__.size() / degree);
+
+    std::vector<const std::uint64_t*> ax_addr;
+    std::vector<const std::uint64_t*> bx_addr;
+    std::vector<const std::uint64_t*> mx_addr;
+    ax_addr.reserve(cts.size());
+    bx_addr.reserve(cts.size());
+    mx_addr.reserve(cts.size());
+
+    for (std::size_t i = 0; i < cts.size(); ++i) {
+        ax_addr.push_back(cts[i]->ax__.data());
+        bx_addr.push_back(cts[i]->bx__.data());
+        mx_addr.push_back(pts[i]->mx__.data());
+    }
+
+    ckks::CtAccurate out;
+    out.ax__.resize(static_cast<std::size_t>(num_primes) * degree);
+    out.bx__.resize(static_cast<std::size_t>(num_primes) * degree);
+    ctx->gpu_context->hadamardMultAndAddBatch(ax_addr, bx_addr, mx_addr, num_primes, out.ax__, out.bx__);
+
+    out.level = cts.front()->level;
+    out.noiseScaleDeg = cts.front()->noiseScaleDeg + pts.front()->noiseScaleDeg;
+    out.scalingFactor = cts.front()->scalingFactor * pts.front()->scalingFactor;
+    return out;
 }
 
 Plaintext make_plaintext(
@@ -345,6 +550,8 @@ std::shared_ptr<GPUKeySetHandle> keygen(
         }
         context->EvalBootstrapKeyGen(key_pair.secretKey, num_slots);
     }
+
+    ctx->key_tag = key_pair.secretKey->GetKeyTag();
     
     if (enable_gpu) {
         init_gpu(ctx);
@@ -379,6 +586,7 @@ std::shared_ptr<GPUCiphertextHandle> encrypt(
     const std::shared_ptr<GPUKeySetHandle>& keys,
     const std::vector<double>& values
 ) {
+    OpTimer timer("encrypt");
     auto plaintext = make_plaintext(ctx, values);
     auto cipher = ctx->context->Encrypt(keys->public_key, plaintext);
     return make_cipher(ctx, cipher);
@@ -389,7 +597,7 @@ std::vector<double> decrypt(
     const std::shared_ptr<GPUKeySetHandle>& keys,
     const std::shared_ptr<GPUCiphertextHandle>& cipher
 ) {
-    // Sync from GPU if needed
+    OpTimer timer("decrypt");
     if (cipher->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(cipher.get())->syncFromGPU();
     }
@@ -424,7 +632,16 @@ std::shared_ptr<GPUCiphertextHandle> add_plain(
     const std::shared_ptr<GPUCiphertextHandle>& lhs,
     const std::vector<double>& plain
 ) {
+    OpTimer timer("add_plain");
     auto ctx = lhs->context;
+    if (ctx->gpu_initialized) {
+        lhs->ensureGPU();
+        uint32_t ct_level = lhs->gpu_ct->level;
+        const ckks::PtAccurate& gpu_pt = get_cached_gpu_plaintext(ctx, plain, ct_level);
+        ckks::CtAccurate result = *lhs->gpu_ct;
+        ctx->gpu_context->AddCoreInPlace(result.bx__, gpu_pt.mx__);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
+    }
     if (lhs->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
     }
@@ -457,6 +674,16 @@ std::shared_ptr<GPUCiphertextHandle> sub_plain(
     const std::vector<double>& plain
 ) {
     auto ctx = lhs->context;
+    if (ctx->gpu_initialized) {
+        lhs->ensureGPU();
+        uint32_t ct_level = lhs->gpu_ct->level;
+        const ckks::PtAccurate& gpu_pt = get_cached_gpu_plaintext(ctx, plain, ct_level);
+        ckks::CtAccurate result = *lhs->gpu_ct;
+        const auto degree = ctx->gpu_context->GetDegree();
+        const int num_primes = static_cast<int>(result.bx__.size() / degree);
+        ctx->gpu_context->SubInplace(result.bx__.data(), gpu_pt.mx__.data(), num_primes);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
+    }
     if (lhs->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(lhs.get())->syncFromGPU();
     }
@@ -513,11 +740,10 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
 std::shared_ptr<GPUCiphertextHandle> square_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& cipher
 ) {
+    OpTimer timer("square");
     auto ctx = cipher->context;
     
     if (ctx->gpu_initialized && ctx->gpu_evk) {
-        // GPU path: square + relin (no rescale) - matches mul_cipher behavior
-        // Python API calls .rescale() separately after square()
         cipher->ensureGPU();
         ckks::CtAccurate result = ctx->gpu_context->EvalSquareAndRelinNoRescale(
             *cipher->gpu_ct, *ctx->gpu_evk);
@@ -532,14 +758,13 @@ std::shared_ptr<GPUCiphertextHandle> square_cipher(
 std::shared_ptr<GPUCiphertextHandle> rescale_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
+    OpTimer timer("rescale");
     auto ctx = tensor->context;
     
     if (ctx->gpu_initialized && tensor->gpu_loaded) {
-        // GPU path
         ckks::CtAccurate result = ctx->gpu_context->Rescale(*tensor->gpu_ct);
-        return make_cipher_from_gpu_fast(ctx, result, tensor->ciphertext);
+        return make_cipher_from_gpu_lazy(ctx, std::move(result), tensor->ciphertext);
     } else {
-        // CPU fallback
         auto result = ctx->context->ModReduce(tensor->ciphertext);
         return make_cipher(ctx, result);
     }
@@ -549,6 +774,7 @@ std::shared_ptr<GPUCiphertextHandle> rotate_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor,
     int index
 ) {
+    OpTimer timer("rotate");
     auto ctx = tensor->context;
 
     if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
@@ -573,6 +799,28 @@ std::shared_ptr<GPUCiphertextHandle> sum_slots_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
     auto ctx = tensor->context;
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        std::uint32_t slots = ctx->context->GetRingDimension() / 2;
+        bool rotations_available = true;
+        for (std::uint32_t step = 1; step < slots; step <<= 1) {
+            if (!ensure_gpu_rotation_key(ctx, static_cast<int>(step))) {
+                rotations_available = false;
+                break;
+            }
+        }
+        if (rotations_available) {
+            tensor->ensureGPU();
+            ckks::CtAccurate result = *tensor->gpu_ct;
+            for (std::uint32_t step = 1; step < slots; step <<= 1) {
+                auto it = ctx->gpu_rot_keys->find(static_cast<int>(step));
+                uint32_t auto_index = ctx->context->FindAutomorphismIndex(static_cast<int>(step));
+                ckks::CtAccurate rotated = ctx->gpu_context->EvalAtIndex(result, it->second, auto_index);
+                result = ctx->gpu_context->Add(result, rotated);
+            }
+            return make_cipher_from_gpu_lazy(ctx, std::move(result), tensor->ciphertext);
+        }
+    }
+
     if (tensor->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
@@ -586,6 +834,101 @@ std::shared_ptr<GPUCiphertextHandle> matvec_diag_cipher(
     const std::vector<std::vector<double>>& diagonals
 ) {
     auto ctx = tensor->context;
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        std::vector<bool> diag_nonzero(diagonals.size(), false);
+        for (std::size_t idx = 0; idx < diagonals.size(); ++idx) {
+            for (double v : diagonals[idx]) {
+                if (v != 0.0) {
+                    diag_nonzero[idx] = true;
+                    break;
+                }
+            }
+        }
+
+        std::unordered_set<int> required_rotations;
+        for (std::size_t idx = 1; idx < diagonals.size(); ++idx) {
+            if (diag_nonzero[idx]) {
+                required_rotations.insert(static_cast<int>(idx));
+            }
+        }
+
+        bool rotations_available = true;
+        for (int rot : required_rotations) {
+            if (!ensure_gpu_rotation_key(ctx, rot)) {
+                rotations_available = false;
+                break;
+            }
+        }
+
+        if (rotations_available) {
+            tensor->ensureGPU();
+            std::vector<std::size_t> active_indices;
+            active_indices.reserve(diagonals.size());
+            for (std::size_t idx = 0; idx < diagonals.size(); ++idx) {
+                if (idx == 0 || diag_nonzero[idx]) {
+                    active_indices.push_back(idx);
+                }
+            }
+            std::vector<ckks::PtAccurate> pt_cache;
+            if (use_gpu_plaintext_cache()) {
+                std::vector<std::vector<double>> active_diagonals;
+                active_diagonals.reserve(active_indices.size());
+                for (std::size_t idx : active_indices) {
+                    active_diagonals.push_back(diagonals[idx]);
+                }
+                pt_cache = make_gpu_plaintext_cache(ctx, active_diagonals, tensor->gpu_ct->level);
+            }
+            std::vector<ckks::CtAccurate> rotated_terms;
+            rotated_terms.reserve(active_indices.size());
+            std::vector<ckks::PtAccurate> pt_terms;
+            if (!use_gpu_plaintext_cache()) {
+                pt_terms.reserve(active_indices.size());
+            }
+
+            for (std::size_t t = 0; t < active_indices.size(); ++t) {
+                std::size_t idx = active_indices[t];
+
+                ckks::CtAccurate rotated = *tensor->gpu_ct;
+                if (idx > 0) {
+                    auto it = ctx->gpu_rot_keys->find(static_cast<int>(idx));
+                    uint32_t auto_index = ctx->context->FindAutomorphismIndex(static_cast<int>(idx));
+                    rotated = ctx->gpu_context->EvalAtIndex(*tensor->gpu_ct, it->second, auto_index);
+                }
+
+                rotated_terms.push_back(std::move(rotated));
+
+                if (!use_gpu_plaintext_cache()) {
+                    auto gpu_pt = make_gpu_plaintext(ctx, diagonals[idx], tensor->gpu_ct->level);
+                    pt_terms.push_back(std::move(gpu_pt));
+                }
+            }
+
+            if (!rotated_terms.empty()) {
+                if (use_batch_muladd()) {
+                    std::vector<const ckks::CtAccurate*> ct_ptrs;
+                    std::vector<const ckks::PtAccurate*> pt_ptrs;
+                    ct_ptrs.reserve(rotated_terms.size());
+                    pt_ptrs.reserve(rotated_terms.size());
+                    for (std::size_t i = 0; i < rotated_terms.size(); ++i) {
+                        ct_ptrs.push_back(&rotated_terms[i]);
+                        pt_ptrs.push_back(use_gpu_plaintext_cache() ? &pt_cache[i] : &pt_terms[i]);
+                    }
+                    ckks::CtAccurate accumulator = batch_mult_plain_add_gpu(ctx, ct_ptrs, pt_ptrs);
+                    return make_cipher_from_gpu_lazy(ctx, std::move(accumulator), tensor->ciphertext);
+                }
+
+                std::vector<ckks::CtAccurate> terms;
+                terms.reserve(rotated_terms.size());
+                for (std::size_t i = 0; i < rotated_terms.size(); ++i) {
+                    const auto& pt = use_gpu_plaintext_cache() ? pt_cache[i] : pt_terms[i];
+                    terms.push_back(ctx->gpu_context->EvalMultPlain(rotated_terms[i], pt));
+                }
+                ckks::CtAccurate accumulator = reduce_add_gpu(ctx, terms);
+                return make_cipher_from_gpu_lazy(ctx, std::move(accumulator), tensor->ciphertext);
+            }
+        }
+    }
+
     if (tensor->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
@@ -604,6 +947,15 @@ std::shared_ptr<GPUCiphertextHandle> poly_eval_cipher(
     const std::vector<double>& coeffs
 ) {
     auto ctx = tensor->context;
+    if (ctx->gpu_initialized && !coeffs.empty()) {
+        tensor->ensureGPU();
+
+        if (coeffs.size() == 3 && coeffs[0] == 0.0 && coeffs[1] == 0.0 && coeffs[2] == 1.0 && ctx->gpu_evk) {
+            ckks::CtAccurate squared = ctx->gpu_context->EvalSquareAndRelinNoRescale(*tensor->gpu_ct, *ctx->gpu_evk);
+            return make_cipher_from_gpu_lazy(ctx, std::move(squared), tensor->ciphertext);
+        }
+    }
+
     if (tensor->gpu_loaded) {
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
@@ -616,9 +968,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
     const std::vector<std::vector<double>>& matrix
 ) {
     auto ctx = tensor->context;
-    if (tensor->gpu_loaded) {
-        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
-    }
     auto cc = ctx->context;
     const std::size_t m = matrix.size();
     if (m == 0) throw std::invalid_argument("matrix must not be empty");
@@ -637,6 +986,104 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
                 break;
             }
         }
+    }
+
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        std::unordered_set<int> required_rotations;
+        for (std::size_t k = 1; k < n; ++k) {
+            if (diag_nonzero[k]) {
+                required_rotations.insert(static_cast<int>(k));
+            }
+        }
+        bool rotations_available = true;
+        for (int rot : required_rotations) {
+            if (!ensure_gpu_rotation_key(ctx, rot)) {
+                rotations_available = false;
+                break;
+            }
+        }
+
+        if (rotations_available) {
+            tensor->ensureGPU();
+            std::vector<std::size_t> active_indices;
+            active_indices.reserve(n);
+            std::vector<std::vector<double>> active_diagonals;
+            if (use_gpu_plaintext_cache()) {
+                active_diagonals.reserve(n);
+            }
+            for (std::size_t k = 0; k < n; ++k) {
+                if (!diag_nonzero[k]) continue;
+                if (use_gpu_plaintext_cache()) {
+                    std::vector<double> diag(slots, 0.0);
+                    for (std::size_t i = 0; i < m; ++i) {
+                        diag[i] = matrix[i][(i + k) % n];
+                    }
+                    active_diagonals.push_back(std::move(diag));
+                }
+                active_indices.push_back(k);
+            }
+            std::vector<ckks::PtAccurate> pt_cache;
+            if (use_gpu_plaintext_cache()) {
+                pt_cache = make_gpu_plaintext_cache(ctx, active_diagonals, tensor->gpu_ct->level);
+            }
+            std::vector<ckks::CtAccurate> rotated_terms;
+            rotated_terms.reserve(active_indices.size());
+            std::vector<ckks::PtAccurate> pt_terms;
+            if (!use_gpu_plaintext_cache()) {
+                pt_terms.reserve(active_indices.size());
+            }
+
+            for (std::size_t t = 0; t < active_indices.size(); ++t) {
+                std::size_t k = active_indices[t];
+
+                ckks::CtAccurate rotated = *tensor->gpu_ct;
+                if (k > 0) {
+                    auto it = ctx->gpu_rot_keys->find(static_cast<int>(k));
+                    uint32_t auto_index = ctx->context->FindAutomorphismIndex(static_cast<int>(k));
+                    rotated = ctx->gpu_context->EvalAtIndex(*tensor->gpu_ct, it->second, auto_index);
+                }
+
+                rotated_terms.push_back(std::move(rotated));
+
+                if (!use_gpu_plaintext_cache()) {
+                    std::vector<double> diag(slots, 0.0);
+                    for (std::size_t i = 0; i < m; ++i) {
+                        diag[i] = matrix[i][(i + k) % n];
+                    }
+                    auto gpu_pt = make_gpu_plaintext(ctx, diag, tensor->gpu_ct->level);
+                    pt_terms.push_back(std::move(gpu_pt));
+                }
+            }
+
+            if (rotated_terms.empty()) {
+                throw std::runtime_error("failed to build accumulator in dense matmul (all-zero matrix)");
+            }
+            if (use_batch_muladd()) {
+                std::vector<const ckks::CtAccurate*> ct_ptrs;
+                std::vector<const ckks::PtAccurate*> pt_ptrs;
+                ct_ptrs.reserve(rotated_terms.size());
+                pt_ptrs.reserve(rotated_terms.size());
+                for (std::size_t i = 0; i < rotated_terms.size(); ++i) {
+                    ct_ptrs.push_back(&rotated_terms[i]);
+                    pt_ptrs.push_back(use_gpu_plaintext_cache() ? &pt_cache[i] : &pt_terms[i]);
+                }
+                ckks::CtAccurate accumulator = batch_mult_plain_add_gpu(ctx, ct_ptrs, pt_ptrs);
+                return make_cipher_from_gpu_lazy(ctx, std::move(accumulator), tensor->ciphertext);
+            }
+
+            std::vector<ckks::CtAccurate> terms;
+            terms.reserve(rotated_terms.size());
+            for (std::size_t i = 0; i < rotated_terms.size(); ++i) {
+                const auto& pt = use_gpu_plaintext_cache() ? pt_cache[i] : pt_terms[i];
+                terms.push_back(ctx->gpu_context->EvalMultPlain(rotated_terms[i], pt));
+            }
+            ckks::CtAccurate accumulator = reduce_add_gpu(ctx, terms);
+            return make_cipher_from_gpu_lazy(ctx, std::move(accumulator), tensor->ciphertext);
+        }
+    }
+
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
 
     Ciphertext<DCRTPoly> accumulator;
@@ -680,6 +1127,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
     std::uint32_t bsgs_n1,
     std::uint32_t bsgs_n2
 ) {
+    OpTimer timer("matmul_bsgs");
     auto ctx = tensor->context;
     auto cc = ctx->context;
     const std::size_t out_features = matrix.size();
@@ -695,24 +1143,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         bsgs_n2 = (static_cast<std::uint32_t>(in_features) + bsgs_n1 - 1) / bsgs_n1;
     }
     
-    if (tensor->gpu_loaded) {
-        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
-    }
-    
-    std::vector<Ciphertext<DCRTPoly>> baby_ciphers;
-    baby_ciphers.reserve(bsgs_n1);
-    
-    auto precomp = cc->EvalFastRotationPrecompute(tensor->ciphertext);
-    
-    for (std::uint32_t j = 0; j < bsgs_n1 && j < in_features; ++j) {
-        if (j == 0) {
-            baby_ciphers.push_back(tensor->ciphertext);
-        } else {
-            auto rotated = cc->EvalFastRotation(tensor->ciphertext, j, cc->GetCyclotomicOrder(), precomp);
-            baby_ciphers.push_back(rotated);
-        }
-    }
-    
     // Pre-scan: identify non-zero diagonals to skip zero diagonals
     // (block-diagonal weight matrices have exact structural zeros)
     std::vector<bool> diag_nonzero(in_features, false);
@@ -725,17 +1155,177 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         }
     }
 
+    if (ctx->gpu_initialized && ctx->gpu_rot_keys) {
+        std::unordered_set<int> required_rotations;
+        for (std::size_t d = 1; d < in_features; ++d) {
+            if (!diag_nonzero[d]) continue;
+            int baby_step = static_cast<int>(d % bsgs_n1);
+            int giant_step = static_cast<int>((d / bsgs_n1) * bsgs_n1);
+            if (baby_step != 0) required_rotations.insert(baby_step);
+            if (giant_step != 0) required_rotations.insert(giant_step);
+        }
+
+        bool rotations_available = true;
+        for (int rot : required_rotations) {
+            if (!ensure_gpu_rotation_key(ctx, rot)) {
+                rotations_available = false;
+                break;
+            }
+        }
+
+        if (rotations_available) {
+            tensor->ensureGPU();
+            // Map diagonal index → pointer into the global gpu_plain_cache
+            std::vector<const ckks::PtAccurate*> pt_cached_ptrs(in_features, nullptr);
+            {
+                OpTimer pt_timer("matmul_bsgs.pt_encode");
+                if (use_gpu_plaintext_cache()) {
+                    for (std::size_t d = 0; d < in_features; ++d) {
+                        if (!diag_nonzero[d]) continue;
+                        std::uint32_t j = static_cast<std::uint32_t>(d % bsgs_n1);
+                        std::uint32_t giant_step = static_cast<std::uint32_t>(d) - j;
+                        std::vector<double> diag(slots, 0.0);
+                        for (std::size_t i = 0; i < slots; ++i) {
+                            std::int64_t row_signed = static_cast<std::int64_t>(i) - static_cast<std::int64_t>(giant_step);
+                            std::size_t row = static_cast<std::size_t>((row_signed % static_cast<std::int64_t>(out_features) + static_cast<std::int64_t>(out_features)) % static_cast<std::int64_t>(out_features));
+                            std::size_t col = (i + j) % in_features;
+                            diag[i] = matrix[row][col];
+                        }
+                        pt_cached_ptrs[d] = &get_cached_gpu_plaintext(ctx, diag, tensor->gpu_ct->level);
+                    }
+                }
+            }
+
+            std::vector<ckks::CtAccurate> baby_ciphers;
+            baby_ciphers.reserve(bsgs_n1);
+
+            {
+                OpTimer baby_timer("matmul_bsgs.baby_steps");
+                for (std::uint32_t j = 0; j < bsgs_n1 && j < in_features; ++j) {
+                    if (j == 0) {
+                        baby_ciphers.push_back(*tensor->gpu_ct);
+                    } else {
+                        auto it = ctx->gpu_rot_keys->find(static_cast<int>(j));
+                        uint32_t auto_index = ctx->context->FindAutomorphismIndex(static_cast<int>(j));
+                        baby_ciphers.push_back(ctx->gpu_context->EvalAtIndex(*tensor->gpu_ct, it->second, auto_index));
+                    }
+                }
+            }
+
+            std::vector<ckks::CtAccurate> block_terms;
+            block_terms.reserve(bsgs_n2);
+
+            {
+                OpTimer gs_timer("matmul_bsgs.giant_steps");
+                for (std::uint32_t k = 0; k < bsgs_n2; ++k) {
+                    std::uint32_t giant_step = k * bsgs_n1;
+                    std::vector<std::uint32_t> active_js;
+                    active_js.reserve(baby_ciphers.size());
+                    std::vector<ckks::PtAccurate> pt_terms;
+                    if (!use_gpu_plaintext_cache()) {
+                        pt_terms.reserve(baby_ciphers.size());
+                    }
+
+                    for (std::uint32_t j = 0; j < baby_ciphers.size(); ++j) {
+                        std::uint32_t d = giant_step + j;
+                        if (d >= in_features) break;
+                        if (!diag_nonzero[d]) continue;
+                        active_js.push_back(j);
+                        if (use_gpu_plaintext_cache()) {
+                        } else {
+                            std::vector<double> diag(slots, 0.0);
+                            for (std::size_t i = 0; i < slots; ++i) {
+                                std::int64_t row_signed = static_cast<std::int64_t>(i) - static_cast<std::int64_t>(giant_step);
+                                std::size_t row = static_cast<std::size_t>((row_signed % static_cast<std::int64_t>(out_features) + static_cast<std::int64_t>(out_features)) % static_cast<std::int64_t>(out_features));
+                                std::size_t col = (i + j) % in_features;
+                                diag[i] = matrix[row][col];
+                            }
+                            auto gpu_pt = make_gpu_plaintext(ctx, diag, tensor->gpu_ct->level);
+                            pt_terms.push_back(std::move(gpu_pt));
+                        }
+                    }
+
+                    if (active_js.empty()) continue;
+                    ckks::CtAccurate block;
+                    if (use_batch_muladd()) {
+                        std::vector<const ckks::CtAccurate*> ct_ptrs;
+                        std::vector<const ckks::PtAccurate*> pt_ptrs;
+                        ct_ptrs.reserve(active_js.size());
+                        pt_ptrs.reserve(active_js.size());
+                        for (std::size_t idx = 0; idx < active_js.size(); ++idx) {
+                            std::uint32_t j = active_js[idx];
+                            std::uint32_t d = giant_step + j;
+                            ct_ptrs.push_back(&baby_ciphers[j]);
+                            if (use_gpu_plaintext_cache()) {
+                                pt_ptrs.push_back(pt_cached_ptrs[d]);
+                            } else {
+                                pt_ptrs.push_back(&pt_terms[idx]);
+                            }
+                        }
+                        block = batch_mult_plain_add_gpu(ctx, ct_ptrs, pt_ptrs);
+                    } else {
+                        std::vector<ckks::CtAccurate> mult_terms;
+                        mult_terms.reserve(active_js.size());
+                        for (std::size_t idx = 0; idx < active_js.size(); ++idx) {
+                            std::uint32_t j = active_js[idx];
+                            std::uint32_t d = giant_step + j;
+                            if (use_gpu_plaintext_cache()) {
+                                mult_terms.push_back(ctx->gpu_context->EvalMultPlain(baby_ciphers[j], *pt_cached_ptrs[d]));
+                            } else {
+                                mult_terms.push_back(ctx->gpu_context->EvalMultPlain(baby_ciphers[j], pt_terms[idx]));
+                            }
+                        }
+                        block = reduce_add_gpu(ctx, mult_terms);
+                    }
+
+                    if (k > 0) {
+                        auto it = ctx->gpu_rot_keys->find(static_cast<int>(giant_step));
+                        uint32_t auto_index = ctx->context->FindAutomorphismIndex(static_cast<int>(giant_step));
+                        block = ctx->gpu_context->EvalAtIndex(block, it->second, auto_index);
+                    }
+
+                    block_terms.push_back(std::move(block));
+                }
+            }
+
+            if (block_terms.empty()) {
+                throw std::runtime_error("failed to build accumulator in BSGS matmul (all-zero matrix)");
+            }
+            ckks::CtAccurate accumulator = reduce_add_gpu(ctx, block_terms);
+
+            return make_cipher_from_gpu_lazy(ctx, std::move(accumulator), tensor->ciphertext);
+        }
+    }
+
+    if (tensor->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
+    }
+
+    std::vector<Ciphertext<DCRTPoly>> baby_ciphers;
+    baby_ciphers.reserve(bsgs_n1);
+
+    auto precomp = cc->EvalFastRotationPrecompute(tensor->ciphertext);
+
+    for (std::uint32_t j = 0; j < bsgs_n1 && j < in_features; ++j) {
+        if (j == 0) {
+            baby_ciphers.push_back(tensor->ciphertext);
+        } else {
+            auto rotated = cc->EvalFastRotation(tensor->ciphertext, j, cc->GetCyclotomicOrder(), precomp);
+            baby_ciphers.push_back(rotated);
+        }
+    }
+
     Ciphertext<DCRTPoly> accumulator;
-    
+
     for (std::uint32_t k = 0; k < bsgs_n2; ++k) {
         std::uint32_t giant_step = k * bsgs_n1;
         Ciphertext<DCRTPoly> block;
-        
+
         for (std::uint32_t j = 0; j < baby_ciphers.size(); ++j) {
             std::uint32_t d = giant_step + j;
             if (d >= in_features) break;
             if (!diag_nonzero[d]) continue;  // skip zero diagonal
-            
+
             std::vector<double> diag(slots, 0.0);
             for (std::size_t i = 0; i < slots; ++i) {
                 std::int64_t row_signed = static_cast<std::int64_t>(i) - static_cast<std::int64_t>(giant_step);
@@ -743,29 +1333,29 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
                 std::size_t col = (i + j) % in_features;
                 diag[i] = matrix[row][col];
             }
-            
+
             auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(ctx, diag));
-            
+
             if (!block) {
                 block = term;
             } else {
                 block = cc->EvalAdd(block, term);
             }
         }
-        
+
         if (!block) continue;
-        
+
         if (k > 0) {
             block = cc->EvalAtIndex(block, static_cast<int>(giant_step));
         }
-        
+
         if (!accumulator) {
             accumulator = block;
         } else {
             accumulator = cc->EvalAdd(accumulator, block);
         }
     }
-    
+
     auto result = make_cipher(ctx, accumulator);
     if (ctx->gpu_initialized) {
         result->ensureGPU();

@@ -53,6 +53,9 @@ vgcore.*
 # Data files (large binary datasets)
 data/
 
+# Experiments (paper-specific, not part of library)
+experiments/
+
 # Dotfiles (except .github, .gitignore)
 .*
 !.github/

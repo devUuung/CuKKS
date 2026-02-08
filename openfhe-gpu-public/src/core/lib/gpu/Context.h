@@ -67,6 +67,10 @@ class Context {
 
   CtAccurate EvalMultPlain(const CtAccurate& ct, const PtAccurate& pt) const;
 
+  CtAccurate EvalAddPlain(const CtAccurate& ct, const PtAccurate& pt) const;
+
+  CtAccurate EvalSubPlain(const CtAccurate& ct, const PtAccurate& pt) const;
+
   void EvalAddInPlaceExt(CtAccurate& ct1, const CtAccurate& ct2) const;
 
   void MultByMonomialInPlace(CtAccurate& ct1, const uint32_t power) const;

@@ -27,6 +27,16 @@ using namespace ckks;
 
 namespace {
 
+inline int ChooseBlockDim(const std::size_t total_threads) {
+  if (total_threads >= (1u << 20)) return 512;
+  if (total_threads >= (1u << 15)) return 256;
+  return 128;
+}
+
+inline int CeilDiv(const std::size_t x, const int y) {
+  return static_cast<int>((x + static_cast<std::size_t>(y) - 1) / static_cast<std::size_t>(y));
+}
+
 // from https://github.com/snucrypto/HEAAN, 131d275
 void mulMod(uint64_t &r, uint64_t a, uint64_t b, uint64_t m) {
   unsigned __int128 mul = static_cast<unsigned __int128>(a) * b;
@@ -663,16 +673,18 @@ CtAccurate Context::EvalSquareAndRelinNoRescale(const CtAccurate& ct, const Eval
 }
 
 
-__global__ void permute_(word64* out, const word64* in, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask) {
+__global__ void permute_(word64* out, const word64* in, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
+  if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
   out[i] = in[limbInd*degree + indices[dataInd]];
 }
 
 __global__ void permute_two_(word64* out_a, word64* out_b, 
-    const word64* in_a, const word64* in_b, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask) {
+    const word64* in_a, const word64* in_b, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
+  if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
   out_a[i] = in_a[limbInd*degree + indices[dataInd]];
@@ -733,9 +745,10 @@ inline __device__ uint32_t ReverseBits(uint32_t num, uint32_t msb) {
 
 
 __global__ void automorph_(word64* out,
-  const word64* in, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask) {
+  const word64* in, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
+  if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
 
@@ -754,9 +767,10 @@ __global__ void automorph_(word64* out,
 }
 
 __global__ void automorph_pair_(word64* out_a, word64* out_b,
-  const word64* in_a, const word64* in_b, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask) {
+  const word64* in_a, const word64* in_b, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
+  if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
 
@@ -781,10 +795,11 @@ DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const uint32
   DeviceVector out(in.size());
   const uint32_t numLimbs = in.size() / degree__;
 
-  const int block_dim = 256;
-  const int grid_dim = degree__ * numLimbs / block_dim;
+  const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
+  const int block_dim = ChooseBlockDim(total_size);
+  const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
-  automorph_<<<grid_dim,block_dim>>>(out.data(), in.data(), auto_index, param__.log_degree_, degree__, degree_mask);
+  automorph_<<<grid_dim, block_dim>>>(out.data(), in.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
 
   return out;
 }
@@ -801,10 +816,11 @@ DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const std::v
 
   DeviceVector indices_gpu(inds);
 
-  const int block_dim = 256;
-  const int grid_dim = degree__ * numLimbs / block_dim;
+  const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
+  const int block_dim = ChooseBlockDim(total_size);
+  const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
-  permute_<<<grid_dim,block_dim>>>(out.data(), in.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask);
+  permute_<<<grid_dim, block_dim>>>(out.data(), in.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
 
   return out;
 }
@@ -821,10 +837,11 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const std::vector<uin
 
   DeviceVector indices_gpu(inds);
 
-  const int block_dim = 256;
-  const int grid_dim = degree__ * numLimbs / block_dim;
+  const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
+  const int block_dim = ChooseBlockDim(total_size);
+  const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
-  permute_two_<<<grid_dim,block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask);
+  permute_two_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
 
   in.ax__ = DeviceVector(out_a);
   in.bx__ = DeviceVector(out_b);
@@ -837,10 +854,11 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const uint32_t auto_i
   DeviceVector out_b(in.bx__.size());
   const uint32_t numLimbs = in.ax__.size() / degree__;
 
-  const int block_dim = 256;
-  const int grid_dim = degree__ * numLimbs / block_dim;
+  const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
+  const int block_dim = ChooseBlockDim(total_size);
+  const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
-  automorph_pair_<<<grid_dim,block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), auto_index, param__.log_degree_, degree__, degree_mask);
+  automorph_pair_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
 
   in.ax__ = DeviceVector(out_a);
   in.bx__ = DeviceVector(out_b);
@@ -2212,6 +2230,27 @@ CtAccurate Context::EvalMultPlain(const CtAccurate& ct, const PtAccurate& pt) co
   return out;
 }
 
+CtAccurate Context::EvalAddPlain(const CtAccurate& ct, const PtAccurate& pt) const {
+  if (ct.bx__.size() != pt.mx__.size()) {
+    throw std::logic_error("EvalAddPlain: ciphertext/plaintext size mismatch");
+  }
+
+  CtAccurate out(ct);
+  AddCoreInPlace(out.bx__, pt.mx__);
+  return out;
+}
+
+CtAccurate Context::EvalSubPlain(const CtAccurate& ct, const PtAccurate& pt) const {
+  if (ct.bx__.size() != pt.mx__.size()) {
+    throw std::logic_error("EvalSubPlain: ciphertext/plaintext size mismatch");
+  }
+
+  CtAccurate out(ct);
+  const int numLimbs = static_cast<int>(out.bx__.size() / degree__);
+  SubInplace(out.bx__.data(), pt.mx__.data(), numLimbs);
+  return out;
+}
+
 void Context::EvalMult(
   const CtAccurate& ct1, const CtAccurate& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
@@ -2710,24 +2749,27 @@ __global__ void sub_from_scalar_(const KernelParams params,
 void Context::AddScalarInPlace(Ciphertext &ct, const word64* op) const {
   auto &ct_bx = ct.getBxDevice();
   const int length = ct_bx.size() / degree__;
-  int gridDim_ = 2048;
-  int blockDim_ = 256;
+  const std::size_t total_size = static_cast<std::size_t>(length) * static_cast<std::size_t>(degree__);
+  int blockDim_ = ChooseBlockDim(total_size);
+  int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
 }
 
 void Context::AddScalarInPlace(CtAccurate &ct, const word64* op) const {
   auto &ct_bx = ct.getBxDevice();
   const int length = ct_bx.size() / degree__;
-  int gridDim_ = 2048;
-  int blockDim_ = 256;
+  const std::size_t total_size = static_cast<std::size_t>(length) * static_cast<std::size_t>(degree__);
+  int blockDim_ = ChooseBlockDim(total_size);
+  int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
 }
 
 void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
   auto &ct_bx = ct.getBxDevice();
   const int length = ct_bx.size() / degree__;
-  int gridDim_ = 2048;
-  int blockDim_ = 256;
+  const std::size_t total_size = static_cast<std::size_t>(length) * static_cast<std::size_t>(degree__);
+  int blockDim_ = ChooseBlockDim(total_size);
+  int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
 }
 
@@ -2736,16 +2778,18 @@ void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
 void Context::SubScalarInPlace(CtAccurate &ct, const word64* op) const {
   auto &ct_bx = ct.getBxDevice();
   const int length = ct_bx.size() / degree__;
-  int gridDim_ = 2048;
-  int blockDim_ = 256;
+  const std::size_t total_size = static_cast<std::size_t>(length) * static_cast<std::size_t>(degree__);
+  int blockDim_ = ChooseBlockDim(total_size);
+  int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
 }
 
 void Context::SubScalarInPlace(const word64* op, CtAccurate &ct) const {
   auto &ct_bx = ct.getBxDevice();
   const int length = ct_bx.size() / degree__;
-  int gridDim_ = 2048;
-  int blockDim_ = 256;
+  const std::size_t total_size = static_cast<std::size_t>(length) * static_cast<std::size_t>(degree__);
+  int blockDim_ = ChooseBlockDim(total_size);
+  int gridDim_ = CeilDiv(total_size, blockDim_);
   // sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
   sub_from_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op, ct_bx.data(), ct_bx.data());
 }
