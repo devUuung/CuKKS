@@ -148,10 +148,10 @@ jobs:
       - name: Test GPU wheel structure (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
         run: |
           set -ex
-          PY_TAG="cpython-$(echo ${{ matrix.python-version }} | tr -d '.')"
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
           python -m venv test-env
           source test-env/bin/activate
-          pip install wheelhouse/*cp$(echo ${{ matrix.python-version }} | tr -d '.')*.whl
+          pip install wheelhouse/*cp${PY_VER}*.whl
           
           SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "Checking installed package at: $SITE_PACKAGES/ckks"
