@@ -53,6 +53,12 @@ vgcore.*
 # Data files (large binary datasets)
 data/
 
+# Paper-specific benchmarks and scripts
+bench_*.py
+run_*.py
+generate_*.py
+REFERENCES.md
+
 # Experiments (paper-specific, not part of library)
 experiments/
 

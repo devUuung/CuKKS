@@ -19,8 +19,8 @@ import torch.nn as nn
 from torchvision import datasets, transforms
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from ckks_torch.nn.block_diagonal import BlockDiagonalLinear
-from ckks_torch.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+from cukks.nn.block_diagonal import BlockDiagonalLinear
+from cukks.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 

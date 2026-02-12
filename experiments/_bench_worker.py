@@ -17,7 +17,7 @@ import torch.nn as nn
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from ckks_torch.nn.block_diagonal import BlockDiagonalLinear
+from cukks.nn.block_diagonal import BlockDiagonalLinear
 
 
 class SquareActivation(nn.Module):
@@ -131,8 +131,8 @@ def main():
     conv_model.load_state_dict(ckpt["model_state_dict"])
     conv_model.eval()
 
-    import ckks_torch
-    from ckks_torch.context import CKKSInferenceContext
+    import cukks
+    from cukks.context import CKKSInferenceContext
     enable_gpu = args.device == "cuda"
 
     ctx = CKKSInferenceContext.for_model(
@@ -141,7 +141,7 @@ def main():
         enable_gpu=enable_gpu,
         security_level=None,
     )
-    enc_model, ctx = ckks_torch.convert(
+    enc_model, ctx = cukks.convert(
         conv_model,
         ctx=ctx,
         use_square_activation=True,

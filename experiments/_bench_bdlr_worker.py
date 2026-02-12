@@ -13,8 +13,8 @@ import torch.nn as nn
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from ckks_torch.nn.block_diagonal import BlockDiagonalLinear
-from ckks_torch.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+from cukks.nn.block_diagonal import BlockDiagonalLinear
+from cukks.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 
 
 class SquareActivation(nn.Module):
@@ -74,13 +74,13 @@ def main():
     conv_model = ConvertibleModel(orig_model.fc1, bd_lr, orig_model.fc3)
     conv_model.eval()
 
-    import ckks_torch
-    from ckks_torch.context import CKKSInferenceContext
+    import cukks
+    from cukks.context import CKKSInferenceContext
     ctx = CKKSInferenceContext.for_model(
         conv_model, use_square_activation=True,
         enable_gpu=(args.device == "cuda"), security_level=None,
     )
-    enc_model, ctx = ckks_torch.convert(
+    enc_model, ctx = cukks.convert(
         conv_model, ctx=ctx, use_square_activation=True,
         enable_gpu=(args.device == "cuda"),
     )
