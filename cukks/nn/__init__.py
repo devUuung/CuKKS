@@ -1,12 +1,12 @@
 """
-ckks_torch.nn - Encrypted neural network modules.
+cukks.nn - Encrypted neural network modules.
 
 This module provides PyTorch-like layers for encrypted inference.
 Each layer mirrors its torch.nn counterpart but operates on encrypted data.
 
 Example:
     >>> import torch.nn as nn
-    >>> import ckks_torch
+    >>> import cukks
     >>> 
     >>> # Train a plaintext model
     >>> model = nn.Sequential(
@@ -17,7 +17,7 @@ Example:
     >>> train(model, data)
     >>> 
     >>> # Convert to encrypted model
-    >>> enc_model = ckks_torch.convert(model, ctx)
+    >>> enc_model = cukks.convert(model, ctx)
     >>> 
     >>> # Run encrypted inference
     >>> enc_output = enc_model(enc_input)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Complete Example: Encrypted Deep Learning Inference with ckks_torch.
+Complete Example: Encrypted Deep Learning Inference with cukks.
 
 This example demonstrates the end-to-end workflow:
 1. Define and train a PyTorch model
@@ -9,7 +9,7 @@ This example demonstrates the end-to-end workflow:
 4. Compare with plaintext results
 
 Usage:
-    python -m ckks_torch.examples.encrypted_inference
+    python -m cukks.examples.encrypted_inference
 """
 
 from __future__ import annotations
@@ -141,14 +141,14 @@ def demo_encrypted_inference(
         output_dim: Number of output classes.
         num_test_samples: Number of samples to test.
     """
-    import ckks_torch
+    import cukks
     
     print("=" * 60)
     print("CuKKS Encrypted Inference Demo")
     print("=" * 60)
     
     # Check backend availability
-    backend_info = ckks_torch.get_backend_info()
+    backend_info = cukks.get_backend_info()
     print(f"\nBackend: {backend_info}")
     
     if not backend_info["available"]:
@@ -181,7 +181,7 @@ def demo_encrypted_inference(
     # Step 2: Convert to encrypted model
     print("\n[Step 2] Converting to encrypted model...")
     
-    enc_model, ctx = ckks_torch.convert(
+    enc_model, ctx = cukks.convert(
         model,
         use_square_activation=use_square_activation,
         activation_degree=4,
@@ -260,8 +260,8 @@ def demo_model_conversion():
     This is useful for understanding how the library works
     even without the CKKS backend installed.
     """
-    import ckks_torch
-    from ckks_torch.converter import ModelConverter, ConversionOptions
+    import cukks
+    from cukks.converter import ModelConverter, ConversionOptions
     
     print("=" * 60)
     print("Model Conversion Demo (No Encryption)")
@@ -284,7 +284,7 @@ def demo_model_conversion():
     print(model)
     
     # Estimate depth
-    depth = ckks_torch.estimate_depth(model)
+    depth = cukks.estimate_depth(model)
     print(f"\nEstimated multiplicative depth: {depth}")
     
     # Convert with different options

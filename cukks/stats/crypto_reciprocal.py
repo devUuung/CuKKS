@@ -18,7 +18,7 @@ import numpy as np
 from numpy.polynomial.chebyshev import cheb2poly, chebfit
 
 if TYPE_CHECKING:
-    from ckks_torch.tensor import EncryptedTensor
+    from cukks.tensor import EncryptedTensor
 
 
 @functools.lru_cache(maxsize=4)

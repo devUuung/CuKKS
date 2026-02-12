@@ -133,7 +133,7 @@ class EncryptedApproxAttention(EncryptedModule):
         Z = sum(u_j)
         w_j = u_j / Z
         """
-        from ckks_torch.stats.crypto_reciprocal import crypto_reciprocal_shallow
+        from cukks.stats.crypto_reciprocal import crypto_reciprocal_shallow
 
         shifted = [s.add(shift) for s in scores]
         # Ensure shifted scores are rescaled before squaring.

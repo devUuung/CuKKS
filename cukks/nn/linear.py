@@ -4,6 +4,7 @@ EncryptedLinear - Encrypted linear (fully connected) layer.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -12,6 +13,17 @@ from .module import EncryptedModule
 
 if TYPE_CHECKING:
     from ..tensor import EncryptedTensor
+
+
+def _compute_weight_hash(weight: torch.Tensor) -> int:
+    digest = hashlib.md5(weight.contiguous().numpy().tobytes()).digest()[:8]
+    return int.from_bytes(digest, 'little')
+
+
+def _compute_diag_nonzero(weight: torch.Tensor) -> list:
+    out_f, in_f = weight.shape
+    rows = torch.arange(out_f)
+    return [bool(weight[rows, (rows + d) % in_f].any()) for d in range(in_f)]
 
 
 class EncryptedLinear(EncryptedModule):
@@ -51,6 +63,11 @@ class EncryptedLinear(EncryptedModule):
         # Store weights as float64 for CKKS precision
         self.weight = weight.detach().to(dtype=torch.float64, device="cpu")
         self.bias = bias.detach().to(dtype=torch.float64, device="cpu") if bias is not None else None
+
+        self._weight_list: list = self.weight.tolist()
+        self._bias_list: list | None = self.bias.reshape(-1).tolist() if self.bias is not None else None
+        self._weight_hash: int = _compute_weight_hash(self.weight)
+        self._diag_nonzero: list = _compute_diag_nonzero(self.weight)
         
         self.register_parameter("weight", self.weight)
         if self.bias is not None:
@@ -67,7 +84,11 @@ class EncryptedLinear(EncryptedModule):
         """
         if getattr(self, '_sparse_input', False):
             return self._forward_sparse(x)
-        return x.matmul(self.weight, self.bias)
+        return x.matmul(self.weight, self.bias,
+                        weight_list=self._weight_list,
+                        bias_list=self._bias_list,
+                        weight_hash=self._weight_hash,
+                        diag_nonzero=self._diag_nonzero)
     
     def _forward_sparse(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Forward pass for sparse input using row-by-row dot products.
@@ -109,7 +130,7 @@ class EncryptedLinear(EncryptedModule):
             step *= 2
         return result
     
-    def _pack_outputs(self, outputs: list, context) -> "EncryptedTensor":
+    def _pack_outputs(self, outputs: list, context: object) -> "EncryptedTensor":
         """Pack scalar outputs (sum in slot 0) into single ciphertext."""
         out_features = len(outputs)
         if out_features == 0:

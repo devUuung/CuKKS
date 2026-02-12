@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .crypto_inv_sqrt import crypto_inv_sqrt
 
 if TYPE_CHECKING:
-    from ckks_torch.tensor import EncryptedTensor
+    from cukks.tensor import EncryptedTensor
 
 
 def _check_size_limit(enc_tensor: EncryptedTensor) -> None:

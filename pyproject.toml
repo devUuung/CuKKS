@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cukks-torch"
+name = "cukks"
 version = "0.1.0"
 description = "PyTorch-compatible encrypted deep learning inference using CKKS homomorphic encryption"
 authors = [{name = "CuKKS Team"}]
@@ -44,10 +44,10 @@ dev = [
     "ruff>=0.1",
     "mypy>=1.0",
 ]
-backend = [
-    # The ckks_openfhe_backend needs to be installed separately
-    # from bindings/openfhe_backend
-]
+cu118 = ["cukks-cu118"]
+cu121 = ["cukks-cu121"]
+cu124 = ["cukks-cu124"]
+cu128 = ["cukks-cu128"]
 
 [project.urls]
 Homepage = "https://github.com/devUuung/CuKKS"
@@ -55,14 +55,15 @@ Documentation = "https://github.com/devUuung/CuKKS#readme"
 Repository = "https://github.com/devUuung/CuKKS"
 
 [project.scripts]
-cukks-example = "ckks_torch.examples.encrypted_inference:main"
+cukks-example = "cukks.examples.encrypted_inference:main"
+cukks-install-backend = "cukks.install_backend:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ckks_torch*"]
+include = ["cukks*"]
 
 [tool.setuptools.package-data]
-ckks_torch = ["py.typed"]
+cukks = ["py.typed"]
 
 [tool.black]
 line-length = 100
