@@ -17,8 +17,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-import ckks_torch
-from ckks_torch import CKKSInferenceContext, InferenceConfig
+import cukks
+from cukks import CKKSInferenceContext, InferenceConfig
 
 MEMORY_LOG_FILE = Path(tempfile.gettempdir()) / "ckks_memory_monitor.log"
 _monitor_thread: Optional[threading.Thread] = None
@@ -322,7 +322,7 @@ def evaluate(model: nn.Module, X: torch.Tensor, y: torch.Tensor) -> float:
 
 
 def run_encrypted_inference(
-    enc_model: ckks_torch.nn.EncryptedModule,
+    enc_model: cukks.nn.EncryptedModule,
     ctx: CKKSInferenceContext,
     sample: torch.Tensor,
 ) -> torch.Tensor:
@@ -369,7 +369,7 @@ def main():
     start_memory_monitor(interval=0.5)
     print_crash_analysis()
     
-    backend_info = ckks_torch.get_backend_info()
+    backend_info = cukks.get_backend_info()
     print(f"\nBackend available: {backend_info['available']}")
     
     # Load data
@@ -397,7 +397,7 @@ def main():
     use_square = args.activation == "square"
     
     try:
-        enc_model, ctx = ckks_torch.convert(
+        enc_model, ctx = cukks.convert(
             model,
             use_square_activation=use_square,
             activation_degree=args.cheby_degree,

@@ -20,7 +20,7 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from ckks_torch.nn.block_diagonal import BlockDiagonalLinear
+from cukks.nn.block_diagonal import BlockDiagonalLinear
 
 
 class SquareActivation(nn.Module):
