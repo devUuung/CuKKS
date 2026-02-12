@@ -169,14 +169,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ["118", "121", "124", "128"]
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheels-gpu-*
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
           path: dist
-          merge-multiple: true
       
-      - name: Publish to PyPI
+      - name: Publish cukks-cu${{ matrix.cuda_version }} to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
