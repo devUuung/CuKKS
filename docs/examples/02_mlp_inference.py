@@ -10,8 +10,8 @@ MLP 암호화 추론 예제
 
 import torch
 import torch.nn as nn
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+from cukks import CKKSInferenceContext
+from cukks.nn import EncryptedLinear, EncryptedSquare
 
 
 class SimpleMLP(nn.Module):

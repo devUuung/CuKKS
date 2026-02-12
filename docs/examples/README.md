@@ -61,8 +61,8 @@ Perform encrypted inference on a Multi-Layer Perceptron:
 - Square activation (CKKS-friendly alternative to ReLU)
 
 ```python
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+from cukks import CKKSInferenceContext
+from cukks.nn import EncryptedLinear, EncryptedSquare
 
 ctx = CKKSInferenceContext(max_rotation_dim=64, use_bsgs=True)
 
@@ -87,8 +87,8 @@ GPU-accelerated encrypted CNN inference:
 - Rotation-based pooling
 
 ```python
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import (
+from cukks import CKKSInferenceContext
+from cukks.nn import (
     EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
     EncryptedFlatten, EncryptedLinear
 )
@@ -124,7 +124,7 @@ Privacy-preserving statistical functions based on the PP-STAT paper:
 - `crypto_inv_sqrt_shallow`: Bootstrap-free variant
 
 ```python
-from ckks_torch.stats import (
+from cukks.stats import (
     encrypted_mean, encrypted_variance, encrypted_std,
     crypto_inv_sqrt_shallow
 )

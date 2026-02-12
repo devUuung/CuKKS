@@ -166,8 +166,8 @@ When `enable_gpu=True`, the context initializes:
 GPU-accelerated CNN inference is fully supported with the following configuration:
 
 ```python
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import (
+from cukks import CKKSInferenceContext
+from cukks.nn import (
     EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d, 
     EncryptedFlatten, EncryptedLinear
 )
@@ -230,7 +230,7 @@ output = ctx.decrypt(enc_output)[:10]
 GPU-accelerated bootstrapping is supported for deep network inference:
 
 ```python
-from ckks_torch.context import InferenceConfig, CKKSInferenceContext
+from cukks.context import InferenceConfig, CKKSInferenceContext
 import torch
 
 # Create context with bootstrapping enabled

@@ -168,7 +168,7 @@ Input → Linear(1) → ReLU(2) → Linear(1) → ReLU(2) → Linear(1)
 ### 깊이 추정
 
 ```python
-from ckks_torch import estimate_depth
+from cukks import estimate_depth
 
 model = nn.Sequential(
     nn.Linear(784, 128),
@@ -262,7 +262,7 @@ CKKS는 **다항식 연산** (덧셈과 곱셈)만 지원합니다. ReLU, sigmoi
 
 ```python
 # [-1, 1]에서 degree-7 체비쇼프 다항식을 사용한 ReLU 근사
-from ckks_torch.utils.approximations import chebyshev_coefficients
+from cukks.utils.approximations import chebyshev_coefficients
 
 def relu(x):
     return torch.maximum(x, torch.zeros_like(x))
@@ -275,7 +275,7 @@ coeffs = chebyshev_coefficients(relu, degree=7, domain=(-1, 1))
 구간에서 최대 오차를 최소화.
 
 ```python
-from ckks_torch.nn import EncryptedReLU
+from cukks.nn import EncryptedReLU
 
 relu = EncryptedReLU(degree=4, method="minimax")
 ```
@@ -308,7 +308,7 @@ relu = EncryptedReLU(degree=4, method="minimax")
 
 ```python
 # 제곱 활성화 사용
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model, use_square_activation=True)
 ```
 
 ### 입력 정규화

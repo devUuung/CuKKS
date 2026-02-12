@@ -26,13 +26,13 @@
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 # 1. 모델 정의 및 학습 (일반 PyTorch)
 model = nn.Sequential(nn.Linear(784, 128), nn.ReLU(), nn.Linear(128, 10))
 
-# 2. 암호화 모델로 변환
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+# 2. 암호화 모델로 변환 (다항식 ReLU 근사)
+enc_model, ctx = cukks.convert(model)
 
 # 3. 암호화 추론 실행
 enc_input = ctx.encrypt(test_input)
@@ -42,12 +42,19 @@ output = ctx.decrypt(enc_output)
 
 ## 설치
 
+### 자동 설치 (권장)
+
 ```bash
-pip install cukks-cu121  # CUDA 12.1 (가장 일반적)
+pip install cukks        # PyTorch의 CUDA 버전을 자동 감지하여 백엔드 설치
 ```
 
-<details>
-<summary><strong>다른 CUDA 버전</strong></summary>
+`pip install cukks`는 PyTorch가 빌드된 CUDA 버전을 감지하고, 매칭되는 `cukks-cuXXX` GPU 백엔드를 자동으로 설치합니다. 수동 버전 매칭이 필요 없습니다.
+
+### 수동 설치
+
+```bash
+pip install cukks-cu121  # CUDA 12.1용 명시적 설치
+```
 
 | 패키지 | CUDA | 지원 GPU |
 |---------|------|----------------|
@@ -55,14 +62,23 @@ pip install cukks-cu121  # CUDA 12.1 (가장 일반적)
 | `cukks-cu121` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `cukks-cu124` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `cukks-cu128` | 12.8 | 위 모두 + **RTX 50xx** |
-| `cukks` | - | CPU 전용 |
+
+extras 사용: `pip install cukks[cu121]`
+
+<details>
+<summary><strong>설치 후 CLI 및 환경변수</strong></summary>
 
 ```bash
-pip install cukks-cu118  # CUDA 11.8
-pip install cukks-cu124  # CUDA 12.4
-pip install cukks-cu128  # CUDA 12.8 (RTX 50xx)
-pip install cukks        # CPU 전용
+cukks-install-backend             # 자동 감지 & 설치
+cukks-install-backend cu128       # 특정 백엔드 설치
+cukks-install-backend --status    # CUDA 호환성 상태 확인
+cukks-install-backend --dry-run   # 설치 없이 미리보기
 ```
+
+| 환경변수 | 효과 |
+|----------|--------|
+| `CUKKS_BACKEND=cukks-cu128` | 특정 백엔드 강제 지정 |
+| `CUKKS_NO_BACKEND=1` | 백엔드 건너뛰기 (CPU 전용) |
 
 </details>
 
@@ -78,7 +94,7 @@ pip install cukks        # CPU 전용
 
 ```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
-pip install cukks-cu121
+pip install cukks  # CUDA 12.1 자동 감지
 ```
 
 </details>
@@ -104,7 +120,7 @@ pip install -e .
 
 | 기능 | 설명 |
 |---------|-------------|
-| **PyTorch API** | 익숙한 인터페이스 — `ckks_torch.convert(model)` 호출만으로 변환 |
+| **PyTorch API** | 익숙한 인터페이스 — `cukks.convert(model)` 호출만으로 변환 |
 | **GPU 가속** | OpenFHE 기반 CUDA 가속 HE 연산 |
 | **자동 최적화** | BatchNorm 폴딩, BSGS 행렬 곱셈 |
 | **다양한 레이어** | Linear, Conv2d, ReLU/GELU/SiLU, Pool, LayerNorm, Attention |
@@ -115,7 +131,7 @@ pip install -e .
 |-------|------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | BSGS 최적화 |
 | `nn.Conv2d` | `EncryptedConv2d` | im2col 방식 |
-| `nn.ReLU/GELU/SiLU` | 다항식 근사 | 또는 정확한 `x²` 사용 |
+| `nn.ReLU/GELU/SiLU` | 다항식 근사 | 차수 설정 가능 |
 | `nn.AvgPool2d` | `EncryptedAvgPool2d` | 회전 기반 |
 | `nn.BatchNorm` | Folded | 이전 레이어에 병합 |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | 다항식 근사 |
@@ -146,15 +162,17 @@ pip install -e .
 
 ## 활성화 함수
 
-CKKS는 다항식 연산만 지원합니다. 다음 중 선택:
+CKKS는 다항식 연산만 지원합니다. CuKKS는 활성화 함수(ReLU, GELU, SiLU 등)를 다항식 피팅으로 근사합니다:
 
 ```python
-# 옵션 1: 제곱 활성화 (권장 - 정확, 오차 없음)
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+# 기본: 4차 다항식 근사 (권장)
+enc_model, ctx = cukks.convert(model)
 
-# 옵션 2: 다항식 근사 (원래 ReLU/GELU에 더 가까움)
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=False, activation_degree=4)
+# 더 높은 차수로 정확도 향상 (곱셈 깊이 증가)
+enc_model, ctx = cukks.convert(model, activation_degree=8)
 ```
+
+기본 `activation_degree=4`는 정확도와 깊이 소비 간의 좋은 균형을 제공합니다. 높은 차수는 원래 활성화 함수를 더 정확하게 근사하지만 더 깊은 회로가 필요합니다.
 
 ## GPU 가속
 
@@ -176,7 +194,7 @@ ctx = CKKSContext(config, enable_gpu=True)  # 기본적으로 GPU 활성화
 
 ```bash
 # 빠른 데모 (GPU 불필요)
-python -m ckks_torch.examples.encrypted_inference --demo conversion
+python -m cukks.examples.encrypted_inference --demo conversion
 
 # MNIST 암호화 추론
 python examples/mnist_encrypted.py --hidden 64 --samples 5
@@ -187,7 +205,7 @@ python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 class MNISTCNN(nn.Module):
     def __init__(self):
@@ -202,7 +220,7 @@ class MNISTCNN(nn.Module):
         return self.fc(self.flatten(self.pool1(self.act1(self.conv1(x)))))
 
 model = MNISTCNN()
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model)
 
 enc_input = ctx.encrypt(image)
 prediction = ctx.decrypt(enc_model(enc_input)).argmax()
@@ -230,7 +248,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 | 문제 | 해결책 |
 |-------|----------|
 | 메모리 부족 | `poly_mod_degree` 감소 (16384 대신 8192) |
-| 낮은 정확도 | `use_square_activation=True` 사용 또는 `activation_degree` 증가 |
+| 낮은 정확도 | `activation_degree` 증가 (예: 8 또는 16) |
 | 느린 성능 | 배치 처리 활성화, 네트워크 깊이 감소 |
 
 ## 문서

@@ -26,13 +26,13 @@
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 # 1. Define and train your model (standard PyTorch)
 model = nn.Sequential(nn.Linear(784, 128), nn.ReLU(), nn.Linear(128, 10))
 
-# 2. Convert to encrypted model
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+# 2. Convert to encrypted model (polynomial ReLU approximation)
+enc_model, ctx = cukks.convert(model)
 
 # 3. Run encrypted inference
 enc_input = ctx.encrypt(test_input)
@@ -42,12 +42,19 @@ output = ctx.decrypt(enc_output)
 
 ## Installation
 
+### Automatic (Recommended)
+
 ```bash
-pip install cukks-cu121  # For CUDA 12.1 (most common)
+pip install cukks        # Auto-detects PyTorch's CUDA and installs matching backend
 ```
 
-<details>
-<summary><strong>Other CUDA versions</strong></summary>
+`pip install cukks` detects the CUDA version your PyTorch was built with and automatically installs the matching `cukks-cuXXX` GPU backend. No manual version matching needed.
+
+### Manual
+
+```bash
+pip install cukks-cu121  # Explicitly install for CUDA 12.1
+```
 
 | Package | CUDA | Supported GPUs |
 |---------|------|----------------|
@@ -55,14 +62,23 @@ pip install cukks-cu121  # For CUDA 12.1 (most common)
 | `cukks-cu121` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `cukks-cu124` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `cukks-cu128` | 12.8 | All above + **RTX 50xx** |
-| `cukks` | - | CPU only |
+
+Or use extras: `pip install cukks[cu121]`
+
+<details>
+<summary><strong>Post-install CLI & environment variables</strong></summary>
 
 ```bash
-pip install cukks-cu118  # CUDA 11.8
-pip install cukks-cu124  # CUDA 12.4
-pip install cukks-cu128  # CUDA 12.8 (RTX 50xx)
-pip install cukks        # CPU only
+cukks-install-backend             # Auto-detect & install
+cukks-install-backend cu128       # Install specific backend
+cukks-install-backend --status    # Show CUDA compatibility status
+cukks-install-backend --dry-run   # Preview without installing
 ```
+
+| Variable | Effect |
+|----------|--------|
+| `CUKKS_BACKEND=cukks-cu128` | Force a specific backend |
+| `CUKKS_NO_BACKEND=1` | Skip backend (CPU-only) |
 
 </details>
 
@@ -78,7 +94,7 @@ pip install cukks        # CPU only
 
 ```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
-pip install cukks-cu121
+pip install cukks  # auto-detects CUDA 12.1
 ```
 
 </details>
@@ -104,7 +120,7 @@ pip install -e .
 
 | Feature | Description |
 |---------|-------------|
-| **PyTorch API** | Familiar interface — just call `ckks_torch.convert(model)` |
+| **PyTorch API** | Familiar interface — just call `cukks.convert(model)` |
 | **GPU Acceleration** | CUDA-accelerated HE operations via OpenFHE |
 | **Auto Optimization** | BatchNorm folding, BSGS matrix multiplication |
 | **Wide Layer Support** | Linear, Conv2d, ReLU/GELU/SiLU, Pool, LayerNorm, Attention |
@@ -115,7 +131,7 @@ pip install -e .
 |-------|------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | BSGS optimization |
 | `nn.Conv2d` | `EncryptedConv2d` | im2col method |
-| `nn.ReLU/GELU/SiLU` | Polynomial approx | Or use `x²` for exact |
+| `nn.ReLU/GELU/SiLU` | Polynomial approx | Configurable degree |
 | `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
 | `nn.BatchNorm` | Folded | Merged into prev layer |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial approx |
@@ -146,15 +162,17 @@ pip install -e .
 
 ## Activation Functions
 
-CKKS only supports polynomial operations. Choose one:
+CKKS only supports polynomial operations. CuKKS approximates activations (ReLU, GELU, SiLU, etc.) using polynomial fitting:
 
 ```python
-# Option 1: Square activation (recommended - exact, no error)
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+# Default: degree-4 polynomial approximation (recommended)
+enc_model, ctx = cukks.convert(model)
 
-# Option 2: Polynomial approximation (closer to original ReLU/GELU)
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=False, activation_degree=4)
+# Higher degree for better accuracy (costs more multiplicative depth)
+enc_model, ctx = cukks.convert(model, activation_degree=8)
 ```
+
+The default `activation_degree=4` provides a good balance between accuracy and depth consumption. Higher degrees approximate the original activation more closely but require deeper circuits.
 
 ## GPU Acceleration
 
@@ -176,7 +194,7 @@ ctx = CKKSContext(config, enable_gpu=True)  # GPU enabled by default
 
 ```bash
 # Quick demo (no GPU required)
-python -m ckks_torch.examples.encrypted_inference --demo conversion
+python -m cukks.examples.encrypted_inference --demo conversion
 
 # MNIST encrypted inference
 python examples/mnist_encrypted.py --hidden 64 --samples 5
@@ -187,7 +205,7 @@ python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 class MNISTCNN(nn.Module):
     def __init__(self):
@@ -202,7 +220,7 @@ class MNISTCNN(nn.Module):
         return self.fc(self.flatten(self.pool1(self.act1(self.conv1(x)))))
 
 model = MNISTCNN()
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model)
 
 enc_input = ctx.encrypt(image)
 prediction = ctx.decrypt(enc_model(enc_input)).argmax()
@@ -230,7 +248,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 | Issue | Solution |
 |-------|----------|
 | Out of Memory | Reduce `poly_mod_degree` (8192 instead of 16384) |
-| Low Accuracy | Use `use_square_activation=True` or increase `activation_degree` |
+| Low Accuracy | Increase `activation_degree` (e.g., 8 or 16) for better approximation |
 | Slow Performance | Enable batch processing, reduce network depth |
 
 ## Documentation

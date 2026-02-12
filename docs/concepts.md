@@ -168,7 +168,7 @@ Total depth: 1 + 2 + 1 + 2 + 1 = 7
 ### Estimating Depth
 
 ```python
-from ckks_torch import estimate_depth
+from cukks import estimate_depth
 
 model = nn.Sequential(
     nn.Linear(784, 128),
@@ -262,7 +262,7 @@ Best for smooth functions over a bounded interval.
 
 ```python
 # ReLU approximation on [-1, 1] using degree-7 Chebyshev polynomial
-from ckks_torch.utils.approximations import chebyshev_coefficients
+from cukks.utils.approximations import chebyshev_coefficients
 
 def relu(x):
     return torch.maximum(x, torch.zeros_like(x))
@@ -275,7 +275,7 @@ coeffs = chebyshev_coefficients(relu, degree=7, domain=(-1, 1))
 Minimize the maximum error over the interval.
 
 ```python
-from ckks_torch.nn import EncryptedReLU
+from cukks.nn import EncryptedReLU
 
 relu = EncryptedReLU(degree=4, method="minimax")
 ```
@@ -308,7 +308,7 @@ The simplest polynomial activation: `f(x) = x²`
 
 ```python
 # Use square activation
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model, use_square_activation=True)
 ```
 
 ### Input Normalization

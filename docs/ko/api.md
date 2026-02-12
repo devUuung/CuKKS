@@ -40,7 +40,7 @@
 암호화 추론을 위한 고수준 컨텍스트입니다. 암호화 파라미터를 관리하고 텐서 암호화/복호화 메서드를 제공합니다.
 
 ```python
-from ckks_torch import CKKSInferenceContext, InferenceConfig
+from cukks import CKKSInferenceContext, InferenceConfig
 ```
 
 #### 생성자
@@ -192,7 +192,7 @@ ctx.save_context(path: str) -> None
 CKKS 암호화 파라미터용 설정 데이터클래스입니다.
 
 ```python
-from ckks_torch import InferenceConfig
+from cukks import InferenceConfig
 ```
 
 #### 생성자
@@ -249,7 +249,7 @@ config = InferenceConfig.for_model(model: torch.nn.Module, **kwargs) -> Inferenc
 텐서와 유사한 연산을 가진 CKKS 암호화 데이터용 텐서 래퍼입니다.
 
 ```python
-from ckks_torch import EncryptedTensor
+from cukks import EncryptedTensor
 ```
 
 #### 속성
@@ -366,7 +366,7 @@ enc_tensor = EncryptedTensor.load(path: str, context: CKKSInferenceContext) -> E
 모델 변환의 메인 진입점입니다. PyTorch 모델을 암호화 버전으로 변환합니다.
 
 ```python
-from ckks_torch import convert
+from cukks import convert
 
 enc_model, ctx = convert(
     model: torch.nn.Module,
@@ -394,7 +394,7 @@ enc_model, ctx = convert(
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 model = nn.Sequential(
     nn.Linear(784, 128),
@@ -402,7 +402,7 @@ model = nn.Sequential(
     nn.Linear(128, 10)
 )
 
-enc_model, ctx = ckks_torch.convert(model)
+enc_model, ctx = cukks.convert(model)
 ```
 
 ---
@@ -412,7 +412,7 @@ enc_model, ctx = ckks_torch.convert(model)
 모델 변환에 대한 세밀한 제어를 위한 클래스입니다.
 
 ```python
-from ckks_torch.converter import ModelConverter, ConversionOptions
+from cukks.converter import ModelConverter, ConversionOptions
 ```
 
 #### 생성자
@@ -439,7 +439,7 @@ enc_model = converter.convert(
 모델 변환용 설정입니다.
 
 ```python
-from ckks_torch.converter import ConversionOptions
+from cukks.converter import ConversionOptions
 
 options = ConversionOptions(
     fold_batchnorm: bool = True,
@@ -465,7 +465,7 @@ options = ConversionOptions(
 모델에 필요한 곱셈 깊이를 추정합니다.
 
 ```python
-from ckks_torch import estimate_depth
+from cukks import estimate_depth
 
 depth = estimate_depth(model: torch.nn.Module) -> int
 ```
@@ -479,7 +479,7 @@ depth = estimate_depth(model: torch.nn.Module) -> int
 모든 암호화 신경망 모듈의 기본 클래스입니다.
 
 ```python
-from ckks_torch.nn import EncryptedModule
+from cukks.nn import EncryptedModule
 ```
 
 #### 추상 메서드
@@ -522,7 +522,7 @@ depth = module.mult_depth() -> int
 암호화된 완전 연결 레이어입니다.
 
 ```python
-from ckks_torch.nn import EncryptedLinear
+from cukks.nn import EncryptedLinear
 ```
 
 #### 생성자
@@ -557,7 +557,7 @@ enc_linear = EncryptedLinear.from_torch(linear: torch.nn.Linear) -> EncryptedLin
 im2col 방식을 사용하는 암호화된 2D 합성곱 레이어입니다.
 
 ```python
-from ckks_torch.nn import EncryptedConv2d
+from cukks.nn import EncryptedConv2d
 ```
 
 #### 생성자
@@ -607,7 +607,7 @@ enc_conv = EncryptedConv2d.from_torch(conv: torch.nn.Conv2d) -> EncryptedConv2d
 정확한 x² 활성화 (정확도 권장).
 
 ```python
-from ckks_torch.nn import EncryptedSquare
+from cukks.nn import EncryptedSquare
 
 activation = EncryptedSquare()
 ```
@@ -617,7 +617,7 @@ activation = EncryptedSquare()
 ReLU의 다항식 근사입니다.
 
 ```python
-from ckks_torch.nn import EncryptedReLU
+from cukks.nn import EncryptedReLU
 
 activation = EncryptedReLU(
     degree: int = 4,
@@ -631,7 +631,7 @@ activation = EncryptedReLU(
 GELU의 다항식 근사입니다.
 
 ```python
-from ckks_torch.nn import EncryptedGELU
+from cukks.nn import EncryptedGELU
 
 activation = EncryptedGELU(degree: int = 4)
 ```
@@ -641,7 +641,7 @@ activation = EncryptedGELU(degree: int = 4)
 SiLU (Swish)의 다항식 근사입니다.
 
 ```python
-from ckks_torch.nn import EncryptedSiLU
+from cukks.nn import EncryptedSiLU
 
 activation = EncryptedSiLU(degree: int = 4)
 ```
@@ -651,7 +651,7 @@ activation = EncryptedSiLU(degree: int = 4)
 시그모이드의 다항식 근사입니다.
 
 ```python
-from ckks_torch.nn import EncryptedSigmoid
+from cukks.nn import EncryptedSigmoid
 
 activation = EncryptedSigmoid(degree: int = 4)
 ```
@@ -661,7 +661,7 @@ activation = EncryptedSigmoid(degree: int = 4)
 tanh의 다항식 근사입니다.
 
 ```python
-from ckks_torch.nn import EncryptedTanh
+from cukks.nn import EncryptedTanh
 
 activation = EncryptedTanh(degree: int = 5)
 ```
@@ -671,7 +671,7 @@ activation = EncryptedTanh(degree: int = 5)
 커스텀 다항식 활성화입니다.
 
 ```python
-from ckks_torch.nn import EncryptedPolynomial
+from cukks.nn import EncryptedPolynomial
 
 # coeffs = [a0, a1, a2, ...] for a0 + a1*x + a2*x² + ...
 activation = EncryptedPolynomial(coeffs: Sequence[float])
@@ -684,7 +684,7 @@ activation = EncryptedPolynomial(coeffs: Sequence[float])
 암호화 모듈의 순차 실행을 위한 컨테이너입니다.
 
 ```python
-from ckks_torch.nn import EncryptedSequential
+from cukks.nn import EncryptedSequential
 
 model = EncryptedSequential(
     EncryptedLinear(...),
@@ -707,7 +707,7 @@ model = EncryptedSequential(OrderedDict([
 #### EncryptedFlatten
 
 ```python
-from ckks_torch.nn import EncryptedFlatten
+from cukks.nn import EncryptedFlatten
 
 flatten = EncryptedFlatten(start_dim: int = 1, end_dim: int = -1)
 ```
@@ -715,7 +715,7 @@ flatten = EncryptedFlatten(start_dim: int = 1, end_dim: int = -1)
 #### EncryptedAvgPool2d
 
 ```python
-from ckks_torch.nn import EncryptedAvgPool2d
+from cukks.nn import EncryptedAvgPool2d
 
 pool = EncryptedAvgPool2d(
     kernel_size: Union[int, Tuple[int, int]],
@@ -739,7 +739,7 @@ pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 다항식 근사를 사용한 근사 최대 풀링입니다.
 
 ```python
-from ckks_torch.nn import EncryptedMaxPool2d
+from cukks.nn import EncryptedMaxPool2d
 
 pool = EncryptedMaxPool2d(
     kernel_size: Union[int, Tuple[int, int]],
@@ -768,7 +768,7 @@ pool = EncryptedMaxPool2d.from_torch(max_pool: torch.nn.MaxPool2d)
 참고: BatchNorm은 일반적으로 변환 중에 이전 레이어로 폴딩됩니다.
 
 ```python
-from ckks_torch.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
+from cukks.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
 
 bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 ```
@@ -778,7 +778,7 @@ bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 순수 HE 다항식 근사를 사용한 암호화 레이어 정규화입니다.
 
 ```python
-from ckks_torch.nn import EncryptedLayerNorm
+from cukks.nn import EncryptedLayerNorm
 
 ln = EncryptedLayerNorm(
     normalized_shape: Union[int, List[int], Tuple[int, ...]],
@@ -807,7 +807,7 @@ ln = EncryptedLayerNorm.from_torch(layer_norm: torch.nn.LayerNorm)
 암호화 추론을 위한 드롭아웃 레이어입니다. 추론 시에는 no-op (입력을 변경 없이 반환)으로 동작합니다.
 
 ```python
-from ckks_torch.nn import EncryptedDropout
+from cukks.nn import EncryptedDropout
 
 dropout = EncryptedDropout(p: float = 0.5)
 
@@ -828,7 +828,7 @@ dropout = EncryptedDropout.from_torch(dropout_layer: torch.nn.Dropout)
 잔차 연결 블록입니다.
 
 ```python
-from ckks_torch.nn import EncryptedResidualBlock
+from cukks.nn import EncryptedResidualBlock
 
 block = EncryptedResidualBlock(main_branch: EncryptedModule)
 ```
@@ -838,7 +838,7 @@ block = EncryptedResidualBlock(main_branch: EncryptedModule)
 순수 HE 암호문-암호문 연산을 사용하는 암호화된 트랜스포머 추론을 위한 근사 멀티헤드 어텐션입니다. exp(x)의 테일러 전개를 통한 다항식 근사로 소프트맥스를 구현합니다.
 
 ```python
-from ckks_torch.nn import EncryptedApproxAttention
+from cukks.nn import EncryptedApproxAttention
 
 attention = EncryptedApproxAttention(
     embed_dim: int,
@@ -878,7 +878,7 @@ attention = EncryptedApproxAttention.from_torch(
 여러 샘플을 CKKS 슬롯에 패킹하기 위한 유틸리티입니다.
 
 ```python
-from ckks_torch.batching import SlotPacker
+from cukks.batching import SlotPacker
 
 packer = SlotPacker(
     slots_per_sample: int,
@@ -914,12 +914,12 @@ samples = packer.unpack(
 ### 최상위 함수
 
 ```python
-import ckks_torch
+import cukks
 
 # 백엔드 사용 가능 여부 확인
-available = ckks_torch.is_available() -> bool
+available = cukks.is_available() -> bool
 
 # 백엔드 정보 가져오기
-info = ckks_torch.get_backend_info() -> dict
+info = cukks.get_backend_info() -> dict
 # 반환값: {"backend": "openfhe-gpu", "available": True, "cuda": True}
 ```

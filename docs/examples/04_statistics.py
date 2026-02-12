@@ -15,7 +15,7 @@ Reference:
 
 import torch
 from ckks.torch_api import CKKSContext, CKKSConfig
-from ckks_torch.stats import (
+from cukks.stats import (
     encrypted_mean,
     encrypted_variance,
     encrypted_std,
