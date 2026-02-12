@@ -91,7 +91,7 @@ jobs:
         with:
           package-dir: ${{ matrix.package_dir }}
         env:
-          CIBW_BUILD: cp311-manylinux_x86_64
+          CIBW_BUILD: "cp311-manylinux_x86_64 cp312-manylinux_x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
@@ -133,6 +133,7 @@ jobs:
     strategy:
       matrix:
         cuda_version: ["118", "121", "124", "128"]
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -142,14 +143,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       
-      - name: Test GPU wheel structure (CUDA ${{ matrix.cuda_version }})
+      - name: Test GPU wheel structure (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
         run: |
           set -ex
+          PY_TAG="cpython-$(echo ${{ matrix.python-version }} | tr -d '.')"
           python -m venv test-env
           source test-env/bin/activate
-          pip install wheelhouse/*.whl
+          pip install wheelhouse/*cp$(echo ${{ matrix.python-version }} | tr -d '.')*.whl
           
           SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
           echo "Checking installed package at: $SITE_PACKAGES/ckks"
@@ -157,11 +159,48 @@ jobs:
           test -f "$SITE_PACKAGES/ckks/__init__.py"
           test -f "$SITE_PACKAGES/ckks/torch_api.py"
           test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
-          test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_backend.cpython-311-x86_64-linux-gnu.so"
-          test -f "$SITE_PACKAGES/ckks/backends/ckks_openfhe_gpu_backend.cpython-311-x86_64-linux-gnu.so"
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_backend.cpython-*.so
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
           
-          echo "All required files present for CUDA ${{ matrix.cuda_version }}!"
+          echo "All required files present for CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }}!"
           echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
+
+  build-main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Build main cukks package
+        run: |
+          pip install build
+          CUKKS_NO_BACKEND=1 python -m build
+      
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-main
+          path: dist/*
+
+  publish-main:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
+    needs: build-main
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-main
+          path: dist
+      
+      - name: Publish cukks to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   publish:
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
