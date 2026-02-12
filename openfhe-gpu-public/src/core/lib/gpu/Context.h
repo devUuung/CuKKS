@@ -330,6 +330,16 @@ class Context {
   DeviceVector __align__(8) primes__;
   DeviceVector __align__(8) barret_ratio__;
   DeviceVector __align__(8) barret_k__;
+  // Pre-computed concatenated Q||P prime/barret arrays, indexed by (num_orig_limbs - 1)
+  std::vector<DeviceVector> primes_qp__;
+  std::vector<DeviceVector> barret_ratio_qp__;
+  std::vector<DeviceVector> barret_k_qp__;
+  // Cached device prime index arrays for ModUp/KeySwitch
+  std::vector<DeviceVector> prime_inds_cache__;
+  // Reusable scratch buffers for KeySwitch accumulators (non-fused path, grow-only)
+  mutable std::unique_ptr<DeviceBuffer> ks_scratch_ax__;
+  mutable std::unique_ptr<DeviceBuffer> ks_scratch_bx__;
+
   DeviceVector __align__(8) power_of_roots__;
   DeviceVector __align__(8) power_of_roots_shoup__;
   DeviceVector __align__(8) inverse_power_of_roots_div_two__;

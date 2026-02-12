@@ -176,6 +176,27 @@ class CKKSContext:
             return self._ctx.gpu_enabled
         return False
 
+    def set_plain_cache_limit(self, limit: int) -> None:
+        if hasattr(self._active_backend, "set_plain_cache_limit"):
+            self._active_backend.set_plain_cache_limit(self._ctx, limit)
+
+    def pin_plain_cache(self) -> None:
+        if hasattr(self._active_backend, "pin_plain_cache"):
+            self._active_backend.pin_plain_cache(self._ctx)
+
+    def clear_pinned_plain_cache(self) -> None:
+        if hasattr(self._active_backend, "clear_pinned_plain_cache"):
+            self._active_backend.clear_pinned_plain_cache(self._ctx)
+
+    def plain_cache_info(self) -> dict[str, int]:
+        total = 0
+        pinned = 0
+        if hasattr(self._active_backend, "plain_cache_stats_count"):
+            total = self._active_backend.plain_cache_stats_count(self._ctx)
+        if hasattr(self._active_backend, "plain_cache_stats_pinned"):
+            pinned = self._active_backend.plain_cache_stats_pinned(self._ctx)
+        return {"total": total, "pinned": pinned, "unpinned": total - pinned}
+
     def encrypt(self, tensor: torch.Tensor) -> "CKKSTensor":
         flat = _tensor_to_list(tensor)
         cipher = self._active_backend.encrypt(self._ctx, self._keys, flat)
@@ -293,8 +314,14 @@ class CKKSTensor:
         result = self._backend.matmul_dense(self._cipher, rows)
         return CKKSTensor(self.context, result, (len(rows),), self.device)
 
-    def matmul_bsgs(self, matrix: Sequence[Sequence[float]], bsgs_n1: int = 0, bsgs_n2: int = 0) -> "CKKSTensor":
-        result = self._backend.matmul_bsgs(self._cipher, matrix, bsgs_n1, bsgs_n2)
+    def matmul_bsgs(self, matrix: Sequence[Sequence[float]], bsgs_n1: int = 0, bsgs_n2: int = 0,
+                    weight_hash: int = 0, diag_nonzero: Sequence[bool] | None = None) -> "CKKSTensor":
+        diag_nonzero_list = list(diag_nonzero) if diag_nonzero is not None else []
+        if hasattr(self._backend, "plain_cache_stats_count"):
+            result = self._backend.matmul_bsgs(self._cipher, matrix, bsgs_n1, bsgs_n2,
+                                               weight_hash, diag_nonzero_list)
+        else:
+            result = self._backend.matmul_bsgs(self._cipher, matrix, bsgs_n1, bsgs_n2)
         return CKKSTensor(self.context, result, (len(matrix),), self.device)
 
     def poly_eval(self, coeffs: Sequence[float]) -> "CKKSTensor":

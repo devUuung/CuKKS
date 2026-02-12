@@ -13,7 +13,9 @@ cmake_minimum_required(VERSION 3.18)
 
 # set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.3/bin/nvcc")
 # set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.3/bin/nvcc")
-set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+if(NOT DEFINED CMAKE_CUDA_COMPILER)
+    set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+endif()
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third-party)
 # add_subdirectory(src/core/thirdparty)
@@ -82,7 +84,7 @@ option( WITH_BE2 "Include MATHBACKEND 2 in build by setting WITH_BE2 to ON"     
 option( WITH_BE4 "Include MATHBACKEND 4 in build by setting WITH_BE4 to ON"          OFF )
 option( WITH_NTL "Include MATHBACKEND 6 and NTL in build by setting WITH_NTL to ON"  OFF )
 option( WITH_TCM "Activate tcmalloc by setting WITH_TCM to ON"                       OFF )
-option( WITH_NATIVEOPT "Use machine-specific optimizations"                          OFF )
+option( WITH_NATIVEOPT "Use machine-specific optimizations"                          ON )
 option( WITH_COVTEST "Turn on to enable coverage testing"                            OFF )
 option( WITH_NOISE_DEBUG "Use only when running lattice estimator; not for production" OFF )
 option( USE_MACPORTS "Use MacPorts installed packages"                               OFF )
@@ -677,7 +679,7 @@ endif()
 # set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.3/bin/nvcc")
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 90 100 120)
+    set(CMAKE_CUDA_ARCHITECTURES 80 89 90 100 120)
 endif()
 
 project(DeviceFunctions LANGUAGES CUDA CXX)
@@ -706,6 +708,8 @@ target_compile_features(DeviceFunctions PUBLIC cxx_std_17 cuda_std_17)
 target_compile_options(DeviceFunctions PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:-Wall>
   $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp,-Wall>
+  $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+  $<$<COMPILE_LANGUAGE:CUDA>:--ptxas-options=-v>
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:DEBUG>>:-G>
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:RELWITHDEBINFO>>:-lineinfo>
 )

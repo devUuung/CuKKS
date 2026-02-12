@@ -35,10 +35,12 @@ __device__ void butt_intt_local(word64 &x, word64 &y, const word64 &w,
   y = mul_and_reduce_shoup(T, w, w_, p);
 }
 
-__global__ void Intt8PointPerThreadPhase2OoP(
-    const word64 *in, const int m, const int num_prime, const int N,
-    const int start_prime_idx, const int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes, word64 *out) {
+__global__ __launch_bounds__(256, 4)
+void Intt8PointPerThreadPhase2OoP(
+    const word64 *__restrict__ in, const int m, const int num_prime, const int N,
+    const int start_prime_idx, const int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+    word64 *__restrict__ out) {
   extern __shared__ uint64_t temp[];
   int set = threadIdx.x / radix;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (N / 8 * num_prime);
@@ -154,10 +156,12 @@ __global__ void Intt8PointPerThreadPhase2OoP(
   }
 }
 
-__global__ void Intt8PointPerThreadPhase1OoP(
-    const word64 *in, const int m, const int num_prime, const int N,
-    const int start_prime_idx, int pad, int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes, word64 *out) {
+__global__ __launch_bounds__(128, 8)
+void Intt8PointPerThreadPhase1OoP(
+    const word64 *__restrict__ in, const int m, const int num_prime, const int N,
+    const int start_prime_idx, int pad, int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+    word64 *__restrict__ out) {
   extern __shared__ uint64_t temp[];
   int Warp_t = threadIdx.x % pad;
   int WarpID = threadIdx.x / pad;
@@ -271,11 +275,13 @@ __global__ void Intt8PointPerThreadPhase1OoP(
   }
 }
 
-__global__ void Intt8PointPerThreadPhase1OoPWithEpilogue(
-    const word64 *in, const int m, const int num_prime, const int N,
-    const int start_prime_idx, int pad, int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes, word64 *out,
-    const word64 *epilogue, const word64 *epilogue_) {
+__global__ __launch_bounds__(128, 8)
+void Intt8PointPerThreadPhase1OoPWithEpilogue(
+    const word64 *__restrict__ in, const int m, const int num_prime, const int N,
+    const int start_prime_idx, int pad, int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+    word64 *__restrict__ out, const word64 *__restrict__ epilogue,
+    const word64 *__restrict__ epilogue_) {
   extern __shared__ uint64_t temp[];
   int Warp_t = threadIdx.x % pad;
   int WarpID = threadIdx.x / pad;
@@ -393,12 +399,13 @@ __global__ void Intt8PointPerThreadPhase1OoPWithEpilogue(
 }
 
 // A special case where start_length is 1
-__global__ void modUpStepTwoSimple(const word64 *ptr_after_intt,
-                                   const word64 *ptr_before_intt,
+__global__ __launch_bounds__(256, 8)
+void modUpStepTwoSimple(const word64 *ptr_after_intt,
+                        const word64 *ptr_before_intt,
                                    const int in_prime_idx, const int degree,
-                                   const word64 *primes,
-                                   const word64 *barrett_ratios,
-                                   const word64 *barrett_Ks,
+                                   const word64 *__restrict__ primes,
+                                   const word64 *__restrict__ barrett_ratios,
+                                   const word64 *__restrict__ barrett_Ks,
                                    const word64 end_length, word64 *to) {
   STRIDED_LOOP_START(degree * end_length, i);
   const int out_prime_idx = i / degree;
@@ -419,12 +426,14 @@ __global__ void modUpStepTwoSimple(const word64 *ptr_after_intt,
   STRIDED_LOOP_END;
 }
 
-__global__ void Ntt8PointPerThreadPhase1ExcludeSomeRange(
+__global__ __launch_bounds__(128, 8)
+void Ntt8PointPerThreadPhase1ExcludeSomeRange(
     uint64_t *op, const int m, const int num_prime, const int N,
     const int start_prime_idx, const int excluded_range_start,
     const int excluded_range_end, const int pad, const int radix,
-    const word64 * prime_inds, // the index of the prime for each limb
-    const word64 *base_inv, const word64 *base_inv_, const word64 *primes) {
+    const word64 *__restrict__ prime_inds, // the index of the prime for each limb
+    const word64 *__restrict__ base_inv, const word64 *__restrict__ base_inv_,
+    const word64 *__restrict__ primes) {
   extern __shared__ uint64_t temp[];
   int Warp_t = threadIdx.x % pad;
   int WarpID = threadIdx.x / pad;
@@ -555,12 +564,14 @@ __global__ void Ntt8PointPerThreadPhase1ExcludeSomeRange(
   }
 }
 
-__global__ void Ntt8PointPerThreadPhase2ExcludeSomeRange(
+__global__ __launch_bounds__(256, 4)
+void Ntt8PointPerThreadPhase2ExcludeSomeRange(
     uint64_t *op, const int m, const int num_prime, const int N,
     const int start_prime_idx, const int excluded_range_start,
-    const int excluded_range_end, const int radix, 
-    const word64 * prime_inds,  // the index of the prime for each limb
-    const word64 *base_inv, const word64 *base_inv_, const word64 *primes) {
+    const int excluded_range_end, const int radix,
+    const word64 *__restrict__ prime_inds,  // the index of the prime for each limb
+    const word64 *__restrict__ base_inv, const word64 *__restrict__ base_inv_,
+    const word64 *__restrict__ primes) {
   extern __shared__ uint64_t temp[];
   int set = threadIdx.x / radix;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (N / 8 * num_prime);
@@ -688,10 +699,12 @@ __global__ void Ntt8PointPerThreadPhase2ExcludeSomeRange(
   }
 }
 
-__global__ void Ntt8PointPerThreadPhase1(
+__global__ __launch_bounds__(128, 8)
+void Ntt8PointPerThreadPhase1(
     uint64_t *op, const int m, const int num_prime, const int N,
     const int start_prime_idx, const int pad, const int radix,
-    const word64 *base_inv, const word64 *base_inv_, const word64 *primes) {
+    const word64 *__restrict__ base_inv, const word64 *__restrict__ base_inv_,
+    const word64 *__restrict__ primes) {
   extern __shared__ uint64_t temp[];
   int Warp_t = threadIdx.x % pad;
   int WarpID = threadIdx.x / pad;
@@ -820,10 +833,12 @@ __global__ void Ntt8PointPerThreadPhase1(
   }
 }
 
-__global__ void Ntt8PointPerThreadPhase1OoP(
-  const word64 *in, const int m, const int num_prime, const int N, 
-  const int start_prime_idx, int pad, int radix, const word64 *base_inv,
-  const word64 *base_inv_, const word64 *primes, word64 *out) {
+__global__ __launch_bounds__(128, 8)
+void Ntt8PointPerThreadPhase1OoP(
+  const word64 *__restrict__ in, const int m, const int num_prime, const int N,
+  const int start_prime_idx, int pad, int radix, const word64 *__restrict__ base_inv,
+  const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+  word64 *__restrict__ out) {
 
   extern __shared__ uint64_t temp[];
   int Warp_t = threadIdx.x % pad;
@@ -957,11 +972,13 @@ __global__ void Ntt8PointPerThreadPhase1OoP(
 
 }
 
-__global__ void Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult(
+__global__ __launch_bounds__(256, 4)
+void Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult(
     uint64_t *op, const int m, const int num_prime, const int N,
-    const int start_prime_idx, const int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes, const word64 *op2,
-    const word64 *epilogue, const word64 *epilogue_) {
+    const int start_prime_idx, const int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+    const word64 *__restrict__ op2, const word64 *__restrict__ epilogue,
+    const word64 *__restrict__ epilogue_) {
   extern __shared__ uint64_t temp[];
   int set = threadIdx.x / radix;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (N / 8 * num_prime);
@@ -1075,10 +1092,11 @@ __global__ void Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult(
   }
 }
 
-__global__ void Ntt8PointPerThreadPhase2(
+__global__ __launch_bounds__(256, 4)
+void Ntt8PointPerThreadPhase2(
     uint64_t *op, const int m, const int num_prime, const int N,
-    const int start_prime_idx, const int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes) {
+    const int start_prime_idx, const int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes) {
   extern __shared__ uint64_t temp[];
   int set = threadIdx.x / radix;
   for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (N / 8 * num_prime);
@@ -1206,10 +1224,12 @@ __global__ void Ntt8PointPerThreadPhase2(
 }
 
 
-__global__ void Ntt8PointPerThreadPhase2OoP(
-    const word64 *in, const int m, const int num_prime, const int N,
-    const int start_prime_idx, int radix, const word64 *base_inv,
-    const word64 *base_inv_, const word64 *primes, word64 *out) {
+__global__ __launch_bounds__(256, 4)
+void Ntt8PointPerThreadPhase2OoP(
+    const word64 *__restrict__ in, const int m, const int num_prime, const int N,
+    const int start_prime_idx, int radix, const word64 *__restrict__ base_inv,
+    const word64 *__restrict__ base_inv_, const word64 *__restrict__ primes,
+    word64 *__restrict__ out) {
 
   extern __shared__ uint64_t temp[];
   int set = threadIdx.x / radix;

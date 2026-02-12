@@ -20,47 +20,50 @@ class MemoryPool {
   using DefaultUpstream = rmm::mr::cuda_memory_resource;
   using MemoryPoolBase = rmm::mr::binning_memory_resource<DefaultUpstream>;
   using MemoryBin = rmm::mr::fixed_size_memory_resource<DefaultUpstream>;
-  constexpr static int preallocation_size = 1;
+  // Small/medium bins get more pre-allocated blocks to handle hot-path burst allocations.
+  // Large bins keep minimal pre-allocation to avoid starving bootstrapping peak memory.
+  static constexpr int prealloc_small = 4;
+  static constexpr int prealloc_large = 1;
 
  public:
 
   void defaultMemorySetup(const Parameter& params) {
     const int degree = params.degree_;
-    addBin(256);
-    addBin(1024);
-    addBin(sizeof(word64) * degree);
-    addBin(sizeof(word64) * degree * 2);
-    addBin(sizeof(word64) * degree * params.alpha_ * params.dnum_);
+    addBin(256, prealloc_small);
+    addBin(1024, prealloc_small);
+    addBin(sizeof(word64) * degree, prealloc_small);
+    addBin(sizeof(word64) * degree * 2, prealloc_small);
+    addBin(sizeof(word64) * degree * params.alpha_ * params.dnum_, prealloc_large);
     addBin(sizeof(word64) * degree *
-           (params.alpha_ * params.dnum_ + params.num_special_moduli_));
+           (params.alpha_ * params.dnum_ + params.num_special_moduli_), prealloc_large);
     addBin(sizeof(word64) * degree *
            (params.alpha_ * params.dnum_ + params.num_special_moduli_) *
-           (params.dnum_));
+           (params.dnum_), prealloc_large);
     addBin(2 * sizeof(word64) * degree *
            (params.alpha_ * params.dnum_ + params.num_special_moduli_) *
-           (params.dnum_));
+           (params.dnum_), prealloc_large);
   }
 
   void mediumMemorySetup(const Parameter& params) {
     const int degree = params.degree_;
-    addBin(256);
-    addBin(1024);
-    addBin(4096);
-    addBin(4096*4);
-    addBin(4096*16);
-    addBin(degree);
-    addBin(2*degree);
-    addBin(sizeof(word64) * degree);
-    addBin(sizeof(word64) * degree * 2);
-    addBin(sizeof(word64) * degree * params.alpha_ * params.dnum_);
+    addBin(256, prealloc_small);
+    addBin(1024, prealloc_small);
+    addBin(4096, prealloc_small);
+    addBin(4096*4, prealloc_small);
+    addBin(4096*16, prealloc_small);
+    addBin(degree, prealloc_small);
+    addBin(2*degree, prealloc_small);
+    addBin(sizeof(word64) * degree, prealloc_small);
+    addBin(sizeof(word64) * degree * 2, prealloc_small);
+    addBin(sizeof(word64) * degree * params.alpha_ * params.dnum_, prealloc_large);
     addBin(sizeof(word64) * degree *
-           (params.alpha_ * params.dnum_ + params.num_special_moduli_));
+           (params.alpha_ * params.dnum_ + params.num_special_moduli_), prealloc_large);
     addBin(sizeof(word64) * degree *
            (params.alpha_ * params.dnum_ + params.num_special_moduli_) *
-           (params.dnum_));
+           (params.dnum_), prealloc_large);
     addBin(2 * sizeof(word64) * degree *
            (params.alpha_ * params.dnum_ + params.num_special_moduli_) *
-           (params.dnum_));
+           (params.dnum_), prealloc_large);
   }
 
   void bigMemorySetup(const Parameter& params) {
@@ -94,8 +97,8 @@ class MemoryPool {
   }
 
  private:
-  void addBin(size_t size) {
-    auto bin = std::make_shared<MemoryBin>(&base__, size, preallocation_size);
+  void addBin(size_t size, int prealloc = prealloc_small) {
+    auto bin = std::make_shared<MemoryBin>(&base__, size, prealloc);
     bin__.push_back(bin);
     device_pool__.add_bin(size, bin.get());
   }
