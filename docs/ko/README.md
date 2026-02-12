@@ -20,7 +20,7 @@ CuKKS는 학습된 PyTorch 모델을 암호화된 데이터에서 실행할 수 
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 # 1. PyTorch에서 정상적으로 모델 학습
 model = nn.Sequential(
@@ -31,7 +31,7 @@ model = nn.Sequential(
 train(model, data)
 
 # 2. 암호화 모델로 변환
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model, use_square_activation=True)
 
 # 3. 입력 암호화 및 추론 실행
 enc_input = ctx.encrypt(test_input)
@@ -45,7 +45,7 @@ output = ctx.decrypt(enc_output)
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 # 모든 연산을 레이어 속성으로 정의
 class MNISTCNN(nn.Module):
@@ -69,7 +69,7 @@ model = MNISTCNN()
 model.eval()
 
 # 암호화 모델로 변환
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model, use_square_activation=True)
 
 # 암호화 및 추론 실행
 enc_input = ctx.encrypt(image)  # shape: (1, 1, 28, 28)
@@ -117,11 +117,11 @@ pip install -e .
 ### 설치 확인
 
 ```python
-import ckks_torch
+import cukks
 
 # 백엔드 사용 가능 여부 확인
-print(ckks_torch.is_available())  # OpenFHE 백엔드 설치 시 True
-print(ckks_torch.get_backend_info())
+print(cukks.is_available())  # OpenFHE 백엔드 설치 시 True
+print(cukks.get_backend_info())
 ```
 
 ## 문서
@@ -158,14 +158,14 @@ CKKS는 다항식 연산만 지원하므로 비선형 활성화 함수는 근사
 
 ```python
 # x^2 활성화 사용 - CKKS에서 정확함, 근사 오차 없음
-enc_model, ctx = ckks_torch.convert(model, use_square_activation=True)
+enc_model, ctx = cukks.convert(model, use_square_activation=True)
 ```
 
 ### 옵션 2: 다항식 근사
 
 ```python
 # ReLU의 체비쇼프 다항식 근사 사용
-enc_model, ctx = ckks_torch.convert(
+enc_model, ctx = cukks.convert(
     model,
     use_square_activation=False,
     activation_degree=4  # 높을수록 정확하지만 회로 깊이 증가
@@ -177,7 +177,7 @@ enc_model, ctx = ckks_torch.convert(
 ### 추론 컨텍스트
 
 ```python
-from ckks_torch import CKKSInferenceContext, InferenceConfig
+from cukks import CKKSInferenceContext, InferenceConfig
 
 # 모델 기반 자동 설정
 ctx = CKKSInferenceContext.for_model(model)
@@ -196,7 +196,7 @@ ctx = CKKSInferenceContext(config)
 ### 변환 옵션
 
 ```python
-from ckks_torch.converter import ModelConverter, ConversionOptions
+from cukks.converter import ModelConverter, ConversionOptions
 
 options = ConversionOptions(
     fold_batchnorm=True,        # BN을 이전 레이어에 폴딩
@@ -214,10 +214,10 @@ enc_model = converter.convert(model)
 
 ```bash
 # 모델 변환 데모 (GPU 불필요)
-python -m ckks_torch.examples.encrypted_inference --demo conversion
+python -m cukks.examples.encrypted_inference --demo conversion
 
 # 전체 암호화 추론 (CKKS 백엔드 필요)
-python -m ckks_torch.examples.encrypted_inference --demo inference
+python -m cukks.examples.encrypted_inference --demo inference
 ```
 
 ### MNIST 암호화 추론
@@ -235,7 +235,7 @@ python examples/mnist_encrypted.py --use-mnist --samples 10
 ### 사용자 정의 다항식 활성화
 
 ```python
-from ckks_torch.utils.approximations import chebyshev_coefficients
+from cukks.utils.approximations import chebyshev_coefficients
 
 # 커스텀 ReLU 근사 계산
 def relu(x):
@@ -244,7 +244,7 @@ def relu(x):
 coeffs = chebyshev_coefficients(relu, degree=7, domain=(-1, 1))
 
 # 모델에서 사용
-from ckks_torch.nn import EncryptedPolynomial
+from cukks.nn import EncryptedPolynomial
 custom_activation = EncryptedPolynomial(coeffs)
 ```
 
@@ -265,7 +265,7 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 ## 아키텍처
 
 ```
-ckks_torch/
+cukks/
 ├── __init__.py          # 메인 익스포트
 ├── context.py           # CKKSInferenceContext
 ├── tensor.py            # EncryptedTensor

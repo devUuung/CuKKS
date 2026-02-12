@@ -40,7 +40,7 @@ This document provides complete API documentation for CuKKS.
 High-level context for encrypted inference. Manages encryption parameters and provides methods for encrypting/decrypting tensors.
 
 ```python
-from ckks_torch import CKKSInferenceContext, InferenceConfig
+from cukks import CKKSInferenceContext, InferenceConfig
 ```
 
 #### Constructor
@@ -223,7 +223,7 @@ ctx.save_context(path: str) -> None
 Configuration dataclass for CKKS encryption parameters.
 
 ```python
-from ckks_torch import InferenceConfig
+from cukks import InferenceConfig
 ```
 
 #### Constructor
@@ -280,7 +280,7 @@ config = InferenceConfig.for_model(model: torch.nn.Module, **kwargs) -> Inferenc
 A tensor wrapper for CKKS-encrypted data with tensor-like operations.
 
 ```python
-from ckks_torch import EncryptedTensor
+from cukks import EncryptedTensor
 ```
 
 #### Properties
@@ -397,7 +397,7 @@ enc_tensor = EncryptedTensor.load(path: str, context: CKKSInferenceContext) -> E
 Main entry point for model conversion. Converts a PyTorch model to an encrypted version.
 
 ```python
-from ckks_torch import convert
+from cukks import convert
 
 enc_model, ctx = convert(
     model: torch.nn.Module,
@@ -430,7 +430,7 @@ enc_model, ctx = convert(
 
 ```python
 import torch.nn as nn
-import ckks_torch
+import cukks
 
 model = nn.Sequential(
     nn.Linear(784, 128),
@@ -438,7 +438,7 @@ model = nn.Sequential(
     nn.Linear(128, 10)
 )
 
-enc_model, ctx = ckks_torch.convert(model)
+enc_model, ctx = cukks.convert(model)
 ```
 
 ---
@@ -448,7 +448,7 @@ enc_model, ctx = ckks_torch.convert(model)
 Class for fine-grained control over model conversion.
 
 ```python
-from ckks_torch.converter import ModelConverter, ConversionOptions
+from cukks.converter import ModelConverter, ConversionOptions
 ```
 
 #### Constructor
@@ -475,7 +475,7 @@ enc_model = converter.convert(
 Configuration for model conversion.
 
 ```python
-from ckks_torch.converter import ConversionOptions
+from cukks.converter import ConversionOptions
 
 options = ConversionOptions(
     fold_batchnorm: bool = True,
@@ -501,7 +501,7 @@ options = ConversionOptions(
 Estimate multiplicative depth required for a model.
 
 ```python
-from ckks_torch import estimate_depth
+from cukks import estimate_depth
 
 depth = estimate_depth(model: torch.nn.Module) -> int
 ```
@@ -515,7 +515,7 @@ depth = estimate_depth(model: torch.nn.Module) -> int
 Base class for all encrypted neural network modules.
 
 ```python
-from ckks_torch.nn import EncryptedModule
+from cukks.nn import EncryptedModule
 ```
 
 #### Abstract Methods
@@ -558,7 +558,7 @@ depth = module.mult_depth() -> int
 Encrypted fully-connected layer.
 
 ```python
-from ckks_torch.nn import EncryptedLinear
+from cukks.nn import EncryptedLinear
 ```
 
 #### Constructor
@@ -617,7 +617,7 @@ enc_fc = EncryptedLinear.from_torch_cnn(fc_layer, cnn_layout)
 Encrypted 2D convolution layer using im2col method.
 
 ```python
-from ckks_torch.nn import EncryptedConv2d
+from cukks.nn import EncryptedConv2d
 ```
 
 #### Constructor
@@ -667,7 +667,7 @@ All activation modules support polynomial approximation.
 Exact x² activation (recommended for accuracy).
 
 ```python
-from ckks_torch.nn import EncryptedSquare
+from cukks.nn import EncryptedSquare
 
 activation = EncryptedSquare()
 ```
@@ -677,7 +677,7 @@ activation = EncryptedSquare()
 Polynomial approximation of ReLU.
 
 ```python
-from ckks_torch.nn import EncryptedReLU
+from cukks.nn import EncryptedReLU
 
 activation = EncryptedReLU(
     degree: int = 4,
@@ -691,7 +691,7 @@ activation = EncryptedReLU(
 Polynomial approximation of GELU.
 
 ```python
-from ckks_torch.nn import EncryptedGELU
+from cukks.nn import EncryptedGELU
 
 activation = EncryptedGELU(degree: int = 4)
 ```
@@ -701,7 +701,7 @@ activation = EncryptedGELU(degree: int = 4)
 Polynomial approximation of SiLU (Swish).
 
 ```python
-from ckks_torch.nn import EncryptedSiLU
+from cukks.nn import EncryptedSiLU
 
 activation = EncryptedSiLU(degree: int = 4)
 ```
@@ -711,7 +711,7 @@ activation = EncryptedSiLU(degree: int = 4)
 Polynomial approximation of sigmoid.
 
 ```python
-from ckks_torch.nn import EncryptedSigmoid
+from cukks.nn import EncryptedSigmoid
 
 activation = EncryptedSigmoid(degree: int = 4)
 ```
@@ -721,7 +721,7 @@ activation = EncryptedSigmoid(degree: int = 4)
 Polynomial approximation of tanh.
 
 ```python
-from ckks_torch.nn import EncryptedTanh
+from cukks.nn import EncryptedTanh
 
 activation = EncryptedTanh(degree: int = 5)
 ```
@@ -731,7 +731,7 @@ activation = EncryptedTanh(degree: int = 5)
 Custom polynomial activation.
 
 ```python
-from ckks_torch.nn import EncryptedPolynomial
+from cukks.nn import EncryptedPolynomial
 
 # coeffs = [a0, a1, a2, ...] for a0 + a1*x + a2*x² + ...
 activation = EncryptedPolynomial(coeffs: Sequence[float])
@@ -744,7 +744,7 @@ activation = EncryptedPolynomial(coeffs: Sequence[float])
 Container for sequential execution of encrypted modules.
 
 ```python
-from ckks_torch.nn import EncryptedSequential
+from cukks.nn import EncryptedSequential
 
 model = EncryptedSequential(
     EncryptedLinear(...),
@@ -767,7 +767,7 @@ model = EncryptedSequential(OrderedDict([
 #### EncryptedFlatten
 
 ```python
-from ckks_torch.nn import EncryptedFlatten
+from cukks.nn import EncryptedFlatten
 
 flatten = EncryptedFlatten(
     start_dim: int = 0, 
@@ -784,7 +784,7 @@ flatten = EncryptedFlatten(
 #### EncryptedAvgPool2d
 
 ```python
-from ckks_torch.nn import EncryptedAvgPool2d
+from cukks.nn import EncryptedAvgPool2d
 
 pool = EncryptedAvgPool2d(
     kernel_size: Union[int, Tuple[int, int]],
@@ -808,7 +808,7 @@ pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 Approximate max pooling using polynomial approximation.
 
 ```python
-from ckks_torch.nn import EncryptedMaxPool2d
+from cukks.nn import EncryptedMaxPool2d
 
 pool = EncryptedMaxPool2d(
     kernel_size: Union[int, Tuple[int, int]],
@@ -837,7 +837,7 @@ pool = EncryptedMaxPool2d.from_torch(max_pool: torch.nn.MaxPool2d)
 Note: BatchNorm is typically folded into preceding layers during conversion.
 
 ```python
-from ckks_torch.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
+from cukks.nn import EncryptedBatchNorm1d, EncryptedBatchNorm2d
 
 bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 ```
@@ -847,7 +847,7 @@ bn = EncryptedBatchNorm1d.from_torch(bn: torch.nn.BatchNorm1d)
 Encrypted layer normalization using pure HE polynomial approximation.
 
 ```python
-from ckks_torch.nn import EncryptedLayerNorm
+from cukks.nn import EncryptedLayerNorm
 
 ln = EncryptedLayerNorm(
     normalized_shape: Union[int, List[int], Tuple[int, ...]],
@@ -876,7 +876,7 @@ ln = EncryptedLayerNorm.from_torch(layer_norm: torch.nn.LayerNorm)
 Dropout layer for encrypted inference. Acts as a no-op (returns input unchanged) since dropout is only active during training.
 
 ```python
-from ckks_torch.nn import EncryptedDropout
+from cukks.nn import EncryptedDropout
 
 dropout = EncryptedDropout(p: float = 0.5)
 
@@ -897,7 +897,7 @@ dropout = EncryptedDropout.from_torch(dropout_layer: torch.nn.Dropout)
 Residual connection block.
 
 ```python
-from ckks_torch.nn import EncryptedResidualBlock
+from cukks.nn import EncryptedResidualBlock
 
 block = EncryptedResidualBlock(main_branch: EncryptedModule)
 ```
@@ -907,7 +907,7 @@ block = EncryptedResidualBlock(main_branch: EncryptedModule)
 Approximate multi-head attention for encrypted transformer inference using pure HE cipher-cipher operations. Uses polynomial approximation for softmax via Taylor expansion of exp(x).
 
 ```python
-from ckks_torch.nn import EncryptedApproxAttention
+from cukks.nn import EncryptedApproxAttention
 
 attention = EncryptedApproxAttention(
     embed_dim: int,
@@ -947,7 +947,7 @@ attention = EncryptedApproxAttention.from_torch(
 Utility for packing multiple samples into CKKS slots.
 
 ```python
-from ckks_torch.batching import SlotPacker
+from cukks.batching import SlotPacker
 
 packer = SlotPacker(
     slots_per_sample: int,
@@ -983,12 +983,12 @@ samples = packer.unpack(
 ### Top-level Functions
 
 ```python
-import ckks_torch
+import cukks
 
 # Check if backend is available
-available = ckks_torch.is_available() -> bool
+available = cukks.is_available() -> bool
 
 # Get backend information
-info = ckks_torch.get_backend_info() -> dict
+info = cukks.get_backend_info() -> dict
 # Returns: {"backend": "openfhe-gpu", "available": True, "cuda": True}
 ```

@@ -20,9 +20,9 @@ import torch.nn as nn
 import torch.optim as optim
 
 # Import CuKKS
-import ckks_torch
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import EncryptedModule
+import cukks
+from cukks import CKKSInferenceContext
+from cukks.nn import EncryptedModule
 
 
 # =============================================================================
@@ -97,13 +97,13 @@ def convert_to_encrypted(model: nn.Module):
     """Convert PyTorch model to encrypted version."""
     
     # Option A: Use square activation (exact, recommended)
-    enc_model, ctx = ckks_torch.convert(
+    enc_model, ctx = cukks.convert(
         model,
         use_square_activation=True,  # x^2 is exact in CKKS
     )
     
     # Option B: Use polynomial approximation of ReLU
-    # enc_model, ctx = ckks_torch.convert(
+    # enc_model, ctx = cukks.convert(
     #     model,
     #     use_square_activation=False,
     #     activation_degree=4,  # Higher = more accurate but deeper circuit
@@ -221,7 +221,7 @@ def main():
     print("=" * 60)
     
     # Check backend availability
-    backend_info = ckks_torch.get_backend_info()
+    backend_info = cukks.get_backend_info()
     print(f"\nBackend: {backend_info}")
     
     # Load data

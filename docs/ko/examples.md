@@ -75,8 +75,8 @@ result = ctx.decrypt(enc_add)
 - 제곱 활성화 (CKKS 친화적인 ReLU 대안)
 
 ```python
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+from cukks import CKKSInferenceContext
+from cukks.nn import EncryptedLinear, EncryptedSquare
 
 # 컨텍스트 생성
 ctx = CKKSInferenceContext(
@@ -114,8 +114,8 @@ GPU 가속 암호화 CNN 추론:
 - 회전 기반 풀링
 
 ```python
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import (
+from cukks import CKKSInferenceContext
+from cukks.nn import (
     EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
     EncryptedFlatten, EncryptedLinear
 )
@@ -171,7 +171,7 @@ PP-STAT 논문 기반의 프라이버시 보호 통계 함수:
 - `crypto_inv_sqrt_shallow`: 부트스트랩 없는 역제곱근
 
 ```python
-from ckks_torch.stats import (
+from cukks.stats import (
     encrypted_mean, encrypted_variance, encrypted_std,
     crypto_inv_sqrt_shallow
 )

@@ -49,14 +49,14 @@ USENIX Security 2018.
 *PP-STAT: An Efficient Privacy-Preserving Statistical Analysis Framework.*
 CIKM'25.
 
-> Privacy-preserving encrypted statistical operations: mean, variance, standard deviation, inverse square root, and reciprocal. Used in `ckks_torch.stats` (normalization, crypto_inv_sqrt, crypto_reciprocal).
+> Privacy-preserving encrypted statistical operations: mean, variance, standard deviation, inverse square root, and reciprocal. Used in `cukks.stats` (normalization, crypto_inv_sqrt, crypto_reciprocal).
 
 ---
 
 ## Polynomial Approximation Algorithms
 
 **Chebyshev Interpolation.**
-Used to approximate non-polynomial functions (ReLU, GELU, SiLU, Sigmoid, Tanh, 1/x, 1/√x) with polynomials evaluable in CKKS. Implemented in `ckks_torch.utils.approximations`, `activations.py`, `layernorm.py`, `crypto_inv_sqrt.py`, `crypto_reciprocal.py`.
+Used to approximate non-polynomial functions (ReLU, GELU, SiLU, Sigmoid, Tanh, 1/x, 1/√x) with polynomials evaluable in CKKS. Implemented in `cukks.utils.approximations`, `activations.py`, `layernorm.py`, `crypto_inv_sqrt.py`, `crypto_reciprocal.py`.
 
 **Paterson-Stockmeyer Algorithm.**
 Paterson, M. S. & Stockmeyer, L. J. (1973).
@@ -72,7 +72,7 @@ Used for iterative refinement of 1/√x after initial Chebyshev approximation. I
 Standard polynomial evaluation scheme. Used as fallback in `poly_eval()` when Paterson-Stockmeyer is not available.
 
 **Remez Algorithm.**
-Optimal minimax polynomial approximation. Referenced in `ckks_torch.utils.approximations` as the ideal approach; current implementation uses Chebyshev as a practical approximation to minimax.
+Optimal minimax polynomial approximation. Referenced in `cukks.utils.approximations` as the ideal approach; current implementation uses Chebyshev as a practical approximation to minimax.
 
 ---
 

@@ -11,8 +11,8 @@ CNN 암호화 추론 예제
 
 import torch
 import torch.nn as nn
-from ckks_torch import CKKSInferenceContext
-from ckks_torch.nn import (
+from cukks import CKKSInferenceContext
+from cukks.nn import (
     EncryptedConv2d,
     EncryptedSquare,
     EncryptedAvgPool2d,
