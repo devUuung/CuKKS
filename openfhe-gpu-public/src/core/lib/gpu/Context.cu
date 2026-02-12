@@ -299,6 +299,9 @@ void Context::GenModUpParams() {
   hat_inverse_vec_shoup__.reserve(param__.chain_length_);
   hat_inverse_vec_batched__.reserve(param__.chain_length_);
   hat_inverse_vec_shoup_batched__.reserve(param__.chain_length_);
+  primes_qp__.reserve(param__.chain_length_);
+  barret_ratio_qp__.reserve(param__.chain_length_);
+  barret_k_qp__.reserve(param__.chain_length_);
 
   for (int num_limbs = 1; num_limbs <= param__.chain_length_ ; num_limbs++) {
 
@@ -306,8 +309,23 @@ void Context::GenModUpParams() {
 
     // std::vector<word64> curr_primes(param__.primes_.begin(), param__.primes_.begin() + num_limbs);
     std::vector<word64> curr_primes(num_limbs+alpha__);
+    HostVector curr_primes_qp(num_limbs + alpha__);
+    HostVector curr_barret_ratio_qp(num_limbs + alpha__);
+    HostVector curr_barret_k_qp(num_limbs + alpha__);
     for (int i = 0; i < num_limbs; i++) curr_primes[i] = param__.primes_[i];
     for (int i = 0; i < alpha__; i++) curr_primes[num_limbs+i] = param__.primes_[param__.chain_length_  + i];
+    for (int i = 0; i < num_limbs + alpha__; i++) {
+      const word64 prime = curr_primes[i];
+      const long barret = floor(log2(prime)) + 63;
+      curr_primes_qp[i] = prime;
+      curr_barret_k_qp[i] = barret;
+      word128 temp = ((word64)1 << (barret - 64));
+      temp <<= 64;
+      curr_barret_ratio_qp[i] = static_cast<word64>(temp / prime);
+    }
+    primes_qp__.push_back(DeviceVector(curr_primes_qp));
+    barret_ratio_qp__.push_back(DeviceVector(curr_barret_ratio_qp));
+    barret_k_qp__.push_back(DeviceVector(curr_barret_k_qp));
     // assert(curr_primes.size() == num_limbs + alpha__);
 
     const int beta = ceil((float)num_limbs / (float)alpha__);
@@ -346,6 +364,14 @@ void Context::GenModUpParams() {
 
     hat_inverse_vec_batched__.push_back(Flatten(hat_inverse_vec__[num_limbs-1]));
     hat_inverse_vec_shoup_batched__.push_back(Flatten(hat_inverse_vec_shoup__[num_limbs-1]));
+  }
+
+  prime_inds_cache__.reserve(param__.chain_length_);
+  for (int n = 1; n <= param__.chain_length_; n++) {
+    HostVector inds(n + alpha__);
+    for (int i = 0; i < n; i++) inds[i] = i;
+    for (int i = 0; i < alpha__; i++) inds[n + i] = param__.chain_length_ + i;
+    prime_inds_cache__.push_back(DeviceVector(inds));
   }
 }
 
@@ -673,7 +699,8 @@ CtAccurate Context::EvalSquareAndRelinNoRescale(const CtAccurate& ct, const Eval
 }
 
 
-__global__ void permute_(word64* out, const word64* in, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
+__global__ __launch_bounds__(512)
+void permute_(word64* out, const word64* __restrict__ in, const word64* __restrict__ indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
   if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
@@ -681,8 +708,9 @@ __global__ void permute_(word64* out, const word64* in, const word64* indices, c
   out[i] = in[limbInd*degree + indices[dataInd]];
 }
 
-__global__ void permute_two_(word64* out_a, word64* out_b, 
-    const word64* in_a, const word64* in_b, const word64* indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
+__global__ __launch_bounds__(512)
+void permute_two_(word64* out_a, word64* out_b,
+    const word64* __restrict__ in_a, const word64* __restrict__ in_b, const word64* __restrict__ indices, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
   if (static_cast<uint32_t>(i) >= total_size) return;
   const uint32_t limbInd = i >> log_degree;
@@ -744,8 +772,9 @@ inline __device__ uint32_t ReverseBits(uint32_t num, uint32_t msb) {
 }
 
 
-__global__ void automorph_(word64* out,
-  const word64* in, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
+__global__ __launch_bounds__(512)
+void automorph_(word64* out,
+  const word64* __restrict__ in, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
   if (static_cast<uint32_t>(i) >= total_size) return;
@@ -766,8 +795,9 @@ __global__ void automorph_(word64* out,
   out[limbInd*degree + jrev] = in[limbInd*degree + idxrev];
 }
 
-__global__ void automorph_pair_(word64* out_a, word64* out_b,
-  const word64* in_a, const word64* in_b, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
+__global__ __launch_bounds__(512)
+void automorph_pair_(word64* out_a, word64* out_b,
+  const word64* __restrict__ in_a, const word64* __restrict__ in_b, const word64 auto_index, const uint32_t log_degree, const uint32_t degree, const uint32_t degree_mask, const uint32_t total_size) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;  // output index
   if (static_cast<uint32_t>(i) >= total_size) return;
@@ -901,10 +931,11 @@ CtAccurate Context::EvalAtIndex(const CtAccurate& ct, const EvaluationKey& evk, 
 // Utility functions
 //
 
-__global__ void mulAndAddScaled_(word64 *op1, const word64* op2, const word64* scalar, 
+__global__ __launch_bounds__(256, 8)
+void mulAndAddScaled_(word64 *op1, const word64* __restrict__ op2, const word64* __restrict__ scalar,
   // const word64* scalar_shoup,
-  const word64* primes, 
-  const word64 *barrett_ratios, const word64 *barrett_Ks,
+  const word64* __restrict__ primes,
+  const word64 * __restrict__ barrett_ratios, const word64 * __restrict__ barrett_Ks,
   const uint32_t op2_limbs, const uint32_t degree) {
 
   STRIDED_LOOP_START(degree * op2_limbs, i);
@@ -952,11 +983,21 @@ void Context::AddScaledMessageTerm(DeviceVector& inner_prod_b, const DeviceVecto
 // NTT is made up of two NTT stages. Here the 'first' means the first NTT
 // stage in NTT (so it becomes second in view of iNTT).
 DeviceVector Context::FromNTT(const DeviceVector &in) const {
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
+                           cudaFuncCachePreferShared);
+    cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
+                           cudaFuncCachePreferShared);
+    configured = true;
+  }
   DeviceVector out;
   out.resize(in.size());
   const int batch = in.size() / degree__;
   const int start_prime_idx = 0;
-  dim3 grid(2048);
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 grid(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 block(256);
   const int per_thread_ntt_size = 8;
   const int first_stage_radix_size = 256;
@@ -981,7 +1022,17 @@ DeviceVector Context::FromNTT(const DeviceVector &in) const {
 }
 
 void Context::FromNTTInplace(word64 *op1, int start_prime_idx, int batch, const bool verbose) const {
-  dim3 gridDim(2048);
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
+                           cudaFuncCachePreferShared);
+    cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
+                           cudaFuncCachePreferShared);
+    configured = true;
+  }
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 blockDim(256);
   // NTT is made up of two NTT stages. Here the 'first' means the first NTT
   // stage in NTT (so it becomes second in view of iNTT).
@@ -1012,7 +1063,9 @@ DeviceVector Context::FromNTT(const DeviceVector &in,
   out.resize(in.size());
   const int batch = in.size() / degree__;
   const int start_prime_idx = 0;
-  dim3 grid(2048);
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 grid(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 block(256);
   const int per_thread_ntt_size = 8;
   const int first_stage_radix_size = 256;
@@ -1117,9 +1170,10 @@ void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_o
   // }
 }
 
-__global__ void constMultBatch_(size_t degree, const word64 *primes,
-                                const word64 *op1, const word64 *op2,
-                                const word64 *op2_psinv,
+__global__ __launch_bounds__(256, 8)
+void constMultBatch_(size_t degree, const word64 * __restrict__ primes,
+                                const word64 * __restrict__ op1, const word64 * __restrict__ op2,
+                                const word64 * __restrict__ op2_psinv,
                                 const int start_prime_idx, const int batch,
                                 word64 *to) {
   STRIDED_LOOP_START(degree * batch, i);
@@ -1145,10 +1199,11 @@ void Context::ConstMultBatch(const word64 *op1, const DeviceVector &op2,
                                            start_prime_idx, batch, res);
 }
 
-__global__ void constMultBatchModDown_(
-  size_t degree, const word64 *primes,
-  const word64 *op1, const int start_limb_idx,
-  const word64 *op2, const word64 *op2_psinv,
+__global__ __launch_bounds__(256, 8)
+void constMultBatchModDown_(
+  size_t degree, const word64 * __restrict__ primes,
+  const word64 * __restrict__ op1, const int start_limb_idx,
+  const word64 * __restrict__ op2, const word64 * __restrict__ op2_psinv,
   const int start_prime_idx, const int batch, word64 *to) {
   STRIDED_LOOP_START(degree * batch, i);
   const int op2_idx = i / degree;
@@ -1212,10 +1267,11 @@ __device__ uint128_t4 AccumulateInModUp(const word64 *ptr, const int degree,
 // Mod-up `ptr` to `to`.
 // hat_mod_end[:end_length], ptr[:start_length][:degree],
 // to[:start_length+end_length][:degree] ptr` is entirely overlapped with `to`.
-__global__ void modUpStepTwoKernel(
-  const word64 *ptr, const int begin_idx, const int degree, const word64 *primes,
-  const word64 *barrett_ratios, const word64 *barrett_Ks,
-  const word64 *hat_mod_end, const int hat_mod_end_size,
+__global__ __launch_bounds__(256, 4)
+void modUpStepTwoKernel(
+  const word64 * __restrict__ ptr, const int begin_idx, const int degree, const word64 * __restrict__ primes,
+  const word64 * __restrict__ barrett_ratios, const word64 * __restrict__ barrett_Ks,
+  const word64 * __restrict__ hat_mod_end, const int hat_mod_end_size,
   const word64 start_length, const word64 end_length, word64 *to) {
   constexpr const int unroll_number = 4;
   extern __shared__ word64 s_hat_mod_end[];
@@ -1255,7 +1311,8 @@ __global__ void modUpStepTwoKernel(
   STRIDED_LOOP_END;
 }
 
-__global__ void ModDownLengthOne(const uint64_t *poly, const int current_level,
+__global__ __launch_bounds__(256, 8)
+void ModDownLengthOne(const uint64_t * __restrict__ poly, const int current_level,
                                  const KernelParams ring, uint64_t *out) {
   const int degree = ring.degree;
   STRIDED_LOOP_START(degree * current_level, i);
@@ -1273,9 +1330,10 @@ __global__ void ModDownLengthOne(const uint64_t *poly, const int current_level,
   STRIDED_LOOP_END;
 }
 
-__global__ void ModDownKernel(
-  KernelParams ring, const word64 *ptr,
-  const word64 *hat_mod_end, const int hat_mod_end_size,
+__global__ __launch_bounds__(256, 4)
+void ModDownKernel(
+  KernelParams ring, const word64 * __restrict__ ptr,
+  const word64 * __restrict__ hat_mod_end, const int hat_mod_end_size,
   const word64 start_length, const word64 end_length, word64 *to) {
   constexpr const int unroll_number = 4;
   extern __shared__ word64 s_hat_mod_end[];
@@ -1313,8 +1371,9 @@ __global__ void ModDownKernel(
   STRIDED_LOOP_END;
 }
 
-__global__ void negateInplace_(size_t degree, size_t log_degree, size_t batch,
-                               const uint64_t *primes, uint64_t *op) {
+__global__ __launch_bounds__(256, 8)
+void negateInplace_(size_t degree, size_t log_degree, size_t batch,
+                               const uint64_t * __restrict__ primes, uint64_t *op) {
   STRIDED_LOOP_START(batch * degree, i);
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -1329,9 +1388,10 @@ void Context::NegateInplace(word64 *op1, const int batch) const {
                                           primes__.data(), op1);
 }
 
-__global__ void subInplace_(size_t degree, size_t log_degree, size_t batch,
-                            const uint64_t *primes, uint64_t *op1,
-                            const uint64_t *op2) {
+__global__ __launch_bounds__(256, 8)
+void subInplace_(size_t degree, size_t log_degree, size_t batch,
+                            const uint64_t * __restrict__ primes, uint64_t *op1,
+                            const uint64_t * __restrict__ op2) {
   STRIDED_LOOP_START(batch * degree, i);
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -1355,6 +1415,11 @@ void Context::SubInplace(word64 *op1, const word64 *op2,
 // output should just be base limbs
 // void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v, long target_chain_idx) const {
 void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(ModDownKernel, cudaFuncCachePreferShared);
+    configured = true;
+  }
   // if (target_chain_idx > param__.chain_length_)
     // throw std::logic_error("Target chain index is too big.");
   
@@ -1433,13 +1498,15 @@ void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
 //     }
 // }
 
-__global__ void switchModulus_BigNewModulus_(word64* op, const word64 halfQ, const word64 diff) {
+__global__ __launch_bounds__(256, 8)
+void switchModulus_BigNewModulus_(word64* op, const word64 halfQ, const word64 diff) {
   const int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (op[j] > halfQ)
     op[j] += diff;
 }
 
-__global__ void switchModulus_SmallNewModulus_(word64* op, const uint32_t limbInd, const word64 halfQ, const word64 diff, word64 newModulus, const word64* barret_ratio__, const word64* barret_k__) {
+__global__ __launch_bounds__(256, 8)
+void switchModulus_SmallNewModulus_(word64* op, const uint32_t limbInd, const word64 halfQ, const word64 diff, word64 newModulus, const word64* __restrict__ barret_ratio__, const word64* __restrict__ barret_k__) {
   const int j = blockIdx.x * blockDim.x + threadIdx.x;
   if (op[j] > halfQ)
       op[j] += diff;
@@ -1449,10 +1516,11 @@ __global__ void switchModulus_SmallNewModulus_(word64* op, const uint32_t limbIn
 }
 
 // all limbs
-__global__ void switchModulusFused_(
-  word64* to, const word64* from, const uint32_t degree, 
+__global__ __launch_bounds__(256, 8)
+void switchModulusFused_(
+  word64* to, const word64* __restrict__ from, const uint32_t degree,
   const word64 oldModulus, 
-  const word64* primes, const word64* barret_ratio__, const word64* barret_k__) {
+  const word64* __restrict__ primes, const word64* __restrict__ barret_ratio__, const word64* __restrict__ barret_k__) {
 
   const int j = blockIdx.x * blockDim.x + threadIdx.x;
   const uint32_t limbInd = j / degree;
@@ -1608,7 +1676,17 @@ DeviceVector Context::ToNTT(const DeviceVector& in) const {
 }
 
 void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
-  dim3 gridDim(2048);
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
+                           cudaFuncCachePreferShared);
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2,
+                           cudaFuncCachePreferShared);
+    configured = true;
+  }
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 blockDim(256);
   const int per_thread_ntt_size = 8;
   const int first_stage_radix_size = 256;
@@ -1641,6 +1719,11 @@ DeviceVector Context::copyLimbData(const DeviceVector& from, const int num_orig_
 }
 
 void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int num_orig_limbs) const {
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(modUpStepTwoKernel, cudaFuncCachePreferShared);
+    configured = true;
+  }
   // std::cout << "In ModUpMatMul\n";
   const int num_moduli_after_modup = num_orig_limbs + alpha__;
   const int unroll_factor = 4;
@@ -1655,11 +1738,11 @@ void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int
  
   const int end_length = num_moduli_after_modup - start_length;
 
-  DeviceVector curr_primes = copyLimbData(primes__, num_orig_limbs);
+  const auto& curr_primes = primes_qp__[num_orig_limbs - 1];
   // assert(curr_primes == primes__);
-  DeviceVector curr_barret_ratio = copyLimbData(barret_ratio__, num_orig_limbs);
+  const auto& curr_barret_ratio = barret_ratio_qp__[num_orig_limbs - 1];
   // assert(curr_barret_ratio == barret_ratio__);
-  DeviceVector curr_barret_k = copyLimbData(barret_k__, num_orig_limbs);
+  const auto& curr_barret_k = barret_k_qp__[num_orig_limbs - 1];
   // assert(curr_barret_k == barret_k__);
 
   // std::cout << "finished copying limb data\n";
@@ -1683,12 +1766,7 @@ void Context::ModUpBatchImpl(const DeviceVector &from, DeviceVector &to, int bet
 
   const int num_moduli_after_modup = num_input_limbs + alpha__;
 
-  HostVector prime_inds(num_input_limbs + alpha__);
-  assert(prime_inds.size() == num_input_limbs + alpha__);
-  for (size_t i = 0; i < num_input_limbs; i++) prime_inds[i] = i;
-  for (size_t i = 0; i < alpha__; i++) prime_inds[num_input_limbs+i] = param__.chain_length_ + i;
-
-  DeviceVector prime_inds_device(prime_inds);
+  const auto& prime_inds_device = prime_inds_cache__[num_input_limbs - 1];
   // std::cout << "ModUp Primes\n";
   // for (auto prime_ind : prime_inds) std::cout << param__.primes_[prime_ind] << std::endl;
 
@@ -1758,12 +1836,23 @@ void Context::ToNTTInplaceExceptSomeRange(
   int excluded_range_start, int excluded_range_size,
   const DeviceVector& prime_inds) const {
 
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1ExcludeSomeRange,
+                           cudaFuncCachePreferShared);
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2ExcludeSomeRange,
+                           cudaFuncCachePreferShared);
+    configured = true;
+  }
+
   const int excluded_range_end = excluded_range_start + excluded_range_size;
   if (excluded_range_start < start_prime_idx ||
       excluded_range_end > (start_prime_idx + batch)) {
     throw "Excluded range in NTT is invalid.";
   }
-  dim3 grid(2048);
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 grid(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 block(256);
   const int per_thread_ntt_size = 8;
   const int first_stage_radix_size = 256;
@@ -1790,9 +1879,20 @@ void Context::ToNTTInplaceExceptSomeRange(
 void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
                                 const DeviceVector &epilogue,
                                 const DeviceVector &epilogue_) const {
-  dim3 gridDim(2048);
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
+                           cudaFuncCachePreferShared);
+    cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult,
+                           cudaFuncCachePreferShared);
+    configured = true;
+  }
   // dim3 gridDim(8192);
   // dim3 gridDim(32768);
+  const int batch = op1.size() / degree__;
+  const int total_ntt_work = (degree__ / 8) * batch;
+  const int grid_dim_val = (total_ntt_work + 255) / 256;
+  dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
   dim3 blockDim(256);
   // dim3 blockDim(64);
   const int per_thread_ntt_size = 8;
@@ -1803,7 +1903,6 @@ void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
   const int per_thread_storage =
       blockDim.x * per_thread_ntt_size * sizeof(word64);  // this might be too small. this might be limiting the # of blocks
   const int start_prime_idx = 0;
-  const int batch = op1.size() / degree__;
   Ntt8PointPerThreadPhase1<<<gridDim, (first_stage_radix_size / 8) * pad,
                              (first_stage_radix_size + pad + 1) * pad *
                                  sizeof(uint64_t)>>>(
@@ -1819,12 +1918,13 @@ void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
   CudaCheckError();
 }
 
-__global__ void sumAndReduceFused(
-  const word64 *modup_out, const int degree, const int length, const int batch,
+__global__ __launch_bounds__(256, 4)
+void sumAndReduceFused(
+  const word64 * __restrict__ modup_out, const int degree, const int length, const int batch,
   const int eval_length,
-  const word64 *eval_ax, const word64 *eval_bx,
-  const word64 * prime_inds,
-  const word64 *primes, const word64 *barret_ks, const word64 *barret_ratios, 
+  const word64 * __restrict__ eval_ax, const word64 * __restrict__ eval_bx,
+  const word64 * __restrict__ prime_inds,
+  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios,
   word64 *dst_ax, word64 *dst_bx) {
 
   STRIDED_LOOP_START(degree * length, i);
@@ -1858,8 +1958,9 @@ __global__ void sumAndReduceFused(
 }
 
 template <bool Accum>
-__global__ void mult_(const word64 *modup_out, 
-  const word64 *eval_poly_ax, const word64 *eval_poly_bx, const int degree,
+__global__ __launch_bounds__(256, 8)
+void mult_(const word64 * __restrict__ modup_out,
+  const word64 * __restrict__ eval_poly_ax, const word64 * __restrict__ eval_poly_bx, const int degree,
   const int length, uint128_t *accum_ptr_ax, uint128_t *accum_ptr_bx) {
 
   STRIDED_LOOP_START(degree * length, i);
@@ -1878,9 +1979,10 @@ __global__ void mult_(const word64 *modup_out,
   STRIDED_LOOP_END;
 }
 
-__global__ void Reduce(
-  const uint128_t *accum, const int degree, const int length, 
-  const word64 *primes, const word64 *barret_ks, const word64 *barret_ratios,
+__global__ __launch_bounds__(256, 8)
+void Reduce(
+  const uint128_t * __restrict__ accum, const int degree, const int length,
+  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios,
   word64 *res) {
 
   STRIDED_LOOP_START(degree * length, i);
@@ -1895,6 +1997,12 @@ __global__ void Reduce(
 }
 
 void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk, DeviceVector &sum_ax, DeviceVector &sum_bx) const {
+
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(sumAndReduceFused, cudaFuncCachePreferL1);
+    configured = true;
+  }
 
   assert(modup_out.size() > 0 && modup_out.size() % degree__ == 0);
   const int total_length = modup_out.size() / degree__;
@@ -1937,11 +2045,7 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
   const auto &eval_bx = evk.getBxDevice();
   assert(param__.max_num_moduli_ == eval_ax.size()/(param__.dnum_ * degree__));
 
-  HostVector prime_inds(num_original_input_limbs + alpha__);
-  for (size_t i = 0; i < num_original_input_limbs; i++) prime_inds[i] = i;
-  for (size_t i = 0; i < alpha__; i++) prime_inds[num_original_input_limbs+i] = param__.chain_length_ + i;
-
-  DeviceVector prime_inds_device(prime_inds);
+  const auto& prime_inds_device = prime_inds_cache__[num_original_input_limbs - 1];
 
   if (is_keyswitch_fused) {
     sumAndReduceFused<<<gridDim, blockDim>>>(
@@ -1950,10 +2054,13 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
         primes__.data(), barret_k__.data(), barret_ratio__.data(), sum_ax.data(), sum_bx.data());
   } else {
     const int quad_word_size_byte = sizeof(uint128_t);
-    DeviceBuffer accum_ax(modup_out.size() * quad_word_size_byte);
-    DeviceBuffer accum_bx(modup_out.size() * quad_word_size_byte);
-    auto accum_ax_ptr = (uint128_t *)accum_ax.data();
-    auto accum_bx_ptr = (uint128_t *)accum_bx.data();
+    const size_t scratch_size = modup_out.size() * quad_word_size_byte;
+    if (!ks_scratch_ax__ || ks_scratch_ax__->size() < scratch_size) {
+      ks_scratch_ax__ = std::make_unique<DeviceBuffer>(scratch_size, cudaStreamLegacy);
+      ks_scratch_bx__ = std::make_unique<DeviceBuffer>(scratch_size, cudaStreamLegacy);
+    }
+    auto accum_ax_ptr = (uint128_t *)ks_scratch_ax__->data();
+    auto accum_bx_ptr = (uint128_t *)ks_scratch_bx__->data();
     mult_<false><<<gridDim, blockDim>>>(modup_out.data(), eval_ax.data(),
                                         eval_bx.data(), degree__, length,
                                         accum_ax_ptr, accum_bx_ptr);
@@ -1970,9 +2077,10 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
   }
 }
 
-__global__ void hadamardMultAndAddBatch_(
-    const KernelParams ring, const word64 **ax_addr, const word64 **bx_addr,
-    const word64 **mx_addr, const int fold_size, const size_t size,
+__global__ __launch_bounds__(256, 4)
+void hadamardMultAndAddBatch_(
+    const KernelParams ring, const word64 ** __restrict__ ax_addr, const word64 ** __restrict__ bx_addr,
+    const word64 ** __restrict__ mx_addr, const int fold_size, const size_t size,
     const int log_degree, word64 *out_ax, word64 *out_bx) {
   STRIDED_LOOP_START(size, idx);
   const int prime_idx = idx >> log_degree;
@@ -2021,12 +2129,13 @@ void Context::hadamardMultAndAddBatch(const std::vector<const word64 *> ax_addr,
       out_bx.data());
 }
 
-__global__ void hadamardMultFused_(size_t degree, size_t log_degree,
-                              size_t num_primes, const uint64_t* primes,
-                              const uint64_t* barret_ratio,
-                              const uint64_t* barret_k, const uint64_t* op1,
-                              const uint64_t* op2, const uint64_t* mx,
-                              uint64_t* op1_out, uint64_t* op2_out) {
+__global__ __launch_bounds__(256, 8)
+void hadamardMultFused_(size_t degree, size_t log_degree,
+                               size_t num_primes, const uint64_t* __restrict__ primes,
+                               const uint64_t* __restrict__ barret_ratio,
+                               const uint64_t* __restrict__ barret_k, const uint64_t* op1,
+                               const uint64_t* op2, const uint64_t* __restrict__ mx,
+                               uint64_t* op1_out, uint64_t* op2_out) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -2039,10 +2148,11 @@ __global__ void hadamardMultFused_(size_t degree, size_t log_degree,
                                    barret_k[prime_idx]);
 }
 
-__global__ void constantMultFusedInPlace_(size_t degree, size_t log_degree,
-                              size_t num_primes, const uint64_t* primes,
-                              const uint64_t* barret_ratio, const uint64_t* barret_k, 
-                              uint64_t* op1, uint64_t* op2, const uint64_t* mx) {
+__global__ __launch_bounds__(256, 8)
+void constantMultFusedInPlace_(size_t degree, size_t log_degree,
+                               size_t num_primes, const uint64_t* __restrict__ primes,
+                               const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+                               uint64_t* op1, uint64_t* op2, const uint64_t* mx) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -2053,10 +2163,11 @@ __global__ void constantMultFusedInPlace_(size_t degree, size_t log_degree,
   op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
 }
 
-__global__ void integerMultFusedInPlace_(size_t degree, size_t log_degree,
-                              size_t num_primes, const uint64_t* primes,
-                              const uint64_t* barret_ratio, const uint64_t* barret_k, 
-                              uint64_t* op1, uint64_t* op2, const uint64_t m) {
+__global__ __launch_bounds__(256, 8)
+void integerMultFusedInPlace_(size_t degree, size_t log_degree,
+                               size_t num_primes, const uint64_t* __restrict__ primes,
+                               const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+                               uint64_t* op1, uint64_t* op2, const uint64_t m) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -2066,10 +2177,11 @@ __global__ void integerMultFusedInPlace_(size_t degree, size_t log_degree,
   op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
 }
 
-__global__ void evalMultFused_(
-  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* primes,
-  const uint64_t* barret_ratio, const uint64_t* barret_k, 
-  const uint64_t* op1_0, const uint64_t* op1_1, const uint64_t* op2_0, const uint64_t* op2_1, 
+__global__ __launch_bounds__(256, 4)
+void evalMultFused_(
+  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* __restrict__ primes,
+  const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ op1_0, const uint64_t* __restrict__ op1_1, const uint64_t* __restrict__ op2_0, const uint64_t* __restrict__ op2_1,
   uint64_t* op0_out, uint64_t* op1_out, uint64_t* op2_out) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2086,10 +2198,11 @@ __global__ void evalMultFused_(
   op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
 }
 
-__global__ void evalMultPlainFused_(
+__global__ __launch_bounds__(256, 8)
+void evalMultPlainFused_(
   size_t log_degree, 
-  const uint64_t* primes, const uint64_t* barret_ratio, const uint64_t* barret_k, 
-  const uint64_t* c_0, const uint64_t* c_1, const uint64_t* m_op, 
+  const uint64_t* __restrict__ primes, const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ c_0, const uint64_t* __restrict__ c_1, const uint64_t* __restrict__ m_op,
   uint64_t* out_0, uint64_t* out_1) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2103,10 +2216,11 @@ __global__ void evalMultPlainFused_(
   out_1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
 }
 
-__global__ void evalSquareFused_(
-  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* primes,
-  const uint64_t* barret_ratio, const uint64_t* barret_k, 
-  const uint64_t* op_0, const uint64_t* op_1,
+__global__ __launch_bounds__(256, 4)
+void evalSquareFused_(
+  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* __restrict__ primes,
+  const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ op_0, const uint64_t* __restrict__ op_1,
   uint64_t* op0_out, uint64_t* op1_out, uint64_t* op2_out) {
 
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2129,6 +2243,12 @@ __global__ void evalSquareFused_(
 void Context::EvalMult(
   const Ciphertext& ct1, const Ciphertext& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
+
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
+    configured = true;
+  }
 
   const auto &op1_0 = ct1.getBxDevice();
   const auto &op1_1 = ct1.getAxDevice();
@@ -2255,6 +2375,12 @@ void Context::EvalMult(
   const CtAccurate& ct1, const CtAccurate& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
+    configured = true;
+  }
+
   // assert(ct1.level == 1);
   // assert(ct2.level == 1);
 
@@ -2291,6 +2417,12 @@ void Context::EvalSquare(
   const Ciphertext& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
+    configured = true;
+  }
+
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
 
@@ -2311,6 +2443,12 @@ void Context::EvalSquare(
 void Context::EvalSquare(
   const CtAccurate& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
+
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
+    configured = true;
+  }
 
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
@@ -2334,7 +2472,7 @@ __global__ void setMonomialSmallPower_(word64* op, const word64 index, const wor
   op[limbInd*degree + index] = 1;
 }
 
-__global__ void setMonomialLargePower_(word64* op, const word64 index, const word64 degree, const word64* primes) {
+__global__ void setMonomialLargePower_(word64* op, const word64 index, const word64 degree, const word64* __restrict__ primes) {
   const int limbInd = blockIdx.x * blockDim.x + threadIdx.x;
   op[limbInd*degree + index] = primes[limbInd] - 1;
 }
@@ -2427,8 +2565,9 @@ void Context::EvalMultIntegerInPlace(CtAccurate& ct, const uint64_t c) const {
   integerMultFusedInPlace_<<<gridDim, blockDim>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio__.data(), barret_k__.data(), ct.ax__.data(), ct.bx__.data(), c);
 }
 
-__global__ void add_(const KernelParams params,
-                     const int batch, const word64* op1, const word64* op2,
+__global__ __launch_bounds__(256, 8)
+void add_(const KernelParams params,
+                     const int batch, const word64* op1, const word64* __restrict__ op2,
                      word64* op3) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
@@ -2438,8 +2577,9 @@ __global__ void add_(const KernelParams params,
   STRIDED_LOOP_END;
 }
 
-__global__ void addInPlace_(const KernelParams params,
-                     const int batch, word64* op1, const word64* op2, const word64* primes) {
+__global__ __launch_bounds__(256, 8)
+void addInPlace_(const KernelParams params,
+                     const int batch, word64* op1, const word64* __restrict__ op2, const word64* __restrict__ primes) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
   const uint64_t prime = primes[prime_idx];
@@ -2448,8 +2588,9 @@ __global__ void addInPlace_(const KernelParams params,
   STRIDED_LOOP_END;
 }
 
-__global__ void sub_(const KernelParams params,
-                     const int batch, const word64* op1, const word64* op2,
+__global__ __launch_bounds__(256, 8)
+void sub_(const KernelParams params,
+                     const int batch, const word64* op1, const word64* __restrict__ op2,
                      word64* op3) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
@@ -2713,8 +2854,9 @@ void Context::SubInPlace(CtAccurate &ct1, const CtAccurate &ct2) const {
                                 op2_bx.data(), op1_bx.data());
 }
 
-__global__ void add_scalar_(const KernelParams params,
-                     const int batch, const word64* op1, const word64* op2,
+__global__ __launch_bounds__(512)
+void add_scalar_(const KernelParams params,
+                     const int batch, const word64* op1, const word64* __restrict__ op2,
                      word64* op3) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
@@ -2724,8 +2866,9 @@ __global__ void add_scalar_(const KernelParams params,
   STRIDED_LOOP_END;
 }
 
-__global__ void sub_scalar_(const KernelParams params,
-                     const int batch, const word64* op1, const word64* op2,
+__global__ __launch_bounds__(512)
+void sub_scalar_(const KernelParams params,
+                     const int batch, const word64* op1, const word64* __restrict__ op2,
                      word64* op3) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
@@ -2735,8 +2878,9 @@ __global__ void sub_scalar_(const KernelParams params,
   STRIDED_LOOP_END;
 }
 
-__global__ void sub_from_scalar_(const KernelParams params,
-                     const int batch, const word64* op1, const word64* op2,
+__global__ __launch_bounds__(512)
+void sub_from_scalar_(const KernelParams params,
+                     const int batch, const word64* __restrict__ op1, const word64* op2,
                      word64* op3) {
   STRIDED_LOOP_START(batch * params.degree, i);
   const int prime_idx = i >> params.log_degree;
