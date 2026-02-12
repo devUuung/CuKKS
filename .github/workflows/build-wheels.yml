@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish wheels to PyPI'
+        required: false
+        type: boolean
+        default: false
   release:
     types: [published]
 
@@ -158,7 +164,7 @@ jobs:
           echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
 
   publish:
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
     needs: test-gpu
     runs-on: ubuntu-latest
     permissions:
