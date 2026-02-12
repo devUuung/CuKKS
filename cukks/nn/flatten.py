@@ -106,7 +106,7 @@ class EncryptedFlatten(EncryptedModule):
             raise RuntimeError(
                 f"Flatten permutation too large ({total_size}×{total_size} = "
                 f"{total_size * total_size * 8 / 1e9:.1f} GB). "
-                f"Use optimize_cnn=True in ckks_torch.convert() to absorb the "
+                f"Use optimize_cnn=True in cukks.convert() to absorb the "
                 f"permutation into the following FC layer's weights (zero overhead). "
                 f"This is required for CNN models with spatial dimensions > ~100."
             )

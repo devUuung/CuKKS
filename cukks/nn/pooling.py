@@ -163,7 +163,7 @@ class EncryptedAvgPool2d(EncryptedModule):
             raise RuntimeError(
                 "EncryptedAvgPool2d does not support 4D input in pure HE mode. "
                 "Pre-process input using ctx.encrypt_cnn_input() to create a "
-                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+                "2D CNN layout. See: cukks.CKKSInferenceContext.encrypt_cnn_input()"
             )
         elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             kH, kW = self.kernel_size

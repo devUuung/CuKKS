@@ -7,10 +7,12 @@ to their encrypted equivalents for CKKS inference.
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
+import torch
 import torch.nn as nn
 
 from .context import CKKSInferenceContext
@@ -580,7 +582,11 @@ def _fold_bn_recursive(module: nn.Module) -> nn.Module:
     if isinstance(module, nn.Sequential):
         return nn.Sequential(OrderedDict(new_children))
     
-    # For other containers, replace children in-place
+    # For other containers, replace children in-place and remove folded BN layers
+    new_names = {name for name, _ in new_children}
+    for name, _ in children:
+        if name not in new_names:
+            delattr(module, name)
     for name, new_child in new_children:
         setattr(module, name, new_child)
     
@@ -647,6 +653,7 @@ def convert(
     enable_bootstrap: Optional[bool] = None,
     auto_bootstrap: Optional[bool] = None,
     bootstrap_threshold: int = 8,
+    pre_encode: bool = False,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -665,13 +672,18 @@ def convert(
         auto_bootstrap: Call maybe_bootstrap() between layers. If None, follows
             enable_bootstrap.
         bootstrap_threshold: Depth at which auto-bootstrap triggers (default 8).
+        pre_encode: If True, run a warmup forward pass at conversion time to
+            pre-encode all weight plaintexts into the GPU cache. This eliminates
+            the cold-start latency on the first real inference at the cost of
+            additional GPU memory and a one-time computation during conversion.
+            Requires ``input_shape`` for CNN models.
         
     Returns:
         Tuple of (encrypted_model, context).
         
     Example:
         >>> import torch.nn as nn
-        >>> import ckks_torch
+        >>> import cukks
         >>> 
         >>> # Train your model
         >>> model = nn.Sequential(
@@ -682,7 +694,7 @@ def convert(
         >>> train(model, data)
         >>> 
         >>> # Convert to encrypted
-        >>> enc_model, ctx = ckks_torch.convert(model)
+        >>> enc_model, ctx = cukks.convert(model)
         >>> 
         >>> # Run encrypted inference
         >>> enc_input = ctx.encrypt(test_input)
@@ -735,7 +747,138 @@ def convert(
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:
         enc_model._cnn_layout = converter._last_cnn_layout
     
+    if pre_encode:
+        _warmup_cache(enc_model, ctx, converter, input_shape)
+    
     return enc_model, ctx
+
+
+def _warmup_cache(
+    enc_model: EncryptedModule,
+    ctx: CKKSInferenceContext,
+    converter: ModelConverter,
+    input_shape: Optional[Tuple[int, ...]] = None,
+) -> None:
+    """Run a single forward pass to populate the GPU plaintext cache.
+
+    This encrypts a zero-filled dummy input and runs it through the
+    encrypted model so that every ``matmul_bsgs`` call encodes its weight
+    diagonals into the C++ GPU cache.  Subsequent inference calls will
+    hit the warm cache, eliminating the cold-start encoding latency.
+
+    Args:
+        enc_model: The converted encrypted model.
+        ctx: The CKKS inference context (must be fully initialised).
+        converter: The ``ModelConverter`` used during conversion.
+        input_shape: Input shape for CNN models. For MLP models the
+            first layer's ``in_features`` is used to infer the size.
+    """
+    logger = logging.getLogger(__name__)
+    logger.info("pre_encode: running warmup forward pass to populate GPU plaintext cache")
+
+    ctx.set_plain_cache_limit(0)
+
+    is_cnn = getattr(converter, '_is_cnn_model', False)
+
+    if is_cnn:
+        if input_shape is None:
+            raise ValueError(
+                "pre_encode=True requires input_shape for CNN models "
+                "(e.g. input_shape=(1, 28, 28) for MNIST)."
+            )
+        conv_params = getattr(converter, '_conv_params', None)
+        if not conv_params:
+            raise ValueError(
+                "pre_encode=True: CNN model detected but no conv parameters "
+                "were recorded during conversion."
+            )
+        if len(input_shape) == 4:
+            dummy = torch.zeros(input_shape, dtype=torch.float64)
+        elif len(input_shape) == 3:
+            dummy = torch.zeros((1,) + tuple(input_shape), dtype=torch.float64)
+        elif len(input_shape) == 2:
+            dummy = torch.zeros((1, 1) + tuple(input_shape), dtype=torch.float64)
+        else:
+            raise ValueError(
+                f"pre_encode: cannot interpret input_shape={input_shape} for CNN model"
+            )
+
+        first_conv = conv_params[0]
+        kernel_size = first_conv['kernel_size']
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        stride = first_conv.get('stride', (1, 1))
+        if isinstance(stride, int):
+            stride = (stride, stride)
+        padding = first_conv.get('padding', (0, 0))
+        if isinstance(padding, int):
+            padding = (padding, padding)
+
+        enc_input = ctx.encrypt_cnn_input(
+            dummy,
+            [{'kernel_size': kernel_size, 'stride': stride, 'padding': padding}],
+        )
+    else:
+        first_dim = _infer_input_dim(enc_model)
+        if first_dim is None and input_shape is not None:
+            import math as _math
+            first_dim = int(_math.prod(input_shape))
+        if first_dim is None:
+            raise ValueError(
+                "pre_encode=True: cannot infer input dimension. "
+                "Provide input_shape or ensure the model starts with "
+                "EncryptedLinear / EncryptedConv2d."
+            )
+        dummy = torch.zeros(first_dim, dtype=torch.float64)
+        enc_input = ctx.encrypt(dummy)
+
+    _ = enc_model(enc_input)
+
+    ctx.pin_plain_cache()
+    ctx.set_plain_cache_limit(2048)
+
+    cache_info = ctx.plain_cache_info()
+    logger.info(
+        "pre_encode: warmup complete, %d plaintexts pinned in GPU cache",
+        cache_info.get("pinned", 0),
+    )
+
+
+def _infer_input_dim(enc_model: EncryptedModule) -> Optional[int]:
+    """Walk the model tree and return the first layer's input dimension."""
+    for module in enc_model.modules():
+        if isinstance(module, EncryptedLinear):
+            return module.in_features
+        if isinstance(module, EncryptedConv2d):
+            return None
+    return None
+
+
+def warm_cache(
+    enc_model: EncryptedModule,
+    ctx: CKKSInferenceContext,
+    input_data: torch.Tensor,
+) -> None:
+    """Manually warm the GPU plaintext cache by running one forward pass.
+
+    Use this when you did not set ``pre_encode=True`` during conversion
+    but still want to eliminate cold-start latency before serving.
+
+    Args:
+        enc_model: The converted encrypted model.
+        ctx: The CKKS inference context.
+        input_data: A representative input tensor (will be encrypted
+            and run through the model; output is discarded).
+
+    Example:
+        >>> enc_model, ctx = cukks.convert(model)
+        >>> dummy = torch.zeros(784)
+        >>> cukks.warm_cache(enc_model, ctx, dummy)
+        >>> # First real inference is now fast
+        >>> enc_out = enc_model(ctx.encrypt(real_input))
+    """
+    enc_input = ctx.encrypt(input_data)
+    _ = enc_model(enc_input)
 
 
 def estimate_depth(model: nn.Module, activation_degree: int = 4) -> int:

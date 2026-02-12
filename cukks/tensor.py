@@ -447,6 +447,11 @@ class EncryptedTensor:
         self,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
+        *,
+        weight_list: list | None = None,
+        bias_list: list | None = None,
+        weight_hash: int = 0,
+        diag_nonzero: list | None = None,
     ) -> "EncryptedTensor":
         # Auto-rescale if previous operation left pending rescale
         tensor = self
@@ -460,7 +465,7 @@ class EncryptedTensor:
         use_bsgs = getattr(tensor._context, 'use_bsgs', False)
         
         if use_bsgs:
-            weight_list = weight_2d.tolist()
+            weight_list = weight_list if weight_list is not None else weight_2d.tolist()
             max_dim = getattr(tensor._context, '_max_rotation_dim', None)
             in_features = weight_2d.shape[1]
             # IMPORTANT: bsgs_n1 must match the n1 used when generating rotation keys
@@ -469,18 +474,23 @@ class EncryptedTensor:
             bsgs_dim = max_dim if max_dim else in_features
             bsgs_n1 = max(1, int(math.ceil(math.sqrt(bsgs_dim))))
             bsgs_n2 = (in_features + bsgs_n1 - 1) // bsgs_n1
-            new_cipher = tensor._cipher.matmul_bsgs(weight_list, bsgs_n1, bsgs_n2)
+            new_cipher = tensor._cipher.matmul_bsgs(weight_list, bsgs_n1, bsgs_n2,
+                                                    weight_hash=weight_hash,
+                                                    diag_nonzero=diag_nonzero)
             result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)
         else:
-            weight_list = weight_2d.tolist()
-            new_cipher = tensor._cipher.matmul_dense(weight_list)
+            w_list = weight_list if weight_list is not None else weight_2d.tolist()
+            new_cipher = tensor._cipher.matmul_dense(w_list)
             result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)
         
         result = result.rescale()
         
         if bias is not None:
-            bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
-            result = result.add(bias_flat.tolist())
+            if bias_list is not None:
+                result = result.add(bias_list)
+            else:
+                bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+                result = result.add(bias_flat.tolist())
         
         return result
     
@@ -495,11 +505,33 @@ class EncryptedTensor:
             New EncryptedTensor with polynomial evaluated element-wise.
         """
         tensor = self._ensure_rescaled()
-        new_cipher = tensor._cipher.poly_eval(list(coeffs))
+        coeff_list = list(coeffs)
+        if not coeff_list:
+            raise ValueError("coeffs must not be empty")
+
+        # GPU backend falls back to CPU for general EvalPoly.
+        # Keep sparse degree-4 (ReLU-like) on backend path; use Horner otherwise.
+        is_sparse_degree4 = len(coeff_list) == 5 and abs(coeff_list[3]) <= 1e-12
+        use_gpu_horner = (
+            getattr(tensor._context, "_enable_gpu", False)
+            and len(coeff_list) > 3
+            and not is_sparse_degree4
+        )
+        if use_gpu_horner:
+            result = tensor.mul(coeff_list[-1]).rescale()
+            for i in range(len(coeff_list) - 2, -1, -1):
+                result = result.add(coeff_list[i])
+                if i > 0:
+                    result = result.mul(tensor).rescale()
+            if tensor._cnn_layout is not None:
+                result._cnn_layout = copy.deepcopy(tensor._cnn_layout)
+            return result
+
+        new_cipher = tensor._cipher.poly_eval(coeff_list)
         degree = len(coeffs) - 1 if len(coeffs) > 1 else 0
         poly_depth = max(1, math.ceil(math.log2(degree + 1))) if degree > 0 else 0
         result = EncryptedTensor(new_cipher, tensor._shape, tensor._context, tensor._depth + poly_depth)
-        if degree > 0:
+        if degree > 0 and not (getattr(tensor._context, "_enable_gpu", False) and is_sparse_degree4):
             result._needs_rescale = True
         if tensor._cnn_layout is not None:
             result._cnn_layout = copy.deepcopy(tensor._cnn_layout)
@@ -545,13 +577,13 @@ class EncryptedTensor:
             Choi, H. (2025). PP-STAT. CIKM'25.
         """
         if shallow:
-            from ckks_torch.stats.crypto_inv_sqrt import crypto_inv_sqrt_shallow
+            from cukks.stats.crypto_inv_sqrt import crypto_inv_sqrt_shallow
             
             if domain is None:
                 domain = (1.0, 10.0)
             return crypto_inv_sqrt_shallow(self, domain=domain)
         else:
-            from ckks_torch.stats.crypto_inv_sqrt import crypto_inv_sqrt
+            from cukks.stats.crypto_inv_sqrt import crypto_inv_sqrt
             
             if domain is None:
                 domain = (0.1, 100.0)

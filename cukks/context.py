@@ -28,7 +28,7 @@ _BACKEND_AVAILABLE: bool | None = None
 
 @dataclass
 class InferenceConfig:
-    poly_mod_degree: int = 16384
+    poly_mod_degree: int = 32768  # OpenFHE 1.2+ requires ≥32768 for HE standards
     scale_bits: int = 40
     security_level: Optional[str] = "128_classic"
     mult_depth: int = 4
@@ -79,9 +79,15 @@ class InferenceConfig:
         else:
             effective_depth = mult_depth + 2
             if poly_mod_degree is None:
-                if effective_depth <= 6:
-                    poly_mod_degree = 16384
-                elif effective_depth <= 16:
+                # OpenFHE GPU fork (1.2.x) enforces HE standard limits including
+                # key-switching prime overhead. Empirically:
+                #   N=32768: max ~620 total coeff_mod bits (10 primes × 50 + 2 × 60)
+                #   N=65536: supports deeper circuits but uses ~4x GPU memory
+                # With 13+ primes, the key-switching overhead pushes logQ(P) beyond
+                # what N=32768 allows, even if coeff_mod bits alone fit.
+                total_bits = 60 + scale_bits * effective_depth + 60
+                num_primes = effective_depth + 2
+                if total_bits <= 620 and num_primes <= 12:
                     poly_mod_degree = 32768
                 else:
                     poly_mod_degree = 65536
@@ -104,10 +110,12 @@ class InferenceConfig:
         use_square_activation: bool = False,
         **kwargs: Any,
     ) -> "InferenceConfig":
+        enable_gpu = kwargs.pop("enable_gpu", False)
         depth = _estimate_model_depth(
             model,
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
+            enable_gpu=enable_gpu,
         )
         return cls.for_depth(depth, **kwargs)
 
@@ -116,10 +124,13 @@ def _estimate_model_depth(
     model: torch.nn.Module,
     activation_degree: int = 4,
     use_square_activation: bool = False,
+    enable_gpu: bool = False,
 ) -> int:
     depth = 0
     if use_square_activation:
         poly_depth = 1
+    elif enable_gpu and activation_degree >= 4:
+        poly_depth = 3
     else:
         poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
 
@@ -146,6 +157,15 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
     from .nn.block_diagonal import BlockDiagonalLinear
     from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 
+    # Track spatial dimensions through conv layers for im2col expansion
+    # Default to MNIST (1, 28, 28) if not provided
+    spatial_h, spatial_w, spatial_c = 28, 28, 1
+    if input_shape is not None:
+        if len(input_shape) == 4:  # (B, C, H, W)
+            spatial_c, spatial_h, spatial_w = input_shape[1], input_shape[2], input_shape[3]
+        elif len(input_shape) == 3:  # (C, H, W)
+            spatial_c, spatial_h, spatial_w = input_shape[0], input_shape[1], input_shape[2]
+
     for module in model.modules():
         if isinstance(module, (BlockDiagonalLinear, BlockDiagLowRankLinear)):
             dims.append(module.in_features)
@@ -155,8 +175,45 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
             dims.append(module.out_features)
         elif isinstance(module, torch.nn.Conv2d):
             has_conv = True
-            dims.append(module.in_channels * module.kernel_size[0] * module.kernel_size[1])
-            dims.append(module.out_channels * module.kernel_size[0] * module.kernel_size[1])
+            kh, kw = (module.kernel_size, module.kernel_size) if isinstance(module.kernel_size, int) else module.kernel_size
+            sh, sw = (module.stride, module.stride) if isinstance(module.stride, int) else module.stride
+            ph, pw = (module.padding, module.padding) if isinstance(module.padding, int) else module.padding
+            in_c = module.in_channels
+            out_c = module.out_channels
+
+            # Kernel-level dimensions (original behavior)
+            patch_features = in_c * kh * kw
+            dims.append(patch_features)
+            dims.append(out_c * kh * kw)
+
+            # im2col expansion: compute num_patches from spatial dims
+            padded_h = spatial_h + 2 * int(ph)
+            padded_w = spatial_w + 2 * int(pw)
+            out_h = (padded_h - kh) // sh + 1
+            out_w = (padded_w - kw) // sw + 1
+            num_patches = out_h * out_w
+
+            # Block-diagonal matrix dimensions after im2col
+            total_in = num_patches * patch_features
+            total_out = num_patches * out_c
+            dims.append(total_in)
+            dims.append(total_out)
+
+            # Update spatial dims for next conv/pool layer
+            spatial_h, spatial_w, spatial_c = out_h, out_w, out_c
+
+        elif isinstance(module, torch.nn.AvgPool2d):
+            # Track spatial reduction through pooling
+            if isinstance(module.kernel_size, int):
+                pk = module.kernel_size
+            else:
+                pk = module.kernel_size[0]
+            if isinstance(module.stride, int):
+                ps = module.stride
+            else:
+                ps = module.stride[0] if module.stride else pk
+            spatial_h = spatial_h // ps
+            spatial_w = spatial_w // ps
     
     if has_conv and not dims:
         dims.append(4096)
@@ -356,6 +413,27 @@ class CKKSInferenceContext:
         self._ensure_initialized()
         return self._ctx
     
+    def set_plain_cache_limit(self, limit: int) -> None:
+        self._ensure_initialized()
+        if hasattr(self._ctx, 'set_plain_cache_limit'):
+            self._ctx.set_plain_cache_limit(limit)
+
+    def pin_plain_cache(self) -> None:
+        self._ensure_initialized()
+        if hasattr(self._ctx, 'pin_plain_cache'):
+            self._ctx.pin_plain_cache()
+
+    def clear_pinned_plain_cache(self) -> None:
+        self._ensure_initialized()
+        if hasattr(self._ctx, 'clear_pinned_plain_cache'):
+            self._ctx.clear_pinned_plain_cache()
+
+    def plain_cache_info(self) -> Dict[str, int]:
+        self._ensure_initialized()
+        if hasattr(self._ctx, 'plain_cache_info'):
+            return self._ctx.plain_cache_info()
+        return {"total": 0, "pinned": 0, "unpinned": 0}
+
     def encrypt(self, tensor: torch.Tensor) -> "EncryptedTensor":
         from .tensor import EncryptedTensor
         
@@ -536,23 +614,35 @@ class CKKSInferenceContext:
             model,
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
+            enable_gpu=kwargs.get("enable_gpu", False),
             enable_bootstrap=enable_bootstrap,
             level_budget=level_budget,
             scale_bits=scale_bits,
             security_level=security_level,
             poly_mod_degree=poly_mod_degree,
         )
-        rotations = compute_rotations_for_model(model, use_bsgs=use_bsgs)
-        extra_rotations = kwargs.pop("rotations", [])
-        if extra_rotations:
-            rotations.extend(extra_rotations)
-            rotations = sorted(list(set(rotations)))
         dims = _get_model_dimensions(model)
         max_dim = max(dims) if dims else 1024
         
         has_conv = any(isinstance(m, torch.nn.Conv2d) for m in model.modules())
         if has_conv:
             max_dim = max(max_dim, 8192)
+
+        # Generate rotation keys using the final max_dim to ensure consistency
+        # between key generation (n1 for baby/giant steps) and matmul usage.
+        rotations = compute_bsgs_rotations(max_dim) if use_bsgs else list(range(1, max_dim))
+        neg_rotations = [-r for r in rotations if r > 0]
+        rotations = sorted(set(rotations + neg_rotations))
+
+        # Add CNN-specific rotations (pooling offsets, etc.)
+        if has_conv:
+            cnn_rots = compute_cnn_rotations(28, 28, 4)  # default MNIST dims
+            rotations = sorted(set(rotations + cnn_rots + [-r for r in cnn_rots]))
+
+        extra_rotations = kwargs.pop("rotations", [])
+        if extra_rotations:
+            rotations.extend(extra_rotations)
+            rotations = sorted(list(set(rotations)))
         
         return cls(config, rotations=rotations, use_bsgs=use_bsgs, max_rotation_dim=max_dim, **kwargs)
     

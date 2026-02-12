@@ -198,7 +198,6 @@ class EncryptedReLU(EncryptedModule):
         return result.rescale()
     
     def mult_depth(self) -> int:
-        # Polynomial evaluation depth is ceil(log2(degree))
         import math
         return max(1, int(math.ceil(math.log2(self.degree + 1))))
     

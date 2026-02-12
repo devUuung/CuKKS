@@ -7,6 +7,7 @@ matrix-vector multiplication (im2col method).
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
@@ -82,6 +83,13 @@ class EncryptedConv2d(EncryptedModule):
         self.weight = weight.detach().to(dtype=torch.float64, device="cpu")
         self.weight_matrix = self.weight.reshape(out_channels, -1)
         self.bias = bias.detach().to(dtype=torch.float64, device="cpu") if bias is not None else None
+
+        self._wm_list: list | None = None
+        self._wm_bias_list: list | None = None
+        self._wm_hash: int = 0
+        self._wm_diag_nonzero: list | None = None
+        if hasattr(self, "weight_matrix"):
+            self._ensure_weight_matrix_cache()
         
         self.register_parameter("weight", self.weight)
         if self.bias is not None:
@@ -89,6 +97,22 @@ class EncryptedConv2d(EncryptedModule):
         
         self.input_shape: Optional[Tuple[int, ...]] = None
         self.output_shape: Optional[Tuple[int, ...]] = None
+
+    def _ensure_weight_matrix_cache(self) -> None:
+        if self._wm_list is not None and self._wm_diag_nonzero is not None:
+            return
+        weight_matrix = getattr(self, "weight_matrix", None)
+        if weight_matrix is None:
+            return
+
+        wm_cpu = weight_matrix.detach().to(dtype=torch.float64, device="cpu")
+        self._wm_list = wm_cpu.tolist()
+        self._wm_bias_list = self.bias.reshape(-1).tolist() if self.bias is not None else None
+        digest = hashlib.md5(wm_cpu.contiguous().numpy().tobytes()).digest()[:8]
+        self._wm_hash = int.from_bytes(digest, 'little')
+        out_f, in_f = wm_cpu.shape
+        rows = torch.arange(out_f)
+        self._wm_diag_nonzero = [bool(wm_cpu[rows, (rows + d) % in_f].any()) for d in range(in_f)]
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Forward pass on encrypted input using pure HE operations.
@@ -113,14 +137,14 @@ class EncryptedConv2d(EncryptedModule):
             raise RuntimeError(
                 "EncryptedConv2d does not support 4D input in pure HE mode. "
                 "Pre-process input using ctx.encrypt_cnn_input() to create a "
-                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+                "2D CNN layout. See: cukks.CKKSInferenceContext.encrypt_cnn_input()"
             )
             
         elif input_ndim == 3:
             raise RuntimeError(
                 "EncryptedConv2d does not support 3D input in pure HE mode. "
                 "Pre-process input using ctx.encrypt_cnn_input() to create a "
-                "2D CNN layout. See: ckks_torch.CKKSInferenceContext.encrypt_cnn_input()"
+                "2D CNN layout. See: cukks.CKKSInferenceContext.encrypt_cnn_input()"
             )
             
         elif input_ndim == 2:
@@ -141,7 +165,12 @@ class EncryptedConv2d(EncryptedModule):
             # 1D input: single flattened patch
             self.input_shape = x.shape
             self.output_shape = (self.out_channels,)
-            return x.matmul(self.weight_matrix, self.bias)
+            self._ensure_weight_matrix_cache()
+            return x.matmul(self.weight_matrix, self.bias,
+                            weight_list=self._wm_list,
+                            bias_list=self._wm_bias_list,
+                            weight_hash=self._wm_hash,
+                            diag_nonzero=self._wm_diag_nonzero)
             
         else:
             raise ValueError(
@@ -195,6 +224,8 @@ class EncryptedConv2d(EncryptedModule):
         which avoids allocating the full N×N block-diagonal.
         """
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedConv2d requires _cnn_layout metadata for packed forward")
         num_patches = layout['num_patches']
         patch_features = layout['patch_features']
 
@@ -207,7 +238,7 @@ class EncryptedConv2d(EncryptedModule):
         matrix_elements = total_out * total_in
         MAX_MATRIX_ELEMENTS = 100_000_000
 
-        if matrix_elements <= MAX_MATRIX_ELEMENTS:
+        if matrix_elements <= MAX_MATRIX_ELEMENTS and total_in <= 2048:
             return self._forward_he_packed_dense(x, num_patches, patch_features, total_out, total_in)
 
         return self._forward_he_packed_compact(x, num_patches, patch_features)
@@ -222,6 +253,8 @@ class EncryptedConv2d(EncryptedModule):
     ) -> "EncryptedTensor":
         """Small-input path: materialize the full block-diagonal matrix."""
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedConv2d requires _cnn_layout metadata for dense packed forward")
 
         x = x.view(total_in)
 
@@ -267,6 +300,8 @@ class EncryptedConv2d(EncryptedModule):
         Memory per diagonal: O(num_slots).
         """
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedConv2d requires _cnn_layout metadata for compact packed forward")
         total_out = num_patches * self.out_channels
         total_in = num_patches * patch_features
 
