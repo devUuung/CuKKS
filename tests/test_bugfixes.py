@@ -92,7 +92,7 @@ class TestMaxPoolLevelDrift:
 
     def test_maxpool_2x2_basic(self, mock_enc_context):
         """Basic 2x2 maxpool should not crash due to level mismatch."""
-        from ckks_torch.nn import EncryptedMaxPool2d
+        from cukks.nn import EncryptedMaxPool2d
         
         pool = EncryptedMaxPool2d(kernel_size=2, stride=2)
         
@@ -111,7 +111,7 @@ class TestMaxPoolLevelDrift:
 
     def test_approx_max_single_pair(self, mock_enc_context):
         """Test _approx_max with two tensors at different states."""
-        from ckks_torch.nn.pooling import EncryptedMaxPool2d
+        from cukks.nn.pooling import EncryptedMaxPool2d
         
         pool = EncryptedMaxPool2d(kernel_size=2, stride=2)
         
@@ -134,7 +134,7 @@ class TestSoftmaxSeqLen1:
 
     def test_softmax_single_element_returns_one(self, mock_enc_context):
         """softmax([x]) should return [1.0] for any x."""
-        from ckks_torch.nn import EncryptedApproxAttention
+        from cukks.nn import EncryptedApproxAttention
         
         attn = EncryptedApproxAttention(embed_dim=4, num_heads=1)
         
@@ -151,7 +151,7 @@ class TestSoftmaxSeqLen1:
 
     def test_softmax_single_element_negative_input(self, mock_enc_context):
         """softmax([x]) = [1.0] even for negative x."""
-        from ckks_torch.nn import EncryptedApproxAttention
+        from cukks.nn import EncryptedApproxAttention
         
         attn = EncryptedApproxAttention(embed_dim=4, num_heads=1)
         
@@ -168,7 +168,7 @@ class TestSoftmaxSeqLen1:
 
     def test_softmax_seq_len_zero_raises(self, mock_enc_context):
         """seq_len=0 should raise ValueError."""
-        from ckks_torch.nn import EncryptedApproxAttention
+        from cukks.nn import EncryptedApproxAttention
         
         attn = EncryptedApproxAttention(embed_dim=4, num_heads=1)
         scores = mock_enc_context.encrypt(torch.tensor([1.0, 2.0, 3.0, 4.0]))
@@ -187,7 +187,7 @@ class TestConvMemoryExplosion:
 
     def test_small_conv_works(self, mock_enc_context):
         """Small convolution should work normally."""
-        from ckks_torch.nn import EncryptedConv2d
+        from cukks.nn import EncryptedConv2d
         
         weight = torch.randn(4, 1, 3, 3)
         conv = EncryptedConv2d(
@@ -207,7 +207,7 @@ class TestConvMemoryExplosion:
 
     def test_compact_conv_matches_dense(self, mock_enc_context):
         """Compact diagonal conv path should produce same results as dense path."""
-        from ckks_torch.nn import EncryptedConv2d
+        from cukks.nn import EncryptedConv2d
 
         in_ch, out_ch, ksize = 2, 4, 3
         weight = torch.randn(out_ch, in_ch, ksize, ksize)
@@ -253,8 +253,8 @@ class TestGlobalStateMutation:
 
     def test_modifying_options_does_not_affect_default(self):
         """Modifying one ConversionOptions should not affect others."""
-        from ckks_torch.converter import ConversionOptions, DEFAULT_ACTIVATION_MAP
-        from ckks_torch.nn import EncryptedSquare
+        from cukks.converter import ConversionOptions, DEFAULT_ACTIVATION_MAP
+        from cukks.nn import EncryptedSquare
         import torch.nn as nn
         
         original_relu_converter = DEFAULT_ACTIVATION_MAP.get(nn.ReLU)
@@ -269,8 +269,8 @@ class TestGlobalStateMutation:
 
     def test_two_converters_independent(self):
         """Two converters should have independent activation maps."""
-        from ckks_torch.converter import ConversionOptions
-        from ckks_torch.nn import EncryptedSquare, EncryptedSigmoid
+        from cukks.converter import ConversionOptions
+        from cukks.nn import EncryptedSquare, EncryptedSigmoid
         import torch.nn as nn
         
         opts1 = ConversionOptions()
@@ -292,7 +292,7 @@ class TestThreadSafeInitialization:
 
     def test_context_has_init_lock(self):
         """CKKSInferenceContext should have _init_lock attribute."""
-        from ckks_torch.context import CKKSInferenceContext
+        from cukks.context import CKKSInferenceContext
         
         ctx = CKKSInferenceContext()
         
@@ -301,7 +301,7 @@ class TestThreadSafeInitialization:
 
     def test_concurrent_initialization_safe(self):
         """Multiple threads calling _ensure_initialized should be safe."""
-        from ckks_torch.context import CKKSInferenceContext
+        from cukks.context import CKKSInferenceContext
         
         ctx = CKKSInferenceContext()
         init_count = [0]
@@ -330,7 +330,7 @@ class TestSequentialTypeValidation:
 
     def test_valid_ordered_dict_works(self):
         """Valid OrderedDict should work."""
-        from ckks_torch.nn import EncryptedSequential, EncryptedLinear
+        from cukks.nn import EncryptedSequential, EncryptedLinear
         
         weight = torch.randn(10, 10)
         modules = OrderedDict([
@@ -343,7 +343,7 @@ class TestSequentialTypeValidation:
 
     def test_invalid_ordered_dict_raises(self):
         """OrderedDict with non-EncryptedModule should raise TypeError."""
-        from ckks_torch.nn import EncryptedSequential, EncryptedLinear
+        from cukks.nn import EncryptedSequential, EncryptedLinear
         
         weight = torch.randn(10, 10)
         modules = OrderedDict([
@@ -356,7 +356,7 @@ class TestSequentialTypeValidation:
 
     def test_invalid_ordered_dict_shows_key_name(self):
         """Error message should include the problematic key name."""
-        from ckks_torch.nn import EncryptedSequential
+        from cukks.nn import EncryptedSequential
         
         modules = OrderedDict([
             ('bad_layer', 12345),
@@ -376,7 +376,7 @@ class TestBatchNorm2dCNNLayout:
 
     def test_batchnorm2d_with_cnn_layout_raises(self, mock_enc_context):
         """BatchNorm2d with CNN layout should raise RuntimeError."""
-        from ckks_torch.nn import EncryptedBatchNorm2d
+        from cukks.nn import EncryptedBatchNorm2d
         
         bn = EncryptedBatchNorm2d(
             num_features=4,
@@ -395,7 +395,7 @@ class TestBatchNorm2dCNNLayout:
 
     def test_batchnorm2d_without_cnn_layout_works(self, mock_enc_context):
         """BatchNorm2d without CNN layout should work normally."""
-        from ckks_torch.nn import EncryptedBatchNorm2d
+        from cukks.nn import EncryptedBatchNorm2d
         
         bn = EncryptedBatchNorm2d(
             num_features=4,
@@ -525,28 +525,28 @@ class TestPoolingInputValidation:
 
     def test_avgpool_zero_kernel_raises(self):
         """AvgPool2d with kernel_size=0 should raise ValueError."""
-        from ckks_torch.nn import EncryptedAvgPool2d
+        from cukks.nn import EncryptedAvgPool2d
         
         with pytest.raises(ValueError, match="kernel_size must be positive"):
             EncryptedAvgPool2d(kernel_size=0)
 
     def test_avgpool_zero_stride_raises(self):
         """AvgPool2d with stride=0 should raise ValueError."""
-        from ckks_torch.nn import EncryptedAvgPool2d
+        from cukks.nn import EncryptedAvgPool2d
         
         with pytest.raises(ValueError, match="stride must be positive"):
             EncryptedAvgPool2d(kernel_size=2, stride=0)
 
     def test_maxpool_zero_kernel_raises(self):
         """MaxPool2d with kernel_size=0 should raise ValueError."""
-        from ckks_torch.nn import EncryptedMaxPool2d
+        from cukks.nn import EncryptedMaxPool2d
         
         with pytest.raises(ValueError, match="kernel_size must be positive"):
             EncryptedMaxPool2d(kernel_size=0)
 
     def test_maxpool_negative_kernel_raises(self):
         """MaxPool2d with negative kernel_size should raise ValueError."""
-        from ckks_torch.nn import EncryptedMaxPool2d
+        from cukks.nn import EncryptedMaxPool2d
         
         with pytest.raises(ValueError, match="kernel_size must be positive"):
             EncryptedMaxPool2d(kernel_size=-2)
@@ -561,7 +561,7 @@ class TestPoolingRectangularInput:
 
     def test_avgpool_with_height_width_works(self, mock_enc_context):
         """AvgPool with explicit height/width in layout should work."""
-        from ckks_torch.nn import EncryptedAvgPool2d
+        from cukks.nn import EncryptedAvgPool2d
         
         pool = EncryptedAvgPool2d(kernel_size=2, stride=2)
         
@@ -579,7 +579,7 @@ class TestPoolingRectangularInput:
 
     def test_avgpool_rectangular_without_dims_raises(self, mock_enc_context):
         """AvgPool with rectangular input but no height/width should raise."""
-        from ckks_torch.nn import EncryptedAvgPool2d
+        from cukks.nn import EncryptedAvgPool2d
         
         pool = EncryptedAvgPool2d(kernel_size=2, stride=2)
         

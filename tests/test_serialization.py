@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from ckks_torch.context import CKKSInferenceContext, InferenceConfig
-from ckks_torch.tensor import EncryptedTensor
+from cukks.context import CKKSInferenceContext, InferenceConfig
+from cukks.tensor import EncryptedTensor
 
 
 class TestContextSerialization:

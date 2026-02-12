@@ -85,7 +85,7 @@ class TestBootstrapThreshold:
 @pytest.fixture
 def bootstrap_mock_context():
     from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
-    from ckks_torch.tensor import EncryptedTensor
+    from cukks.tensor import EncryptedTensor
 
     class BootstrapMockContext:
         def __init__(self):
@@ -116,7 +116,7 @@ def bootstrap_mock_context():
 @pytest.fixture
 def auto_bootstrap_context():
     from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
-    from ckks_torch.tensor import EncryptedTensor
+    from cukks.tensor import EncryptedTensor
 
     class AutoBootstrapContext:
         def __init__(self):

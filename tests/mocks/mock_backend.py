@@ -265,6 +265,8 @@ class MockCKKSTensor:
         matrix: Sequence[Sequence[float]] | torch.Tensor,
         bsgs_n1: int = 0,
         bsgs_n2: int = 0,
+        weight_hash: int = 0,
+        diag_nonzero: Sequence[bool] | None = None,
     ) -> "MockCKKSTensor":
         """BSGS matrix-vector multiplication (mock delegates to dense).
 
@@ -320,22 +322,22 @@ class MockCKKSTensor:
             padded[: tensor.numel()] = tensor
             return padded
 
-    def __add__(self, other):
+    def __add__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.add(other)
 
-    def __radd__(self, other):
+    def __radd__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.add(other)
 
-    def __sub__(self, other):
+    def __sub__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.sub(other)
 
-    def __rsub__(self, other):
+    def __rsub__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.neg().add(other)
 
-    def __mul__(self, other):
+    def __mul__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.mul(other)
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: MockCKKSTensor | torch.Tensor | float | int):
         return self.mul(other)
 
     def __neg__(self):

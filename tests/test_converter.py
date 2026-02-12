@@ -5,13 +5,13 @@ import warnings
 import torch
 import torch.nn as nn
 
-from ckks_torch.converter import (
+from cukks.converter import (
     ModelConverter,
     ConversionOptions,
     convert,
     estimate_depth,
 )
-from ckks_torch.nn import (
+from cukks.nn import (
     EncryptedLinear,
     EncryptedSquare,
     EncryptedReLU,

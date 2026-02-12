@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from ckks_torch.nn import (
+from cukks.nn import (
     EncryptedLinear,
     EncryptedResidualBlock,
     EncryptedSequential,

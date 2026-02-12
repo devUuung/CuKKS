@@ -1,4 +1,4 @@
-"""Tests for ckks_torch.stats module (PP-STAT implementation).
+"""Tests for cukks.stats module (PP-STAT implementation).
 
 Reference: Choi, H. (2025). PP-STAT. CIKM'25.
 """
@@ -7,14 +7,14 @@ import numpy as np
 import pytest
 import torch
 
-from ckks_torch.stats import (
+from cukks.stats import (
     crypto_inv_sqrt,
     crypto_reciprocal_shallow,
     encrypted_mean,
     encrypted_std,
     encrypted_variance,
 )
-from ckks_torch.tensor import EncryptedTensor
+from cukks.tensor import EncryptedTensor
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ class TestCryptoInvSqrt:
 
     def test_coeffs_accuracy(self):
         """4.7: Verify runtime-generated coefficients achieve target accuracy."""
-        from ckks_torch.stats.crypto_inv_sqrt import _compute_inv_sqrt_coeffs
+        from cukks.stats.crypto_inv_sqrt import _compute_inv_sqrt_coeffs
 
         domain = (0.1, 100.0)
         coeffs = _compute_inv_sqrt_coeffs(domain, degree=15)

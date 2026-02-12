@@ -190,7 +190,7 @@ class TestMockWithEncryptedModules:
         return MockCKKSContext()
     
     def test_linear_forward_with_mock(self, ctx):
-        from ckks_torch.nn import EncryptedLinear
+        from cukks.nn import EncryptedLinear
         
         weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]])  # 2x2
         bias = torch.tensor([0.5, 0.5])

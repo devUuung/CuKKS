@@ -18,9 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mocks.mock_backend import MockCKKSConfig, MockCKKSContext, MockCKKSTensor
-from ckks_torch import convert, estimate_depth
-from ckks_torch.tensor import EncryptedTensor
-from ckks_torch.nn import (
+from cukks import convert, estimate_depth
+from cukks.tensor import EncryptedTensor
+from cukks.nn import (
     EncryptedLinear,
     EncryptedSequential,
     EncryptedSquare,
@@ -560,7 +560,7 @@ class TestTrueHECNN:
         fc = nn.Linear(64, 10)
         
         # Convert with CNN layout
-        from ckks_torch.nn import EncryptedLinear
+        from cukks.nn import EncryptedLinear
         enc_fc = EncryptedLinear.from_torch_cnn(fc, cnn_layout)
         
         # Weights should have same shape but different values (permuted)
@@ -580,7 +580,7 @@ class TestTrueHECNN:
         This is the critical accuracy test: HE inference should match
         plaintext inference within acceptable tolerance (96%+ correlation).
         """
-        from ckks_torch.nn import (
+        from cukks.nn import (
             EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
             EncryptedFlatten, EncryptedLinear
         )
@@ -682,7 +682,7 @@ class TestTrueHECNN:
 
     def test_cnn_multiple_samples(self, small_cnn, mock_enc_context):
         """Test HE CNN with multiple different inputs."""
-        from ckks_torch.nn import (
+        from cukks.nn import (
             EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
             EncryptedFlatten, EncryptedLinear
         )
