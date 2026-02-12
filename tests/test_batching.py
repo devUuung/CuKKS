@@ -7,7 +7,7 @@ import torch
 class TestSlotPacker:
 
     def test_pack_single_sample(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=10, total_slots=100)
         samples = [torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])]
@@ -18,7 +18,7 @@ class TestSlotPacker:
         torch.testing.assert_close(packed, samples[0].to(torch.float64))
 
     def test_pack_multiple_samples(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=4, total_slots=100)
         samples = [
@@ -34,7 +34,7 @@ class TestSlotPacker:
         torch.testing.assert_close(packed, expected)
 
     def test_pack_with_padding(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=5, total_slots=100)
         samples = [
@@ -49,7 +49,7 @@ class TestSlotPacker:
         torch.testing.assert_close(packed, expected)
 
     def test_unpack_samples(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=4, total_slots=100)
         packed = torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=torch.float64)
@@ -61,7 +61,7 @@ class TestSlotPacker:
         torch.testing.assert_close(samples[1], torch.tensor([5.0, 6.0, 7.0, 8.0], dtype=torch.float64))
 
     def test_pack_unpack_roundtrip(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=10, total_slots=1000)
         original_samples = [torch.randn(10) for _ in range(5)]
@@ -74,14 +74,14 @@ class TestSlotPacker:
             torch.testing.assert_close(rec, orig.to(torch.float64))
 
     def test_max_batch_size(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=100, total_slots=1000)
         
         assert packer.max_batch_size == 10
 
     def test_pack_exceeds_capacity_raises(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=100, total_slots=200)
         samples = [torch.randn(100) for _ in range(5)]
@@ -90,7 +90,7 @@ class TestSlotPacker:
             packer.pack(samples)
 
     def test_pack_empty_list_raises(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=10, total_slots=100)
         
@@ -98,7 +98,7 @@ class TestSlotPacker:
             packer.pack([])
 
     def test_pack_sample_too_large_raises(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=5, total_slots=100)
         samples = [torch.randn(10)]
@@ -107,7 +107,7 @@ class TestSlotPacker:
             packer.pack(samples)
 
     def test_pack_inconsistent_sizes_raises(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=10, total_slots=100)
         samples = [torch.randn(5), torch.randn(7)]
@@ -116,7 +116,7 @@ class TestSlotPacker:
             packer.pack(samples)
 
     def test_unpack_invalid_num_samples_raises(self):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         packer = SlotPacker(slots_per_sample=10, total_slots=100)
         packed = torch.randn(100)
@@ -128,7 +128,7 @@ class TestSlotPacker:
 class TestEncryptDecryptBatch:
 
     def test_encrypt_decrypt_batch_basic(self, mock_enc_context):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         samples = [
             torch.tensor([1.0, 2.0, 3.0]),
@@ -148,7 +148,7 @@ class TestEncryptDecryptBatch:
         torch.testing.assert_close(recovered[1], samples[1].to(torch.float64), rtol=1e-4, atol=1e-4)
 
     def test_encrypt_decrypt_batch_multiple(self, mock_enc_context):
-        from ckks_torch.batching import SlotPacker
+        from cukks.batching import SlotPacker
         
         num_samples = 8
         sample_size = 16
@@ -170,9 +170,9 @@ class TestEncryptDecryptBatch:
 class TestContextBatchMethods:
 
     def test_context_encrypt_batch(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
@@ -186,9 +186,9 @@ class TestContextBatchMethods:
         assert enc_batch.shape == (2, 3)
 
     def test_context_decrypt_batch(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
@@ -205,9 +205,9 @@ class TestContextBatchMethods:
         torch.testing.assert_close(recovered[1], samples[1], rtol=1e-4, atol=1e-4)
 
     def test_context_batch_roundtrip_large(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
@@ -227,9 +227,9 @@ class TestContextBatchMethods:
             torch.testing.assert_close(rec, orig, rtol=1e-4, atol=1e-4)
 
     def test_context_batch_with_sample_shape(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
@@ -250,9 +250,9 @@ class TestContextBatchMethods:
 class TestBatchedInference:
 
     def test_batched_linear_inference(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
@@ -277,9 +277,9 @@ class TestBatchedInference:
             torch.testing.assert_close(res[:input_size], expected, rtol=1e-4, atol=1e-4)
 
     def test_batched_add_inference(self, monkeypatch):
-        from ckks_torch import CKKSInferenceContext
+        from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
-        import ckks_torch.context as ctx_module
+        import cukks.context as ctx_module
         
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)

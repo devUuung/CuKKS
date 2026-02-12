@@ -78,7 +78,7 @@ class TestGPU_MLP:
     @requires_gpu
     def test_mlp_he_inference(self, simple_mlp, gpu_context):
         """Test full MLP inference on GPU with HE."""
-        from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+        from cukks.nn import EncryptedLinear, EncryptedSquare
         
         torch.manual_seed(42)
         
@@ -116,7 +116,7 @@ class TestGPU_MLP:
     @requires_gpu
     def test_mlp_multiple_samples(self, simple_mlp, gpu_context):
         """Test MLP with multiple different inputs."""
-        from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+        from cukks.nn import EncryptedLinear, EncryptedSquare
         
         enc_fc1 = EncryptedLinear.from_torch(simple_mlp.fc1)
         enc_square = EncryptedSquare()
@@ -142,7 +142,7 @@ class TestGPU_MLP:
     @requires_gpu
     def test_mlp_timing(self, simple_mlp, gpu_context):
         """Benchmark MLP inference on GPU."""
-        from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+        from cukks.nn import EncryptedLinear, EncryptedSquare
         
         enc_fc1 = EncryptedLinear.from_torch(simple_mlp.fc1)
         enc_square = EncryptedSquare()
@@ -231,7 +231,7 @@ class TestGPU_CNN:
     @requires_gpu
     def test_cnn_he_inference(self, simple_cnn, gpu_context):
         """Test full CNN inference on GPU with HE."""
-        from ckks_torch.nn import (
+        from cukks.nn import (
             EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
             EncryptedFlatten, EncryptedLinear
         )
@@ -299,7 +299,7 @@ class TestGPU_CNN:
     @requires_gpu
     def test_cnn_convert_and_infer(self, simple_cnn, gpu_context):
         """Test CNN conversion with optimize_cnn and inference."""
-        from ckks_torch import convert
+        from cukks import convert
         
         torch.manual_seed(42)
         
@@ -340,7 +340,7 @@ class TestGPU_CNN:
     @requires_gpu
     def test_cnn_timing(self, simple_cnn, gpu_context):
         """Benchmark CNN inference on GPU."""
-        from ckks_torch.nn import (
+        from cukks.nn import (
             EncryptedConv2d, EncryptedSquare, EncryptedAvgPool2d,
             EncryptedFlatten, EncryptedLinear
         )
@@ -437,7 +437,7 @@ class TestRealBackend_CPU:
     @requires_real_backend
     def test_mlp_inference_cpu(self, real_context):
          """Test MLP inference on CPU with real backend."""
-         from ckks_torch.nn import EncryptedLinear, EncryptedSquare
+         from cukks.nn import EncryptedLinear, EncryptedSquare
          
          torch.manual_seed(42)
          
@@ -614,8 +614,8 @@ class TestGPUBootstrap:
         if not _has_real_backend() or not _has_cuda():
             pytest.skip("GPU bootstrap test requires real backend + CUDA")
 
-        from ckks_torch import CKKSInferenceContext, InferenceConfig
-        from ckks_torch.context import compute_bsgs_rotations
+        from cukks import CKKSInferenceContext, InferenceConfig
+        from cukks.context import compute_bsgs_rotations
 
         max_dim = 16
         rotations = compute_bsgs_rotations(max_dim)
@@ -673,7 +673,7 @@ class TestGPUBootstrap:
         before the second block, proving the auto-bootstrap hook works on the
         real OpenFHE backend.
         """
-        from ckks_torch.nn import EncryptedLinear, EncryptedSquare, EncryptedSequential
+        from cukks.nn import EncryptedLinear, EncryptedSquare, EncryptedSequential
 
         ctx = bootstrap_context
         torch.manual_seed(42)
@@ -717,7 +717,7 @@ class TestGPUBootstrap:
     @requires_real_backend
     def test_convert_deep_model_auto_bootstrap(self, bootstrap_context):
         """Verify convert() auto-detects bootstrap need for a deep model."""
-        from ckks_torch import convert
+        from cukks import convert
 
         torch.manual_seed(42)
         layers = []

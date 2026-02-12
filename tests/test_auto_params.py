@@ -20,14 +20,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
-from ckks_torch.context import (
+from cukks.context import (
     InferenceConfig,
     CKKSInferenceContext,
     _estimate_model_depth,
 )
-from ckks_torch.converter import convert, estimate_depth
-from ckks_torch.tensor import EncryptedTensor
-from ckks_torch.nn import EncryptedLinear, EncryptedSquare, EncryptedSequential
+from cukks.converter import convert, estimate_depth
+from cukks.tensor import EncryptedTensor
+from cukks.nn import EncryptedLinear, EncryptedSquare, EncryptedSequential
 
 
 # ============================================================
@@ -153,10 +153,11 @@ class TestEstimateModelDepth:
 
 class TestInferenceConfigForDepth:
 
-    def test_small_depth_gets_16384(self):
+    def test_small_depth_gets_32768(self):
         cfg = InferenceConfig.for_depth(3)
-        # effective = 3 + 2 = 5 ≤ 6
-        assert cfg.poly_mod_degree == 16384
+        # effective = 3 + 2 = 5 → total_bits=370, num_primes=7
+        # Both ≤620 and ≤12 → N=32768
+        assert cfg.poly_mod_degree == 32768
 
     def test_medium_depth_gets_32768(self):
         cfg = InferenceConfig.for_depth(8)
@@ -239,8 +240,10 @@ class TestConvertParameterForwarding:
 
     def test_activation_degree_affects_config(self):
         model = nn.Sequential(nn.Linear(16, 8), nn.ReLU(), nn.Linear(8, 4))
-        _, ctx4 = convert(model, activation_degree=4)
-        _, ctx8 = convert(model, activation_degree=8)
+        # GPU backend uses fixed poly_depth=3 for all degrees>=4,
+        # so disable GPU to test CPU depth estimation path.
+        _, ctx4 = convert(model, activation_degree=4, enable_gpu=False)
+        _, ctx8 = convert(model, activation_degree=8, enable_gpu=False)
         assert ctx8.config.mult_depth > ctx4.config.mult_depth
 
     def test_square_activation_reduces_depth(self):

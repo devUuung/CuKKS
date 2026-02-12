@@ -21,7 +21,7 @@ def mock_context():
 
 @pytest.fixture(scope="session")
 def mock_enc_context():
-    from ckks_torch.tensor import EncryptedTensor
+    from cukks.tensor import EncryptedTensor
     
     class EncryptedMockContext:
         def __init__(self):
@@ -42,9 +42,9 @@ def mock_enc_context():
 def use_mock_backend(monkeypatch):
     from mocks import mock_backend
     
-    monkeypatch.setattr("ckks_torch.context.CKKSConfig", MockCKKSConfig, raising=False)
-    monkeypatch.setattr("ckks_torch.context.CKKSContext", MockCKKSContext, raising=False)
-    monkeypatch.setattr("ckks_torch.tensor.EncryptedTensor", MockCKKSTensor, raising=False)
+    monkeypatch.setattr("cukks.context.CKKSConfig", MockCKKSConfig, raising=False)
+    monkeypatch.setattr("cukks.context.CKKSContext", MockCKKSContext, raising=False)
+    monkeypatch.setattr("cukks.tensor.EncryptedTensor", MockCKKSTensor, raising=False)
 
 
 # =============================================================================
@@ -88,7 +88,7 @@ def real_context():
     if not _has_real_backend():
         pytest.skip("Real CKKS backend not available")
     
-    from ckks_torch import CKKSInferenceContext, InferenceConfig
+    from cukks import CKKSInferenceContext, InferenceConfig
     
     config = InferenceConfig(
         poly_mod_degree=32768,
@@ -115,7 +115,7 @@ def gpu_context():
     if not _has_cuda():
         pytest.skip("CUDA not available")
     
-    from ckks_torch import CKKSInferenceContext, InferenceConfig
+    from cukks import CKKSInferenceContext, InferenceConfig
     
     config = InferenceConfig(
         poly_mod_degree=32768,

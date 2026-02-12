@@ -154,7 +154,7 @@ class TestSerializationState:
 
     def test_save_load_preserves_needs_rescale(self, mock_enc_context, tmp_path):
         """save() and load() should preserve _needs_rescale flag."""
-        from ckks_torch.tensor import EncryptedTensor
+        from cukks.tensor import EncryptedTensor
         
         a = mock_enc_context.encrypt(torch.randn(16))
         a_mul = a.mul(2.0)
@@ -168,7 +168,7 @@ class TestSerializationState:
 
     def test_save_load_preserves_cnn_layout(self, mock_enc_context, tmp_path):
         """save() and load() should preserve _cnn_layout."""
-        from ckks_torch.tensor import EncryptedTensor
+        from cukks.tensor import EncryptedTensor
         
         a = mock_enc_context.encrypt(torch.randn(16))
         a._cnn_layout = {
@@ -186,7 +186,7 @@ class TestSerializationState:
 
     def test_save_load_fresh_tensor(self, mock_enc_context, tmp_path):
         """save() and load() should work for fresh tensors (defaults)."""
-        from ckks_torch.tensor import EncryptedTensor
+        from cukks.tensor import EncryptedTensor
         
         a = mock_enc_context.encrypt(torch.randn(16))
         assert a._needs_rescale is False
@@ -267,7 +267,7 @@ class TestThreadSafeInitializationRobust:
     def test_concurrent_initialization_with_barrier(self):
         """Multiple threads hitting _ensure_initialized simultaneously should be safe."""
         import threading
-        from ckks_torch.context import CKKSInferenceContext
+        from cukks.context import CKKSInferenceContext
         
         ctx = CKKSInferenceContext()
         init_count = [0]

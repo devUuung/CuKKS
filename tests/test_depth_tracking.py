@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from mocks.mock_backend import MockCKKSConfig, MockCKKSContext
-from ckks_torch.tensor import EncryptedTensor
+from cukks.tensor import EncryptedTensor
 
 
 @pytest.fixture

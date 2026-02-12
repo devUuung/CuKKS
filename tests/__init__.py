@@ -1,1 +1,1 @@
-"""Tests for ckks_torch."""
+"""Tests for cukks."""

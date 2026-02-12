@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from ckks_torch.nn import (
+from cukks.nn import (
     EncryptedModule,
     EncryptedLinear,
     EncryptedConv2d,
@@ -19,7 +19,7 @@ from ckks_torch.nn import (
     EncryptedLayerNorm,
     EncryptedDropout,
 )
-from ckks_torch.converter import ModelConverter
+from cukks.converter import ModelConverter
 
 
 class TestEncryptedLinear:
@@ -410,7 +410,7 @@ class TestAttention:
 
     def test_taylor_exp_coeffs(self):
         """Test Taylor expansion coefficients for exp(x)."""
-        from ckks_torch.nn.attention import _taylor_exp_coeffs
+        from cukks.nn.attention import _taylor_exp_coeffs
         
         coeffs = _taylor_exp_coeffs(4)
         
@@ -508,7 +508,7 @@ class TestLayerNorm:
         since LayerNorm uses float64 internally. Tolerance is relaxed
         to 0.15 due to Chebyshev polynomial approximation of inv_sqrt.
         """
-        from ckks_torch.tensor import EncryptedTensor
+        from cukks.tensor import EncryptedTensor
         
         class Float64MockContext:
             def __init__(self, base_ctx):
