@@ -69,18 +69,22 @@ jobs:
             cuda_path: "11.8"
             cuda_arch: "70;75;80;86;89;90"
             package_dir: "cukks-cu118"
+            gcc_toolset: "11"
           - cuda_version: "121"
             cuda_path: "12.1"
             cuda_arch: "70;75;80;86;89;90"
             package_dir: "cukks-cu121"
+            gcc_toolset: "12"
           - cuda_version: "124"
             cuda_path: "12.4"
             cuda_arch: "70;75;80;86;89;90"
             package_dir: "cukks-cu124"
+            gcc_toolset: "13"
           - cuda_version: "128"
             cuda_path: "12.8"
             cuda_arch: "70;75;80;86;89;90;120"
             package_dir: "cukks-cu128"
+            gcc_toolset: "13"
     steps:
       - uses: actions/checkout@v4
       
@@ -104,11 +108,10 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
-            . /opt/rh/gcc-toolset-13/enable || true
-            export CUDA_HOME=/usr/local/cuda
-            export PATH=$CUDA_HOME/bin:$PATH
-            which gcc && gcc --version || echo "gcc not found"
-            which nvcc && nvcc --version || echo "nvcc not found"
+            echo "CC=$CC CXX=$CXX CUDA_HOME=$CUDA_HOME"
+            echo "PATH=$PATH"
+            $CC --version
+            nvcc --version || echo "nvcc not found"
             cd /project/openfhe-gpu-public
             mkdir -p build && cd build
             cmake .. \
@@ -116,8 +119,8 @@ jobs:
                 -DWITH_OPENMP=ON \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr/local \
-                -DCMAKE_C_COMPILER=$(which gcc) \
-                -DCMAKE_CXX_COMPILER=$(which g++) \
+                -DCMAKE_C_COMPILER=$CC \
+                -DCMAKE_CXX_COMPILER=$CXX \
                 -DBUILD_SHARED=ON \
                 -DBUILD_EXAMPLES=OFF \
                 -DBUILD_UNITTESTS=OFF \
@@ -136,11 +139,11 @@ jobs:
             OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
             OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
             CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_path }}
-            PATH=/usr/local/cuda-${{ matrix.cuda_path }}/bin:/opt/rh/gcc-toolset-13/root/usr/bin:$PATH
-            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_path }}/lib64:/opt/rh/gcc-toolset-13/root/usr/lib64:$LD_LIBRARY_PATH
-            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
-            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
-            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            PATH=/usr/local/cuda-${{ matrix.cuda_path }}/bin:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_path }}/lib64:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/lib64:$LD_LIBRARY_PATH
+            CC=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1
       
       - uses: actions/upload-artifact@v4
