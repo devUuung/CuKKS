@@ -104,9 +104,11 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
-            source /opt/rh/gcc-toolset-13/enable || true
+            . /opt/rh/gcc-toolset-13/enable || true
             export CUDA_HOME=/usr/local/cuda
             export PATH=$CUDA_HOME/bin:$PATH
+            which gcc && gcc --version || echo "gcc not found"
+            which nvcc && nvcc --version || echo "nvcc not found"
             cd /project/openfhe-gpu-public
             mkdir -p build && cd build
             cmake .. \
@@ -114,6 +116,8 @@ jobs:
                 -DWITH_OPENMP=ON \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_C_COMPILER=$(which gcc) \
+                -DCMAKE_CXX_COMPILER=$(which g++) \
                 -DBUILD_SHARED=ON \
                 -DBUILD_EXAMPLES=OFF \
                 -DBUILD_UNITTESTS=OFF \
