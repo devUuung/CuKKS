@@ -120,6 +120,11 @@ jobs:
             OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
             OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
             CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_path }}
+            PATH=/usr/local/cuda-${{ matrix.cuda_path }}/bin:/opt/rh/gcc-toolset-13/root/usr/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_path }}/lib64:/opt/rh/gcc-toolset-13/root/usr/lib64:$LD_LIBRARY_PATH
+            CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
           CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1
       
       - uses: actions/upload-artifact@v4
