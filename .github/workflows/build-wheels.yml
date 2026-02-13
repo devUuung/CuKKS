@@ -92,9 +92,12 @@ jobs:
           package-dir: ${{ matrix.package_dir }}
         env:
           CIBW_BUILD: "cp311-manylinux_x86_64 cp312-manylinux_x86_64"
-          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
+            source /opt/rh/gcc-toolset-13/enable || true
+            export CUDA_HOME=/usr/local/cuda
+            export PATH=$CUDA_HOME/bin:$PATH
             cd /project/openfhe-gpu-public
             mkdir -p build && cd build
             cmake .. \
