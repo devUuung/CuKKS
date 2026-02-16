@@ -39,6 +39,7 @@ htmlcov/
 *.a
 *.dylib
 *.dll
+compile_commands.json
 
 # OpenFHE builds (large, should be built locally)
 openfhe-cpu/
@@ -60,12 +61,19 @@ generate_*.py
 REFERENCES.md
 
 # Experiments (paper-specific, not part of library)
-experiments/
+experiments/*.json
+experiments/*.log
+experiments/checkpoints/
+experiments/data/
 
-# Dotfiles (except .github, .gitignore)
+# Paper (entire directory — private, not part of library)
+paper/
+
+# Dotfiles (except .github, .gitignore, .claude)
 .*
 !.github/
 !.gitignore
+!.claude/
 
 CHANGELOG.md
 
@@ -79,3 +87,4 @@ Thumbs.db
 *.key
 # IDE/LSP caches
 .cache/
+pyrightconfig.json
