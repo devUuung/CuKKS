@@ -104,7 +104,6 @@ jobs:
         with:
           package-dir: ${{ matrix.package_dir }}
         env:
-          CIBW_BUILD: "cp311-manylinux_x86_64 cp312-manylinux_x86_64"
           CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:latest
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
@@ -157,7 +156,7 @@ jobs:
     strategy:
       matrix:
         cuda_version: ["118", "121", "124", "128"]
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/download-artifact@v4
         with:
