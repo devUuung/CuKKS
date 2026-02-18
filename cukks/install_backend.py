@@ -6,7 +6,6 @@ Usage:
     python -m cukks.install_backend cu128         # install specific backend
     python -m cukks.install_backend 12.8          # install by CUDA version
     python -m cukks.install_backend --status      # show current status
-    python -m cukks.install_backend --dry-run     # show what would be installed
 
 Also available as:
     cukks-install-backend [OPTIONS] [BACKEND]
@@ -98,13 +97,9 @@ def _print_status() -> None:
         print(f"  {pkg:20s}  (CUDA {cuda_ver}){marker}")
 
 
-def _install_package(package: str, dry_run: bool = False) -> int:
-    """Install a package via pip. Returns exit code."""
+def _install_package(package: str) -> int:
     cmd = [sys.executable, "-m", "pip", "install", package]
-    if dry_run:
-        cmd.append("--dry-run")
-
-    print(f"{'[DRY RUN] ' if dry_run else ''}Running: {' '.join(cmd)}")
+    print(f"Running: {' '.join(cmd)}")
     print()
     return subprocess.call(cmd)
 
@@ -129,12 +124,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         action="store_true",
         help="Show current backend status and exit.",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be installed without actually installing.",
-    )
-
     args = parser.parse_args(argv)
 
     # ── Status mode ──────────────────────────────────────────────────────
@@ -175,7 +164,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ── Check if already installed ───────────────────────────────────────
     current = get_installed_backend()
-    if current == package and not args.dry_run:
+    if current == package:
         print(f"{package} is already installed.")
         cuda_ver_pkg = PACKAGE_TO_CUDA.get(package, "?")
         print(f"CUDA version: {cuda_ver_pkg}")
@@ -184,13 +173,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"Replacing {current} with {package}...")
 
     # ── Install ──────────────────────────────────────────────────────────
-    exit_code = _install_package(package, dry_run=args.dry_run)
+    exit_code = _install_package(package)
     if exit_code != 0:
         print(f"\nInstallation failed (exit code {exit_code}).", file=sys.stderr)
         sys.exit(exit_code)
 
-    if not args.dry_run:
-        print(f"\n✓ {package} installed successfully.")
+    print(f"\n✓ {package} installed successfully.")
 
 
 if __name__ == "__main__":

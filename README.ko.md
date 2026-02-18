@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/devUuung/CuKKS/actions"><img src="https://github.com/devUuung/CuKKS/actions/workflows/build-wheels.yml/badge.svg" alt="Build Status"></a>
   <a href="https://github.com/devUuung/CuKKS/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11-blue.svg" alt="Python 3.11"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10--3.14-blue.svg" alt="Python 3.10-3.14"></a>
 </p>
 
 <p align="center">
@@ -72,7 +72,6 @@ extras 사용: `pip install cukks[cu121]`
 cukks-install-backend             # 자동 감지 & 설치
 cukks-install-backend cu128       # 특정 백엔드 설치
 cukks-install-backend --status    # CUDA 호환성 상태 확인
-cukks-install-backend --dry-run   # 설치 없이 미리보기
 ```
 
 | 환경변수 | 효과 |
