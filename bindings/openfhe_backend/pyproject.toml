@@ -19,7 +19,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ckks-openfhe-backend"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pybind11 bindings that expose OpenFHE GPU CKKS functionality and Torch helpers"
 readme = "README.md"
 license = {text = "Apache-2.0"}

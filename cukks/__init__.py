@@ -38,7 +38,7 @@ For more control, you can use the lower-level APIs:
     - cukks.nn: Individual encrypted layers
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Core classes
 from .context import CKKSInferenceContext, InferenceConfig
