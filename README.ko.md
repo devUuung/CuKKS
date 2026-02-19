@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/devUuung/CuKKS/actions"><img src="https://github.com/devUuung/CuKKS/actions/workflows/build-wheels.yml/badge.svg" alt="Build Status"></a>
   <a href="https://github.com/devUuung/CuKKS/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10--3.14-blue.svg" alt="Python 3.10-3.14"></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10--3.13-blue.svg" alt="Python 3.10-3.13"></a>
 </p>
 
 <p align="center">

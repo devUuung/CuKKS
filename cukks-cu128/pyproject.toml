@@ -19,7 +19,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cukks-cu128"
-version = "0.1.1"
+version = "0.1.2"
 description = "CKKS Homomorphic Encryption backend with CUDA 12.8 GPU acceleration"
 readme = "../README.md"
 license = {text = "Apache-2.0"}
@@ -46,7 +46,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
+
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Security :: Cryptography",
     "Environment :: GPU :: NVIDIA CUDA :: 12",
@@ -86,7 +86,7 @@ CMAKE_CUDA_ARCHITECTURES = "80;86;89;90;120"
 # ==============================================================================
 
 [tool.cibuildwheel]
-build = "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64"
+build = "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64"
 skip = "*-musllinux*"
 
 [tool.cibuildwheel.linux]
