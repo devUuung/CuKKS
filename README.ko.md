@@ -42,28 +42,45 @@ output = ctx.decrypt(enc_output)
 
 ## 설치
 
-### 자동 설치 (권장)
+### 방법 1: extras로 한 번에 설치 (권장)
+
+PyTorch의 CUDA 버전에 맞는 extras를 사용하여 한 번에 설치하세요.
 
 ```bash
-pip install cukks        # PyTorch의 CUDA 버전을 자동 감지하여 백엔드 설치
+# CUDA 12.1 (PyTorch CUDA 버전에 맞춰 선택)
+pip install cukks[cu121]
 ```
 
-`pip install cukks`는 PyTorch가 빌드된 CUDA 버전을 감지하고, 매칭되는 `cukks-cuXXX` GPU 백엔드를 자동으로 설치합니다. 수동 버전 매칭이 필요 없습니다.
+| 명령어 | CUDA | 지원 GPU |
+|--------|------|----------|
+| `pip install cukks[cu118]` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu121]` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu124]` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu128]` | 12.8 | 위 모두 + **RTX 50xx** |
 
-### 수동 설치
+### 방법 2: CUDA 버전 확인 후 설치
+
+```python
+import torch
+print(torch.version.cuda)  # '12.1' 등 출력
+```
+
+위 결과에 맞는 extras로 설치하세요.
+
+### 방법 3: 백엔드 직접 설치
 
 ```bash
-pip install cukks-cu121  # CUDA 12.1용 명시적 설치
+# 백엔드를 먼저 설치한 후 cukks 설치
+pip install cukks-cu121
+pip install cukks
 ```
 
-| 패키지 | CUDA | 지원 GPU |
-|---------|------|----------------|
-| `cukks-cu118` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu121` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu124` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu128` | 12.8 | 위 모두 + **RTX 50xx** |
+또는 CLI로 자동 감지:
 
-extras 사용: `pip install cukks[cu121]`
+```bash
+pip install cukks
+cukks-install-backend  # PyTorch CUDA 버전 자동 감지 및 설치
+```
 
 <details>
 <summary><strong>설치 후 CLI 및 환경변수</strong></summary>
@@ -93,7 +110,7 @@ cukks-install-backend --status    # CUDA 호환성 상태 확인
 
 ```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
-pip install cukks  # CUDA 12.1 자동 감지
+pip install cukks[cu121]  # CUDA 12.1용 설치
 ```
 
 </details>

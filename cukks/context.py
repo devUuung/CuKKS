@@ -357,13 +357,33 @@ class CKKSInferenceContext:
         global CKKSConfig, CKKSContext, _BACKEND_AVAILABLE
         if _BACKEND_AVAILABLE is not None:
             return
+        # First attempt: direct import
         try:
             from ckks import CKKSConfig as _Cfg, CKKSContext as _Ctx
             CKKSConfig = _Cfg
             CKKSContext = _Ctx
             _BACKEND_AVAILABLE = True
+            return
         except ImportError:
-            _BACKEND_AVAILABLE = False
+            pass  # Fall through to auto-install attempt
+        # Second attempt: auto-install the backend
+        from ._cuda_compat import auto_install_backend
+        success, package, err = auto_install_backend(quiet=False)
+        if success:
+            # Retry import after successful installation
+            try:
+                # Invalidate import caches to pick up newly installed package
+                import importlib
+                importlib.invalidate_caches()
+                from ckks import CKKSConfig as _Cfg, CKKSContext as _Ctx
+                CKKSConfig = _Cfg
+                CKKSContext = _Ctx
+                _BACKEND_AVAILABLE = True
+                return
+            except ImportError:
+                pass  # Installation succeeded but import still failed
+        # All attempts failed
+
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -376,10 +396,34 @@ class CKKSInferenceContext:
             self._load_backend()
             
             if CKKSConfig is None or CKKSContext is None:
-                raise RuntimeError(
-                    "CKKS backend not available. Please install openfhe_backend:\n"
-                    "  pip install -e bindings/openfhe_backend"
-                )
+                from ._cuda_compat import detect_cuda_version, resolve_backend_package
+                cuda_ver = detect_cuda_version()
+                recommended = resolve_backend_package(cuda_ver) if cuda_ver else None
+
+                if recommended:
+                    hint = (
+                        f"CKKS backend not available. PyTorch uses CUDA {cuda_ver}.\n"
+                        f"Install the matching backend:\n"
+                        f"  pip install {recommended}\n"
+                        f"Or run: python -m cukks.install_backend\n"
+                        f"\n"
+                        f"To enable auto-installation, ensure CUKKS_AUTO_INSTALL is not set to '0'."
+                    )
+                elif cuda_ver:
+                    hint = (
+                        f"CKKS backend not available. PyTorch uses CUDA {cuda_ver}, "
+                        f"but no compatible backend was found.\n"
+                        f"Available backends: pip install cukks-cu118|cu121|cu124|cu128\n"
+                        f"Or run: python -m cukks.install_backend --status"
+                    )
+                else:
+                    hint = (
+                        "CKKS backend not available. No CUDA-enabled PyTorch detected.\n"
+                        "Install PyTorch with CUDA support first, then:\n"
+                        "  pip install cukks-cu121  # (match your CUDA version)\n"
+                        "Or run: python -m cukks.install_backend --status"
+                    )
+                raise RuntimeError(hint)
             
             ckks_config = CKKSConfig(
                 poly_mod_degree=self.config.poly_mod_degree,

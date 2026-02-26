@@ -42,28 +42,45 @@ output = ctx.decrypt(enc_output)
 
 ## Installation
 
-### Automatic (Recommended)
+### Option 1: Install with extras (Recommended)
+
+Install cukks and the GPU backend matching your PyTorch CUDA version in one command:
 
 ```bash
-pip install cukks        # Auto-detects PyTorch's CUDA and installs matching backend
+# CUDA 12.1 (choose the one matching your PyTorch CUDA version)
+pip install cukks[cu121]
 ```
 
-`pip install cukks` detects the CUDA version your PyTorch was built with and automatically installs the matching `cukks-cuXXX` GPU backend. No manual version matching needed.
-
-### Manual
-
-```bash
-pip install cukks-cu121  # Explicitly install for CUDA 12.1
-```
-
-| Package | CUDA | Supported GPUs |
+| Command | CUDA | Supported GPUs |
 |---------|------|----------------|
-| `cukks-cu118` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu121` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu124` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `cukks-cu128` | 12.8 | All above + **RTX 50xx** |
+| `pip install cukks[cu118]` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu121]` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu124]` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
+| `pip install cukks[cu128]` | 12.8 | All above + **RTX 50xx** |
 
-Or use extras: `pip install cukks[cu121]`
+### Option 2: Check CUDA version first
+
+```python
+import torch
+print(torch.version.cuda)  # prints e.g., '12.1'
+```
+
+Then install with the matching extras command above.
+
+### Option 3: Install backend separately
+
+```bash
+# Install the backend first, then cukks
+pip install cukks-cu121
+pip install cukks
+```
+
+Or use the CLI for auto-detection:
+
+```bash
+pip install cukks
+cukks-install-backend  # Auto-detects PyTorch CUDA and installs the matching backend
+```
 
 <details>
 <summary><strong>Post-install CLI & environment variables</strong></summary>
@@ -93,7 +110,7 @@ cukks-install-backend --status    # Show CUDA compatibility status
 
 ```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
-pip install cukks  # auto-detects CUDA 12.1
+pip install cukks[cu121]  # Install for CUDA 12.1
 ```
 
 </details>
