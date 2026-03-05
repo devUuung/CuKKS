@@ -61,6 +61,9 @@ class EncryptedTensor:
         self._depth = depth
         self._original_size: Optional[int] = None
         self._cnn_layout: Optional[Dict[str, Any]] = None  # CNN im2col layout info
+        self._packed_batch: bool = False
+        self._batch_size: Optional[int] = None
+        self._slots_per_sample: Optional[int] = None
         self._needs_rescale: bool = False  # Lazy rescale flag
     
     @property
@@ -846,6 +849,9 @@ class EncryptedTensor:
             "cipher_data": cipher_data,
             "needs_rescale": self._needs_rescale,
             "cnn_layout": self._cnn_layout,
+            "packed_batch": self._packed_batch,
+            "batch_size": self._batch_size,
+            "slots_per_sample": self._slots_per_sample,
         }
         with open(path, "wb") as f:
             pickle.dump(tensor_data, f)
@@ -891,4 +897,7 @@ class EncryptedTensor:
         result = cls(cipher, shape, context, depth)
         result._needs_rescale = tensor_data.get("needs_rescale", False)
         result._cnn_layout = tensor_data.get("cnn_layout", None)
+        result._packed_batch = tensor_data.get("packed_batch", False)
+        result._batch_size = tensor_data.get("batch_size", None)
+        result._slots_per_sample = tensor_data.get("slots_per_sample", None)
         return result
