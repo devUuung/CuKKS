@@ -527,21 +527,22 @@ class CKKSInferenceContext:
         self,
         samples: List[torch.Tensor],
         slots_per_sample: Optional[int] = None,
-    ) -> "EncryptedTensor":
+    ) -> Any:
         from .tensor import EncryptedTensor
-        
+
         self._ensure_initialized()
+
+        if not samples:
+            raise ValueError("Cannot encrypt empty list of samples")
 
         import warnings
         warnings.warn(
             "encrypt_batch() packs multiple samples into a single ciphertext. "
-            "Standard encrypted layers (EncryptedLinear, etc.) do not support batched layout "
-            "and will produce incorrect results. Use per-sample encryption for standard layers.",
+            "Packed-batch model forward will run through the context batch path for correctness "
+            "(decrypt/re-encrypt per sample), which is significantly slower than native packed "
+            "homomorphic execution.",
             stacklevel=2,
         )
-        
-        if not samples:
-            raise ValueError("Cannot encrypt empty list of samples")
         
         first_sample_size = samples[0].numel()
         if slots_per_sample is None:
@@ -551,18 +552,48 @@ class CKKSInferenceContext:
         packed = packer.pack(samples)
         
         cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
-        
+
         batch_shape = (len(samples), slots_per_sample)
-        
-        return EncryptedTensor(cipher, batch_shape, self)
+        enc_tensor = EncryptedTensor(cipher, batch_shape, self)
+        enc_tensor._packed_batch = True
+        enc_tensor._batch_size = len(samples)
+        enc_tensor._slots_per_sample = slots_per_sample
+        return enc_tensor
+
+    def _forward_packed_batch(self, model: Any, packed_batch: "EncryptedTensor") -> "EncryptedTensor":
+        self._ensure_initialized()
+
+        if not getattr(packed_batch, "_packed_batch", False):
+            raise ValueError("Expected packed batch tensor")
+
+        num_samples = getattr(packed_batch, "_batch_size", None)
+        if num_samples is None:
+            if len(packed_batch.shape) < 1:
+                raise ValueError("Cannot infer packed batch size from tensor shape")
+            num_samples = packed_batch.shape[0]
+
+        samples = self.decrypt_batch(packed_batch, num_samples=num_samples)
+        outputs: List[torch.Tensor] = []
+        for sample in samples:
+            enc_input = self.encrypt(sample)
+            enc_output = model(enc_input)
+            outputs.append(self.decrypt(enc_output))
+        repacked = self.encrypt_batch(outputs)
+        return repacked
     
     def decrypt_batch(
         self,
-        encrypted: "EncryptedTensor",
+        encrypted: Any,
         num_samples: Optional[int] = None,
         sample_shape: Optional[Sequence[int]] = None,
     ) -> List[torch.Tensor]:
         self._ensure_initialized()
+
+        if isinstance(encrypted, list):
+            samples = [self.decrypt(item, shape=sample_shape) for item in encrypted]
+            if num_samples is not None:
+                return samples[:num_samples]
+            return samples
         
         if num_samples is None:
             if len(encrypted.shape) >= 1:
@@ -577,7 +608,10 @@ class CKKSInferenceContext:
             slots_per_sample = encrypted.shape[1]
         else:
             slots_per_sample = encrypted.size // num_samples
-        
+
+        if num_samples is None:
+            raise ValueError("num_samples could not be resolved")
+
         full_result = self._ctx.decrypt(encrypted._cipher, shape=None)
         
         packer = SlotPacker(slots_per_sample, self.num_slots)
