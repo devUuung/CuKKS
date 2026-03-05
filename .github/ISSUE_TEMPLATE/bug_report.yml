@@ -59,14 +59,16 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Your environment details
+      description: "Your environment details. Run `nvidia-smi` and `python -c \"import torch; print(torch.__version__)\"` to get versions."
       placeholder: |
         - OS: Ubuntu 22.04
         - Python: 3.11
+        - PyTorch: 2.1.0
         - CuKKS version: 0.1.2
         - Backend: cukks-cu121
         - CUDA: 12.1
         - GPU: RTX 4090
+        - Driver: 535.129.03 (from nvidia-smi)
       render: yaml
     validations:
       required: true
