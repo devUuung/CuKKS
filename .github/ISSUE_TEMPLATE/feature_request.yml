@@ -50,7 +50,5 @@ body:
     id: contribution
     attributes:
       label: Contribution
-      description: Are you willing to help with this feature?
       options:
         - label: I'm willing to submit a PR for this feature
-        - label: I can help with testing
