@@ -730,8 +730,33 @@ class CKKSInferenceContext:
         depth: int,
         **kwargs: Any,
     ) -> "CKKSInferenceContext":
-        config = InferenceConfig.for_depth(depth)
-        return cls(config, **kwargs)
+        config_keys = {
+            "enable_bootstrap",
+            "level_budget",
+            "security_level",
+            "scale_bits",
+            "poly_mod_degree",
+        }
+        context_keys = {
+            "device",
+            "rotations",
+            "use_bsgs",
+            "max_rotation_dim",
+            "auto_bootstrap",
+            "bootstrap_threshold",
+            "cnn_config",
+            "enable_gpu",
+        }
+
+        config_kwargs = {k: v for k, v in kwargs.items() if k in config_keys}
+        context_kwargs = {k: v for k, v in kwargs.items() if k in context_keys}
+        unknown_keys = sorted(set(kwargs) - config_keys - context_keys)
+        if unknown_keys:
+            names = ", ".join(unknown_keys)
+            raise TypeError(f"Unexpected keyword arguments for for_depth(): {names}")
+
+        config = InferenceConfig.for_depth(depth, **config_kwargs)
+        return cls(config, **context_kwargs)
     
     def __repr__(self) -> str:
         status = "initialized" if self._initialized else "not initialized"
