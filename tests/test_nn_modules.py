@@ -191,6 +191,15 @@ class TestEncryptedSequential:
         
         assert model.mult_depth() == 3
 
+    def test_plain_tensor_input_raises_clear_type_error(self):
+        model = EncryptedSequential(
+            EncryptedLinear(10, 5, torch.randn(5, 10)),
+            EncryptedSquare(),
+        )
+
+        with pytest.raises(TypeError, match=r"Did you forget to call ctx\.encrypt\(x\)\?"):
+            model(torch.randn(1, 10))
+
 
 class TestActivations:
     """Test activation functions."""
@@ -756,4 +765,3 @@ class TestConverterNewModules:
         
         assert isinstance(enc_model[0], EncryptedConv2d)
         assert enc_model[0].groups == 2
-
