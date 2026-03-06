@@ -50,6 +50,8 @@ class EncryptedModule(ABC):
     
     def __call__(self, x: Any) -> Any:
         """Make the module callable."""
+        from ..tensor import EncryptedTensor
+
         if isinstance(x, list):
             return [self.__call__(item) for item in x]
 
@@ -62,6 +64,11 @@ class EncryptedModule(ABC):
                 )
             return context._forward_packed_batch(self, x)
 
+        if not isinstance(x, EncryptedTensor):
+            raise TypeError(
+                "Input must be an encrypted ciphertext (EncryptedTensor). "
+                "Did you forget to call ctx.encrypt(x)?"
+            )
         return self.forward(x)
     
     def register_module(self, name: str, module: Optional["EncryptedModule"]) -> None:
