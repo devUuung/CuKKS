@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     tags-ignore: ['**']
+    paths-ignore:
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
   pull_request:
   workflow_dispatch:
 
@@ -15,7 +19,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      run_ci: ${{ steps.filter.outputs.run_ci }}
+      build_gpu_matrix: ${{ steps.set-matrix.outputs.build_gpu_matrix }}
+      test_gpu_cuda_versions: ${{ steps.set-matrix.outputs.test_gpu_cuda_versions }}
+      test_gpu_python_versions: ${{ steps.set-matrix.outputs.test_gpu_python_versions }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            run_ci:
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!.github/pull_request_template.md'
+              - '!**/*.md'
+              - '**'
+
+      - name: Select CI matrices for this event
+        id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo 'build_gpu_matrix=[{"cuda_version":"121","cuda_path":"12.1","cuda_arch":"70;75;80;86;89;90","package_dir":"cukks-cu121","gcc_toolset":"12"},{"cuda_version":"128","cuda_path":"12.8","cuda_arch":"70;75;80;86;89;90;120","package_dir":"cukks-cu128","gcc_toolset":"13"}]' >> "$GITHUB_OUTPUT"
+            echo 'test_gpu_cuda_versions=["121","128"]' >> "$GITHUB_OUTPUT"
+            echo 'test_gpu_python_versions=["3.11","3.12"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'build_gpu_matrix=[{"cuda_version":"118","cuda_path":"11.8","cuda_arch":"70;75;80;86;89;90","package_dir":"cukks-cu118","gcc_toolset":"11"},{"cuda_version":"121","cuda_path":"12.1","cuda_arch":"70;75;80;86;89;90","package_dir":"cukks-cu121","gcc_toolset":"12"},{"cuda_version":"124","cuda_path":"12.4","cuda_arch":"70;75;80;86;89;90","package_dir":"cukks-cu124","gcc_toolset":"13"},{"cuda_version":"128","cuda_path":"12.8","cuda_arch":"70;75;80;86;89;90;120","package_dir":"cukks-cu128","gcc_toolset":"13"}]' >> "$GITHUB_OUTPUT"
+            echo 'test_gpu_cuda_versions=["118","121","124","128"]' >> "$GITHUB_OUTPUT"
+            echo 'test_gpu_python_versions=["3.10","3.11","3.12","3.13"]' >> "$GITHUB_OUTPUT"
+          fi
+
   build-docker:
+    needs: setup
+    if: needs.setup.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,7 +91,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=cuda${{ matrix.cuda_version }},ignore-error=true
 
   build-gpu:
-    needs: build-docker
+    needs: [setup, build-docker]
+    if: needs.setup.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,27 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - cuda_version: "118"
-            cuda_path: "11.8"
-            cuda_arch: "70;75;80;86;89;90"
-            package_dir: "cukks-cu118"
-            gcc_toolset: "11"
-          - cuda_version: "121"
-            cuda_path: "12.1"
-            cuda_arch: "70;75;80;86;89;90"
-            package_dir: "cukks-cu121"
-            gcc_toolset: "12"
-          - cuda_version: "124"
-            cuda_path: "12.4"
-            cuda_arch: "70;75;80;86;89;90"
-            package_dir: "cukks-cu124"
-            gcc_toolset: "13"
-          - cuda_version: "128"
-            cuda_path: "12.8"
-            cuda_arch: "70;75;80;86;89;90;120"
-            package_dir: "cukks-cu128"
-            gcc_toolset: "13"
+        include: ${{ fromJson(needs.setup.outputs.build_gpu_matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -147,13 +167,14 @@ jobs:
           path: wheelhouse/*.whl
 
   test-gpu:
-    needs: build-gpu
+    needs: [setup, build-gpu]
+    if: needs.setup.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        cuda_version: ["118", "121", "124", "128"]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        cuda_version: ${{ fromJson(needs.setup.outputs.test_gpu_cuda_versions) }}
+        python-version: ${{ fromJson(needs.setup.outputs.test_gpu_python_versions) }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -186,6 +207,8 @@ jobs:
           echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
 
   build-main:
+    needs: setup
+    if: needs.setup.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -119,11 +119,64 @@ jobs:
           print(f"PyPI preflight OK for version {version}")
           PY
 
+  preflight-ghcr:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Fail if any target GHCR CUDA image version tag already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          owner = os.environ['OWNER']
+          version = os.environ['VERSION']
+          existing = []
+
+          for cuda in ('118', '121', '124', '128'):
+              package_name = f'manylinux-cuda{cuda}'
+              result = subprocess.run(
+                  [
+                      'gh', 'api',
+                      f'/users/{owner}/packages/container/{package_name}/versions',
+                      '--paginate'
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode != 0:
+                  continue
+              versions = json.loads(result.stdout or '[]')
+              for item in versions:
+                  for tag in item.get('metadata', {}).get('container', {}).get('tags', []):
+                      if tag == f'v{version}':
+                          existing.append(f'{package_name}:v{version}')
+                          break
+
+          if existing:
+              print('GHCR image tags already exist:')
+              for item in existing:
+                  print(f'- {item}')
+              sys.exit(1)
+
+          print(f'GHCR preflight OK for v{version}')
+          PY
+
   build-docker:
     needs:
       - validate-version
       - preflight-pypi
-    if: ${{ always() && needs.validate-version.result == 'success' && (needs.preflight-pypi.result == 'success' || needs.preflight-pypi.result == 'skipped') }}
+      - preflight-ghcr
+    if: ${{ always() && needs.validate-version.result == 'success' && needs.preflight-ghcr.result == 'success' && (needs.preflight-pypi.result == 'success' || needs.preflight-pypi.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
