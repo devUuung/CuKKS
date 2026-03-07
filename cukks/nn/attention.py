@@ -113,6 +113,92 @@ class EncryptedApproxAttention(EncryptedModule):
             return x
         return x.matmul(weight, bias)
 
+    def _packed_token_mask(self, x: "EncryptedTensor", token_index: int, seq_len: int) -> List[float]:
+        batch_size = getattr(x, "_batch_size", None)
+        slots_per_sample = getattr(x, "_slots_per_sample", None)
+        if batch_size is None or slots_per_sample is None:
+            raise RuntimeError("Packed attention requires packed batch metadata")
+
+        embed_dim = self.embed_dim
+        if slots_per_sample != seq_len * embed_dim:
+            raise RuntimeError(
+                f"Packed attention expected slots_per_sample={seq_len * embed_dim}, got {slots_per_sample}."
+            )
+
+        slot_count = x._cipher.size
+        active_size = batch_size * slots_per_sample
+        start_in_sample = token_index * embed_dim
+        mask = [0.0] * slot_count
+        for batch_idx in range(batch_size):
+            block_start = batch_idx * slots_per_sample + start_in_sample
+            for offset in range(embed_dim):
+                pos = block_start + offset
+                if pos < active_size:
+                    mask[pos] = 1.0
+        return mask
+
+    def _forward_attention_packed(self, x: "EncryptedTensor") -> "EncryptedTensor":
+        sample_shape = getattr(x, "_packed_sample_shape", None) or x.shape[1:]
+        if len(sample_shape) == 1:
+            if sample_shape[0] != self.embed_dim:
+                raise RuntimeError(
+                    f"Packed attention expected sample shape ({self.embed_dim},), got {sample_shape}."
+                )
+
+            q = self._apply_projection(x, self.q_weight, self.q_bias)
+            k = self._apply_projection(x, self.k_weight, self.k_bias)
+            v = self._apply_projection(x, self.v_weight, self.v_bias)
+            scores = q.mul(k).rescale().sum_and_broadcast(self.embed_dim).mul(self.scale).rescale()
+            attn_weights = self._approx_softmax_row(scores, seq_len=1)
+            output = attn_weights.mul(v).rescale()
+            output = self._apply_projection(output, self.out_weight, self.out_bias)
+            return output
+
+        if len(sample_shape) != 2 or sample_shape[1] != self.embed_dim:
+            raise RuntimeError(
+                "Packed attention requires packed sample shape (seq_len, embed_dim), got "
+                f"{sample_shape}."
+            )
+
+        seq_len = sample_shape[0]
+        embed_dim = sample_shape[1]
+        ones_block = torch.ones(embed_dim, embed_dim, dtype=torch.float64)
+
+        q = self._apply_projection(x, self.q_weight, self.q_bias)
+        k = self._apply_projection(x, self.k_weight, self.k_bias)
+        v = self._apply_projection(x, self.v_weight, self.v_bias)
+
+        outputs = []
+        for query_index in range(seq_len):
+            query_mask = self._packed_token_mask(x, query_index, seq_len)
+            outside_fill = [-2.0 * (1.0 - value) for value in query_mask]
+            scores = []
+            for key_index in range(seq_len):
+                offset = (key_index - query_index) * embed_dim
+                aligned_product = q.mul(k.rotate(offset)).rescale()
+                masked_scores = aligned_product.mul(query_mask).rescale()
+                score = masked_scores.view(getattr(x, "_batch_size", 1), seq_len, embed_dim).matmul(ones_block)
+                score = score.mul(self.scale).rescale()
+                score = score.add(outside_fill)
+                scores.append(score)
+
+            weights = self._power_softmax(scores)
+            token_output = None
+            for key_index, weight in enumerate(weights):
+                offset = (key_index - query_index) * embed_dim
+                term = weight.mul(v.rotate(offset)).rescale()
+                token_output = term if token_output is None else token_output.add(term)
+
+            assert token_output is not None
+            outputs.append(token_output)
+
+        combined = outputs[0]
+        for token_output in outputs[1:]:
+            combined = combined.add(token_output)
+
+        combined = self._apply_projection(combined, self.out_weight, self.out_bias)
+        return combined.view(*x.shape)
+
     def _ct_dot(
         self, a: "EncryptedTensor", b: "EncryptedTensor", dim: int
     ) -> "EncryptedTensor":
@@ -195,10 +281,7 @@ class EncryptedApproxAttention(EncryptedModule):
         Raises NotImplementedError when seq_len > 1.
         """
         if getattr(x, "_packed_batch", False):
-            raise RuntimeError(
-                "EncryptedApproxAttention does not support packed-batch tensors in the standard "
-                "forward path. Use explicit multi-token inputs or add packed-batch attention support."
-            )
+            return self._forward_attention_packed(x)
         return cast("EncryptedTensor", self.forward_attention(x, x, x))
     
     def _forward_attention_multi(
@@ -211,12 +294,12 @@ class EncryptedApproxAttention(EncryptedModule):
         
         if seq_len == 0:
             return []
-        
+
         if seq_len > 8:
             raise NotImplementedError(
                 f"seq_len={seq_len} not supported. Maximum is 8 for Power-Softmax attention."
             )
-        
+         
         if seq_len != len(key) or seq_len != len(value):
             raise ValueError("query, key, value must have same length.")
         

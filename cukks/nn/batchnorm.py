@@ -156,17 +156,31 @@ class EncryptedBatchNorm1d(EncryptedModule):
             Encrypted output after affine transformation.
         """
         if getattr(x, "_packed_batch", False):
-            slots_per_sample = getattr(x, "_slots_per_sample", None)
-            if slots_per_sample != self.num_features:
+            sample_shape = getattr(x, "_packed_sample_shape", None) or x.shape[1:]
+            if len(sample_shape) == 0:
+                raise RuntimeError("EncryptedBatchNorm1d requires packed sample shape metadata")
+
+            if sample_shape[0] == self.num_features:
+                trailing = int(torch.tensor(sample_shape[1:]).prod().item()) if len(sample_shape) > 1 else 1
+                scale_pattern = self.scale.repeat_interleave(trailing).tolist()
+                shift_pattern = self.shift.repeat_interleave(trailing).tolist()
+            elif sample_shape[-1] == self.num_features:
+                leading = int(torch.tensor(sample_shape[:-1]).prod().item()) if len(sample_shape) > 1 else 1
+                scale_pattern = self.scale.repeat(leading).tolist()
+                shift_pattern = self.shift.repeat(leading).tolist()
+            else:
                 raise RuntimeError(
-                    "EncryptedBatchNorm1d requires slots_per_sample to match num_features for "
-                    f"packed batches, got {slots_per_sample} and {self.num_features}."
+                    "EncryptedBatchNorm1d requires packed sample shape to contain num_features on the "
+                    f"first or last axis, got sample_shape={sample_shape} and num_features={self.num_features}."
                 )
+        else:
+            scale_pattern = self.scale.tolist()
+            shift_pattern = self.shift.tolist()
 
         # y = scale * x + shift
-        result = x.mul(self.scale.tolist())
+        result = x.mul(scale_pattern)
         result = result.rescale()
-        result = result.add(self.shift.tolist())
+        result = result.add(shift_pattern)
         return result
     
     def mult_depth(self) -> int:
@@ -224,20 +238,34 @@ class EncryptedBatchNorm2d(EncryptedModule):
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply the affine transformation."""
-        if getattr(x, "_packed_batch", False):
-            raise RuntimeError(
-                "EncryptedBatchNorm2d does not support packed-batch tensors outside CNN layout. "
-                "Use fold_batchnorm=True in convert() for batched CNN inference."
-            )
-
         if hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             raise RuntimeError(
                 "EncryptedBatchNorm2d does not support CNN packed layout. "
                 "Use fold_batchnorm=True in convert() to fold BatchNorm into Conv2d."
             )
-        result = x.mul(self.scale.tolist())
+
+        if getattr(x, "_packed_batch", False):
+            sample_shape = getattr(x, "_packed_sample_shape", None) or x.shape[1:]
+            if len(sample_shape) == 3 and sample_shape[0] == self.num_features:
+                spatial = int(torch.tensor(sample_shape[1:]).prod().item())
+                scale_pattern = self.scale.repeat_interleave(spatial).tolist()
+                shift_pattern = self.shift.repeat_interleave(spatial).tolist()
+            elif len(sample_shape) == 2 and sample_shape[1] == self.num_features:
+                repeats = sample_shape[0]
+                scale_pattern = self.scale.repeat(repeats).tolist()
+                shift_pattern = self.shift.repeat(repeats).tolist()
+            else:
+                raise RuntimeError(
+                    "EncryptedBatchNorm2d requires packed sample shape (C,H,W) or (num_patches,C), got "
+                    f"sample_shape={sample_shape} with num_features={self.num_features}."
+                )
+        else:
+            scale_pattern = self.scale.tolist()
+            shift_pattern = self.shift.tolist()
+
+        result = x.mul(scale_pattern)
         result = result.rescale()
-        result = result.add(self.shift.tolist())
+        result = result.add(shift_pattern)
         return result
     
     def mult_depth(self) -> int:
