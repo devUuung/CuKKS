@@ -262,6 +262,142 @@ jobs:
       publish_pypi: false
     secrets: inherit
 
+  build_gpu:
+    if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' }}
+    needs:
+      - validate
+      - publish_packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cuda_version: "118"
+            cuda_path: "11.8"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu118"
+            gcc_toolset: "11"
+          - cuda_version: "121"
+            cuda_path: "12.1"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu121"
+            gcc_toolset: "12"
+          - cuda_version: "124"
+            cuda_path: "12.4"
+            cuda_arch: "70;75;80;86;89;90"
+            package_dir: "cukks-cu124"
+            gcc_toolset: "13"
+          - cuda_version: "128"
+            cuda_path: "12.8"
+            cuda_arch: "70;75;80;86;89;90;120"
+            package_dir: "cukks-cu128"
+            gcc_toolset: "13"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Get lowercase repo name
+        id: repo
+        run: echo "lowercase=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build GPU wheels (CUDA ${{ matrix.cuda_version }})
+        uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: ${{ matrix.package_dir }}
+        env:
+          CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            echo "CC=$CC CXX=$CXX CUDA_HOME=$CUDA_HOME"
+            echo "PATH=$PATH"
+            $CC --version
+            nvcc --version || echo "nvcc not found"
+            cd /project/openfhe-gpu-public
+            mkdir -p build && cd build
+            cmake .. \
+                -DWITH_CUDA=ON \
+                -DWITH_OPENMP=ON \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_C_COMPILER=$CC \
+                -DCMAKE_CXX_COMPILER=$CXX \
+                -DBUILD_SHARED=ON \
+                -DBUILD_EXAMPLES=OFF \
+                -DBUILD_UNITTESTS=OFF \
+                -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.cuda_arch }}" \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                -DOPENFHE_SKIP_EXPORT=ON
+            make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
+            mkdir -p /usr/local/lib /usr/local/include/openfhe
+            cp -a lib/*.so* /usr/local/lib/
+            cp -a ../src/core/include/* /usr/local/include/
+            cp -a ../src/pke/include/* /usr/local/include/
+            cp -a ../src/binfhe/include/* /usr/local/include/
+            cp -a src/core/config_core.h /usr/local/include/openfhe/
+            ldconfig
+          CIBW_ENVIRONMENT_LINUX: >
+            OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
+            OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
+            CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_path }}
+            PATH=/usr/local/cuda-${{ matrix.cuda_path }}/bin:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_path }}/lib64:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/lib64:$LD_LIBRARY_PATH
+            CC=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: wheelhouse/*.whl
+
+  test_gpu:
+    if: ${{ inputs.publish_pypi && needs.build_gpu.result == 'success' }}
+    needs:
+      - build_gpu
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ["118", "121", "124", "128"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: wheelhouse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test GPU wheel structure (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+
+          SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+          test -f "$SITE_PACKAGES/ckks/__init__.py"
+          test -f "$SITE_PACKAGES/ckks/torch_api.py"
+          test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_backend.cpython-*.so
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
+
   publish_main:
     if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' }}
     needs:
@@ -279,12 +415,15 @@ jobs:
 
       - name: Publish cukks to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   publish_gpu:
-    if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' }}
+    if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' && needs.test_gpu.result == 'success' }}
     needs:
       - validate
       - publish_packages
+      - test_gpu
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -301,13 +440,17 @@ jobs:
 
       - name: Publish cukks-cu${{ matrix.cuda_version }} to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   finalize_release:
-    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') && (needs.publish_main.result == 'success' || needs.publish_main.result == 'skipped') && (needs.publish_gpu.result == 'success' || needs.publish_gpu.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') && (needs.build_gpu.result == 'success' || needs.build_gpu.result == 'skipped') && (needs.test_gpu.result == 'success' || needs.test_gpu.result == 'skipped') && (needs.publish_main.result == 'success' || needs.publish_main.result == 'skipped') && (needs.publish_gpu.result == 'success' || needs.publish_gpu.result == 'skipped') }}
     needs:
       - validate
       - create_release
       - publish_packages
+      - build_gpu
+      - test_gpu
       - publish_main
       - publish_gpu
     runs-on: ubuntu-latest
