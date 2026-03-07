@@ -204,6 +204,11 @@ jobs:
           name: release-notes
           path: .
 
+      - name: Configure git author for release tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Create annotated tag
         run: |
           git tag -a "${{ needs.validate.outputs.tag }}" "${{ needs.prepare_release_commit.outputs.release_sha }}" -m "Release ${{ needs.validate.outputs.tag }}"
