@@ -53,15 +53,6 @@ class EncryptedModule(ABC):
         if isinstance(x, list):
             return [self.__call__(item) for item in x]
 
-        if getattr(x, "_packed_batch", False):
-            context = getattr(x, "_context", None)
-            if context is None or not hasattr(context, "_forward_packed_batch"):
-                raise RuntimeError(
-                    "Packed batch input requires context batch-forward support. "
-                    "Use CKKSInferenceContext from cukks.context."
-                )
-            return context._forward_packed_batch(self, x)
-
         return self.forward(x)
     
     def register_module(self, name: str, module: Optional["EncryptedModule"]) -> None:
