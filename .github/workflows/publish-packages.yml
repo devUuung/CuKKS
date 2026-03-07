@@ -389,3 +389,21 @@ jobs:
 
       - name: Publish cukks-cu${{ matrix.cuda_version }} to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  finalize:
+    if: ${{ always() }}
+    needs:
+      - build-main
+      - build-gpu
+      - test-gpu
+      - publish-main
+      - publish-gpu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finalize publish workflow
+        run: |
+          echo "build-main=${{ needs.build-main.result }}"
+          echo "build-gpu=${{ needs.build-gpu.result }}"
+          echo "test-gpu=${{ needs.test-gpu.result }}"
+          echo "publish-main=${{ needs.publish-main.result }}"
+          echo "publish-gpu=${{ needs.publish-gpu.result }}"
