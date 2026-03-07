@@ -29,7 +29,7 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[a-zA-Z0-9.-]+)?$")
 
 def replace_version(path: Path, pattern: re.Pattern[str], version: str) -> bool:
     text = path.read_text(encoding="utf-8")
-    new_text, count = pattern.subn(rf"\1{version}\3", text, count=1)
+    new_text, count = pattern.subn(rf"\g<1>{version}\g<3>", text, count=1)
     if count != 1:
         raise ValueError(f"Expected exactly one version field in {path}")
     if new_text != text:
