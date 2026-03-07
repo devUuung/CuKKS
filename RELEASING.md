@@ -27,6 +27,8 @@ This repository uses an issue-driven release flow:
 - open a PR for the issue
 - assign the PR to the same milestone
 
+External contributors should follow `CONTRIBUTING.md` for the issue and PR workflow. Milestone planning and release execution remain maintainer responsibilities.
+
 ### 2. Merge PRs into `main`
 
 - all PR validation happens in `.github/workflows/build-wheels.yml`
@@ -66,6 +68,8 @@ The workflow will:
 6. call `.github/workflows/publish-packages.yml` to build and publish packages
 7. optionally publish the GitHub release if `draft` is false
 
+See `docs/ci-cd.md` for the full automation layout and how this workflow connects to CI and package publishing.
+
 ## Recovery and manual publish
 
 Use `.github/workflows/publish-packages.yml` only for controlled recovery.
@@ -80,3 +84,4 @@ Use `.github/workflows/publish-packages.yml` only for controlled recovery.
 - do not publish by creating a GitHub release manually in the UI
 - do not reuse old tags for new package contents
 - do not cut a release until all package version files match the target version
+- do not release a milestone while it still contains unmerged PRs

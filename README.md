@@ -216,6 +216,20 @@ python -m cukks.examples.encrypted_inference --demo conversion
 python examples/mnist_encrypted.py --hidden 64 --samples 5
 ```
 
+## Contributing
+
+External contributions are welcome.
+
+- start with an issue using the templates in `.github/ISSUE_TEMPLATE/`
+- open a PR using `.github/pull_request_template.md`
+- maintainers assign milestones and cut releases from closed milestones
+
+Read:
+
+- `CONTRIBUTING.md` for the contributor workflow
+- `docs/ci-cd.md` for CI/CD behavior
+- `RELEASING.md` for milestone-based release operations
+
 <details>
 <summary><strong>CNN example</strong></summary>
 
