@@ -44,8 +44,6 @@ jobs:
       release_title: ${{ steps.meta.outputs.release_title }}
       milestone_title: ${{ steps.validate.outputs.milestone_title }}
       version: ${{ steps.meta.outputs.version }}
-      tag_exists: ${{ steps.validate.outputs.tag_exists }}
-      release_exists: ${{ steps.validate.outputs.release_exists }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,21 +91,6 @@ jobs:
           subprocess.check_call(["git", "fetch", "origin", target_ref, "--tags"])
           subprocess.check_call(["git", "merge-base", "--is-ancestor", f"origin/{target_ref}", "HEAD"])
 
-          existing_tag = subprocess.run(
-              ["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"],
-              capture_output=True,
-              text=True,
-              check=True,
-          )
-          tag_exists = bool(existing_tag.stdout.strip())
-
-          release = subprocess.run(
-              ["gh", "release", "view", f"v{version}", "--repo", repo, "--json", "tagName"],
-              capture_output=True,
-              text=True,
-          )
-          release_exists = release.returncode == 0
-
           items = gh_json("api", f"repos/{repo}/issues?milestone={milestone_number}&state=closed&per_page=100")
           prs = []
           issues = []
@@ -153,8 +136,6 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"milestone_title={milestone['title']}\n")
-              fh.write(f"tag_exists={'true' if tag_exists else 'false'}\n")
-              fh.write(f"release_exists={'true' if release_exists else 'false'}\n")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -196,7 +177,7 @@ jobs:
         id: release-sha
         run: echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  create_release:
+  ensure_tag:
     needs:
       - validate
       - prepare_release_commit
@@ -209,49 +190,30 @@ jobs:
           ref: ${{ needs.prepare_release_commit.outputs.release_sha }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-notes
-          path: .
-
       - name: Configure git author for release tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create annotated tag
-        if: ${{ needs.validate.outputs.tag_exists != 'true' }}
+      - name: Ensure annotated tag points to release commit
         run: |
-          git tag -a "${{ needs.validate.outputs.tag }}" "${{ needs.prepare_release_commit.outputs.release_sha }}" -m "Release ${{ needs.validate.outputs.tag }}"
-          git push origin "${{ needs.validate.outputs.tag }}"
+          TAG="${{ needs.validate.outputs.tag }}"
+          RELEASE_SHA="${{ needs.prepare_release_commit.outputs.release_sha }}"
+          tag_sha="$(git ls-remote --tags origin "refs/tags/${TAG}^{}" | cut -f1)"
 
-      - name: Create draft GitHub release
-        if: ${{ needs.validate.outputs.release_exists != 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ needs.validate.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --draft \
-            --title "${{ needs.validate.outputs.release_title }}" \
-            --notes-file release-notes.md \
-            --target "${{ needs.prepare_release_commit.outputs.release_sha }}"
-
-      - name: Refresh existing draft GitHub release
-        if: ${{ needs.validate.outputs.release_exists == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release edit "${{ needs.validate.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --title "${{ needs.validate.outputs.release_title }}" \
-            --notes-file release-notes.md
+          if [ -z "$tag_sha" ]; then
+            git tag -a "$TAG" "$RELEASE_SHA" -m "Release $TAG"
+            git push origin "refs/tags/$TAG"
+          elif [ "$tag_sha" != "$RELEASE_SHA" ]; then
+            echo "Tag $TAG already exists at $tag_sha, expected $RELEASE_SHA"
+            exit 1
+          fi
 
   publish_packages:
     if: ${{ inputs.publish_pypi }}
     needs:
       - validate
-      - create_release
+      - ensure_tag
     permissions:
       contents: read
       packages: write
@@ -321,6 +283,9 @@ jobs:
             set -ex
             git config --global --unset-all http.https://github.com/.extraheader || true
             git config --global url.https://github.com/.insteadOf git@github.com: || true
+            rm -rf /project/cnmem
+            mkdir -p /project/cnmem
+            curl -fsSL https://codeload.github.com/NVIDIA/cnmem/tar.gz/refs/heads/master | tar -xz --strip-components=1 -C /project/cnmem
             echo "CC=$CC CXX=$CXX CUDA_HOME=$CUDA_HOME"
             echo "PATH=$PATH"
             $CC --version
@@ -339,6 +304,7 @@ jobs:
                 -DBUILD_UNITTESTS=OFF \
                 -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.cuda_arch }}" \
                 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                -DFETCHCONTENT_SOURCE_DIR_CNMEM=/project/cnmem \
                 -DOPENFHE_SKIP_EXPORT=ON
             make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
             mkdir -p /usr/local/lib /usr/local/include/openfhe
@@ -446,10 +412,10 @@ jobs:
           skip-existing: true
 
   finalize_release:
-    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') && (needs.build_gpu.result == 'success' || needs.build_gpu.result == 'skipped') && (needs.test_gpu.result == 'success' || needs.test_gpu.result == 'skipped') && (needs.publish_main.result == 'success' || needs.publish_main.result == 'skipped') && (needs.publish_gpu.result == 'success' || needs.publish_gpu.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.ensure_tag.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') && (needs.build_gpu.result == 'success' || needs.build_gpu.result == 'skipped') && (needs.test_gpu.result == 'success' || needs.test_gpu.result == 'skipped') && (needs.publish_main.result == 'success' || needs.publish_main.result == 'skipped') && (needs.publish_gpu.result == 'success' || needs.publish_gpu.result == 'skipped') }}
     needs:
       - validate
-      - create_release
+      - ensure_tag
       - publish_packages
       - build_gpu
       - test_gpu
@@ -459,11 +425,47 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Upsert canonical GitHub release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.validate.outputs.tag }}"
+          TITLE="${{ needs.validate.outputs.release_title }}"
+          REPO="${{ github.repository }}"
+          release_ids="$(gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[] | select(.tag_name=="'"$TAG"'") | .id')"
+          count="$(printf '%s\n' "$release_ids" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+          if [ "$count" -gt 1 ]; then
+            echo "Multiple releases already exist for $TAG"
+            printf '%s\n' "$release_ids"
+            exit 1
+          elif [ "$count" -eq 0 ]; then
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --draft \
+              --title "$TITLE" \
+              --notes-file release-notes.md
+            release_id="$(gh api "repos/$REPO/releases/tags/$TAG" --jq .id)"
+          else
+            release_id="$release_ids"
+          fi
+
+          gh api "repos/$REPO/releases/$release_id" -X PATCH \
+            -f name="$TITLE" \
+            -f tag_name="$TAG" \
+            -F body=@release-notes.md
+
       - name: Publish draft release when requested
         if: ${{ !inputs.draft }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release edit "${{ needs.validate.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --draft=false
+          release_id="$(gh api "repos/${{ github.repository }}/releases/tags/${{ needs.validate.outputs.tag }}" --jq .id)"
+          gh api "repos/${{ github.repository }}/releases/${release_id}" -X PATCH \
+            -f draft=false \
+            -f make_latest=true
