@@ -225,6 +225,10 @@ jobs:
     needs:
       - validate
       - create_release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     uses: ./.github/workflows/publish-packages.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}
