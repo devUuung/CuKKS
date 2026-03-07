@@ -44,8 +44,6 @@ jobs:
 
       - name: Derive release version from checked-out source
         id: version
-        env:
-          GITHUB_OUTPUT_PATH: ${{ github.output }}
         run: |
           python - <<'PY'
           import os
@@ -54,7 +52,7 @@ jobs:
 
           data = tomllib.loads(Path('pyproject.toml').read_text())
           version = data['project']['version']
-          with open(Path(os.environ['GITHUB_OUTPUT_PATH']), 'a', encoding='utf-8') as fh:
+          with open(Path(os.environ['GITHUB_OUTPUT']), 'a', encoding='utf-8') as fh:
               fh.write(f'version={version}\n')
           PY
 
