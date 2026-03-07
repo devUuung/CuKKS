@@ -82,6 +82,12 @@ class EncryptedLayerNorm(EncryptedModule):
         Returns:
             Encrypted output after layer normalization.
         """
+        if getattr(x, "_packed_batch", False):
+            raise RuntimeError(
+                "EncryptedLayerNorm does not yet support packed-batch tensors. "
+                "Add a per-sample packed reduction path before using it in batched SIMD inference."
+            )
+
         import math
         n = math.prod(self.normalized_shape)
         

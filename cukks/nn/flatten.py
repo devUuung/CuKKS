@@ -4,6 +4,7 @@ EncryptedFlatten - Flatten operation for encrypted tensors.
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from .module import EncryptedModule
@@ -57,7 +58,26 @@ class EncryptedFlatten(EncryptedModule):
         # Check if this is CNN-packed data
         if hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             return self._forward_he_packed(x)
-        
+
+        if getattr(x, '_packed_batch', False) and x.shape:
+            start_dim = self.start_dim
+            end_dim = self.end_dim
+            ndim = len(x.shape)
+
+            if start_dim < 0:
+                start_dim += ndim
+            if end_dim < 0:
+                end_dim += ndim
+
+            if not 0 <= start_dim <= end_dim < ndim:
+                raise ValueError(
+                    f"Invalid flatten dims for shape {x.shape}: start_dim={self.start_dim}, end_dim={self.end_dim}"
+                )
+
+            flattened = math.prod(x.shape[start_dim:end_dim + 1])
+            new_shape = x.shape[:start_dim] + (flattened,) + x.shape[end_dim + 1:]
+            return x.view(*new_shape)
+
         # For encrypted tensors, flatten is just a reshape
         return x.flatten()
     
@@ -77,6 +97,8 @@ class EncryptedFlatten(EncryptedModule):
         avoid OOM for standard image sizes.
         """
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedFlatten requires _cnn_layout metadata for packed CNN input")
         num_patches = layout['num_patches']  # H * W
         num_channels = layout['patch_features']  # C
         

@@ -194,6 +194,11 @@ class EncryptedApproxAttention(EncryptedModule):
         For self-attention, uses x as query, key, and value.
         Raises NotImplementedError when seq_len > 1.
         """
+        if getattr(x, "_packed_batch", False):
+            raise RuntimeError(
+                "EncryptedApproxAttention does not support packed-batch tensors in the standard "
+                "forward path. Use explicit multi-token inputs or add packed-batch attention support."
+            )
         return cast("EncryptedTensor", self.forward_attention(x, x, x))
     
     def _forward_attention_multi(

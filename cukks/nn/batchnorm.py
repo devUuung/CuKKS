@@ -155,17 +155,18 @@ class EncryptedBatchNorm1d(EncryptedModule):
         Returns:
             Encrypted output after affine transformation.
         """
+        if getattr(x, "_packed_batch", False):
+            slots_per_sample = getattr(x, "_slots_per_sample", None)
+            if slots_per_sample != self.num_features:
+                raise RuntimeError(
+                    "EncryptedBatchNorm1d requires slots_per_sample to match num_features for "
+                    f"packed batches, got {slots_per_sample} and {self.num_features}."
+                )
+
         # y = scale * x + shift
-        slot_count = x._cipher.size
-        scale_list = self.scale.tolist()
-        shift_list = self.shift.tolist()
-        if len(scale_list) < slot_count:
-            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
-        if len(shift_list) < slot_count:
-            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
-        result = x.mul(scale_list)
+        result = x.mul(self.scale.tolist())
         result = result.rescale()
-        result = result.add(shift_list)
+        result = result.add(self.shift.tolist())
         return result
     
     def mult_depth(self) -> int:
@@ -223,21 +224,20 @@ class EncryptedBatchNorm2d(EncryptedModule):
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply the affine transformation."""
+        if getattr(x, "_packed_batch", False):
+            raise RuntimeError(
+                "EncryptedBatchNorm2d does not support packed-batch tensors outside CNN layout. "
+                "Use fold_batchnorm=True in convert() for batched CNN inference."
+            )
+
         if hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             raise RuntimeError(
                 "EncryptedBatchNorm2d does not support CNN packed layout. "
                 "Use fold_batchnorm=True in convert() to fold BatchNorm into Conv2d."
             )
-        slot_count = x._cipher.size
-        scale_list = self.scale.tolist()
-        shift_list = self.shift.tolist()
-        if len(scale_list) < slot_count:
-            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
-        if len(shift_list) < slot_count:
-            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
-        result = x.mul(scale_list)
+        result = x.mul(self.scale.tolist())
         result = result.rescale()
-        result = result.add(shift_list)
+        result = result.add(self.shift.tolist())
         return result
     
     def mult_depth(self) -> int:
