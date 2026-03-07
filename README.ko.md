@@ -222,8 +222,8 @@ python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 기여를 원하신다면 먼저 아래 문서를 읽어 주세요.
 
-- `CONTRIBUTING.ko.md`
-- `docs/ci-cd.ko.md`
+- [기여 가이드](CONTRIBUTING.ko.md)
+- [CI/CD 개요](docs/ci-cd.ko.md)
 
 기본 흐름은 다음과 같습니다.
 
@@ -233,9 +233,9 @@ python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 추가 문서:
 
-- `CONTRIBUTING.ko.md` - 외부 기여자 참여 흐름
-- `docs/ci-cd.ko.md` - CI/CD 구조
-- `RELEASING.md` - milestone 기반 릴리즈 운영
+- [기여 가이드](CONTRIBUTING.ko.md) - 외부 기여자 참여 흐름
+- [CI/CD 개요](docs/ci-cd.ko.md) - CI/CD 구조
+- [릴리즈 운영](RELEASING.md) - milestone 기반 릴리즈 운영
 
 <details>
 <summary><strong>CNN 예제</strong></summary>

@@ -222,8 +222,8 @@ External contributions are welcome.
 
 If you want to contribute to CuKKS, start here first:
 
-- `CONTRIBUTING.md`
-- `docs/ci-cd.md`
+- [Contributor workflow](CONTRIBUTING.md)
+- [CI/CD overview](docs/ci-cd.md)
 
 - start with an issue using the templates in `.github/ISSUE_TEMPLATE/`
 - open a PR using `.github/pull_request_template.md`
@@ -231,9 +231,9 @@ If you want to contribute to CuKKS, start here first:
 
 Read:
 
-- `CONTRIBUTING.md` for the contributor workflow
-- `docs/ci-cd.md` for CI/CD behavior
-- `RELEASING.md` for milestone-based release operations
+- [Contributor workflow](CONTRIBUTING.md)
+- [CI/CD overview](docs/ci-cd.md)
+- [Milestone release operations](RELEASING.md)
 
 <details>
 <summary><strong>CNN example</strong></summary>
