@@ -319,6 +319,8 @@ jobs:
           CIBW_MANYLINUX_X86_64_IMAGE: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
           CIBW_BEFORE_ALL_LINUX: |
             set -ex
+            git config --global --unset-all http.https://github.com/.extraheader || true
+            git config --global url.https://github.com/.insteadOf git@github.com: || true
             echo "CC=$CC CXX=$CXX CUDA_HOME=$CUDA_HOME"
             echo "PATH=$PATH"
             $CC --version
