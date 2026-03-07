@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-packages-${{ inputs.ref || github.ref }}
+  group: publish-packages-${{ inputs.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -61,7 +61,7 @@ jobs:
           python scripts/set_release_version.py "${{ steps.version.outputs.version }}"
 
   preflight-pypi:
-    if: inputs.publish_pypi
+    if: ${{ inputs.publish_pypi }}
     needs: derive-version
     runs-on: ubuntu-latest
     steps:
@@ -351,7 +351,7 @@ jobs:
           path: dist/*
 
   publish-main:
-    if: inputs.publish_pypi
+    if: ${{ inputs.publish_pypi }}
     needs:
       - build-main
       - test-gpu
@@ -369,7 +369,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-gpu:
-    if: inputs.publish_pypi
+    if: ${{ inputs.publish_pypi }}
     needs:
       - build-main
       - test-gpu

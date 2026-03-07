@@ -221,7 +221,7 @@ jobs:
             --target "${{ needs.prepare_release_commit.outputs.release_sha }}"
 
   publish_packages:
-    if: inputs.publish_pypi
+    if: ${{ inputs.publish_pypi }}
     needs:
       - validate
       - create_release
