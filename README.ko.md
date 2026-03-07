@@ -290,9 +290,11 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## 문서
 
+- [문서 인덱스](docs/ko/README.md)
 - [API 레퍼런스](docs/api.md)
 - [GPU 가속 가이드](docs/gpu-acceleration.md)
 - [CKKS 개념](docs/concepts.md)
+- [예제 개요](docs/examples/README.md)
 
 ## 라이선스
 

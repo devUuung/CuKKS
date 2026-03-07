@@ -288,9 +288,11 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 ## Documentation
 
+- [Documentation Index](docs/README.md)
 - [API Reference](docs/api.md)
 - [GPU Acceleration Guide](docs/gpu-acceleration.md)
 - [CKKS Concepts](docs/concepts.md)
+- [Examples Overview](docs/examples/README.md)
 
 ## License
 
