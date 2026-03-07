@@ -42,7 +42,7 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       release_title: ${{ steps.meta.outputs.release_title }}
-      milestone_title: ${{ steps.meta.outputs.milestone_title }}
+      milestone_title: ${{ steps.validate.outputs.milestone_title }}
       version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +58,7 @@ jobs:
           echo "release_title=v${{ inputs.milestone_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Validate milestone and generate release notes
+        id: validate
         env:
           GH_TOKEN: ${{ github.token }}
           MILESTONE_NAME: ${{ inputs.milestone_name }}
