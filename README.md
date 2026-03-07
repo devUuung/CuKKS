@@ -94,7 +94,6 @@ cukks-install-backend --status    # Show CUDA compatibility status
 | Variable | Effect |
 |----------|--------|
 | `CUKKS_BACKEND=cukks-cu128` | Force a specific backend |
-| `CUKKS_NO_BACKEND=1` | Skip backend (CPU-only) |
 
 </details>
 
@@ -216,6 +215,25 @@ python -m cukks.examples.encrypted_inference --demo conversion
 python examples/mnist_encrypted.py --hidden 64 --samples 5
 ```
 
+## Contributing
+
+External contributions are welcome.
+
+If you want to contribute to CuKKS, start here first:
+
+- [Contributor workflow](CONTRIBUTING.md)
+- [CI/CD overview](docs/ci-cd.md)
+
+- start with an issue using the templates in `.github/ISSUE_TEMPLATE/`
+- open a PR using `.github/pull_request_template.md`
+- maintainers assign milestones and cut releases from closed milestones
+
+Read:
+
+- [Contributor workflow](CONTRIBUTING.md)
+- [CI/CD overview](docs/ci-cd.md)
+- [Milestone release operations](RELEASING.md)
+
 <details>
 <summary><strong>CNN example</strong></summary>
 
@@ -259,19 +277,13 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 </details>
 
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Out of Memory | Reduce `poly_mod_degree` (8192 instead of 16384) |
-| Low Accuracy | Increase `activation_degree` (e.g., 8 or 16) for better approximation |
-| Slow Performance | Enable batch processing, reduce network depth |
-
 ## Documentation
 
+- [Documentation Index](docs/README.md)
 - [API Reference](docs/api.md)
 - [GPU Acceleration Guide](docs/gpu-acceleration.md)
 - [CKKS Concepts](docs/concepts.md)
+- [Examples Overview](docs/examples/README.md)
 
 ## License
 

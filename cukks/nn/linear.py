@@ -5,7 +5,7 @@ EncryptedLinear - Encrypted linear (fully connected) layer.
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -72,6 +72,11 @@ class EncryptedLinear(EncryptedModule):
         self.register_parameter("weight", self.weight)
         if self.bias is not None:
             self.register_parameter("bias", self.bias)
+
+    def __call__(self, x: Any) -> Any:
+        if isinstance(x, list):
+            return [self.__call__(item) for item in x]
+        return self.forward(x)
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Forward pass on encrypted input.

@@ -94,7 +94,6 @@ cukks-install-backend --status    # CUDA 호환성 상태 확인
 | 환경변수 | 효과 |
 |----------|--------|
 | `CUKKS_BACKEND=cukks-cu128` | 특정 백엔드 강제 지정 |
-| `CUKKS_NO_BACKEND=1` | 백엔드 건너뛰기 (CPU 전용) |
 
 </details>
 
@@ -216,6 +215,27 @@ python -m cukks.examples.encrypted_inference --demo conversion
 python examples/mnist_encrypted.py --hidden 64 --samples 5
 ```
 
+## 기여하기
+
+외부 기여도 환영합니다.
+
+기여를 원하신다면 먼저 아래 문서를 읽어 주세요.
+
+- [기여 가이드](CONTRIBUTING.ko.md)
+- [CI/CD 개요](docs/ci-cd.ko.md)
+
+기본 흐름은 다음과 같습니다.
+
+- `.github/ISSUE_TEMPLATE/` 템플릿으로 이슈를 먼저 생성
+- `.github/pull_request_template.md`를 사용해 PR 작성
+- 메인테이너가 milestone을 지정하고, 닫힌 milestone 기준으로 릴리즈 진행
+
+추가 문서:
+
+- [기여 가이드](CONTRIBUTING.ko.md) - 외부 기여자 참여 흐름
+- [CI/CD 개요](docs/ci-cd.ko.md) - CI/CD 구조
+- [릴리즈 운영](RELEASING.md) - milestone 기반 릴리즈 운영
+
 <details>
 <summary><strong>CNN 예제</strong></summary>
 
@@ -259,19 +279,13 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 
 </details>
 
-## 문제 해결
-
-| 문제 | 해결책 |
-|-------|----------|
-| 메모리 부족 | `poly_mod_degree` 감소 (16384 대신 8192) |
-| 낮은 정확도 | `activation_degree` 증가 (예: 8 또는 16) |
-| 느린 성능 | 배치 처리 활성화, 네트워크 깊이 감소 |
-
 ## 문서
 
+- [문서 인덱스](docs/ko/README.md)
 - [API 레퍼런스](docs/api.md)
 - [GPU 가속 가이드](docs/gpu-acceleration.md)
 - [CKKS 개념](docs/concepts.md)
+- [예제 개요](docs/examples/README.md)
 
 ## 라이선스
 

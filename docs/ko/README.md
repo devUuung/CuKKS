@@ -128,7 +128,9 @@ print(cukks.get_backend_info())
 
 - **[API 레퍼런스](api.md)**: 완전한 API 문서
 - **[CKKS 개념](concepts.md)**: 동형암호 이해하기
-- **[예제](../examples/)**: 동작하는 코드 예제
+- **[예제 개요](../examples/README.md)**: 동작하는 코드 예제
+- **[CI/CD 개요](../ci-cd.ko.md)**: 기여와 배포 자동화 구조
+- **[기여 가이드](../../CONTRIBUTING.ko.md)**: 외부 기여 참여 흐름
 
 ## 지원 레이어
 

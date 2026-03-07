@@ -232,6 +232,27 @@ class TestInferenceConfigForModel:
         assert cfg.poly_mod_degree == 65536
 
 
+class TestContextForDepthKwargs:
+
+    def test_for_depth_routes_config_and_context_kwargs(self):
+        ctx = CKKSInferenceContext.for_depth(
+            3,
+            scale_bits=30,
+            enable_bootstrap=True,
+            device="cpu",
+            use_bsgs=False,
+        )
+
+        assert ctx.config.scale_bits == 30
+        assert ctx.config.enable_bootstrap is True
+        assert ctx.device == "cpu"
+        assert ctx.use_bsgs is False
+
+    def test_for_depth_unknown_kwarg_raises(self):
+        with pytest.raises(TypeError, match="Unexpected keyword arguments for for_depth"):
+            CKKSInferenceContext.for_depth(3, not_a_real_kwarg=True)
+
+
 # ============================================================
 # convert() parameter forwarding
 # ============================================================

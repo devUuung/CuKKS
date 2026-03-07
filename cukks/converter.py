@@ -68,6 +68,7 @@ class ConversionOptions:
         activation_map: Mapping from PyTorch activations to encrypted versions.
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN-specific optimizations (Flatten absorption).
+        batch_size: Number of samples to pack per ciphertext for packed-batch inference.
     """
     
     def __init__(
@@ -77,12 +78,14 @@ class ConversionOptions:
         activation_map: Optional[Dict[Type[nn.Module], Type[EncryptedModule]]] = None,
         use_square_activation: bool = False,
         optimize_cnn: bool = True,
+        batch_size: int = 1,
     ):
         self.fold_batchnorm = fold_batchnorm
         self.activation_degree = activation_degree
         self.activation_map = activation_map if activation_map is not None else DEFAULT_ACTIVATION_MAP.copy()
         self.use_square_activation = use_square_activation
         self.optimize_cnn = optimize_cnn
+        self.batch_size = batch_size
 
 
 # =============================================================================
@@ -654,6 +657,7 @@ def convert(
     auto_bootstrap: Optional[bool] = None,
     bootstrap_threshold: int = 8,
     pre_encode: bool = False,
+    batch_size: int = 1,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -677,6 +681,8 @@ def convert(
             the cold-start latency on the first real inference at the cost of
             additional GPU memory and a one-time computation during conversion.
             Requires ``input_shape`` for CNN models.
+        batch_size: Number of samples to pack per ciphertext. When > 1, rotation
+            keys include cross-block offsets for native packed-batch inference.
         
     Returns:
         Tuple of (encrypted_model, context).
@@ -708,6 +714,7 @@ def convert(
         activation_degree=activation_degree,
         use_square_activation=use_square_activation,
         optimize_cnn=optimize_cnn,
+        batch_size=batch_size,
     )
     
     converter = ModelConverter(options, input_shape=input_shape)
@@ -742,6 +749,7 @@ def convert(
             auto_bootstrap=auto_bootstrap,
             bootstrap_threshold=bootstrap_threshold,
             enable_bootstrap=enable_bootstrap,
+            batch_size=batch_size,
         )
     
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:

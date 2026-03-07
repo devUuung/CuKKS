@@ -208,5 +208,7 @@ ctx = CKKSContext(config, enable_gpu=False)  # Force CPU mode
 ## See Also
 
 - [API Reference](../api.md)
+- [GPU Acceleration Guide](../gpu-acceleration.md)
+- [Documentation Index](../README.md)
 - [Korean Documentation](../ko/)
 - [Main README](../../README.md)

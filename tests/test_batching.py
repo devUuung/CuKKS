@@ -1,5 +1,6 @@
 """Tests for batched inference functionality."""
 
+import warnings
 from typing import Any
 
 import pytest
@@ -399,24 +400,147 @@ class TestBatchedInference:
         torch.testing.assert_close(recovered[0], expected[0], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(recovered[1], expected[1], rtol=1e-4, atol=1e-4)
 
-    def test_encrypt_batch_no_longer_warns_about_sample_splitting(self, monkeypatch: pytest.MonkeyPatch):
-        from cukks import CKKSInferenceContext
-        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
+class TestPackedBatchNativeExecution:
+
+    def _patch_mock_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from tests.mocks.mock_backend import MockCKKSConfig, MockCKKSContext
         import cukks.context as ctx_module
-        import warnings
 
         monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
         monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
         monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
 
-        ctx = CKKSInferenceContext(device="cpu")
+    def test_encrypt_batch_no_longer_warns_about_plaintext_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+
+        self._patch_mock_backend(monkeypatch)
+
+        ctx = CKKSInferenceContext(device="cpu", batch_size=2)
         samples = [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])]
 
-        with warnings.catch_warnings(record=True) as caught:
+        with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter("always")
-            ctx.encrypt_batch(samples)
+            enc_batch = ctx.encrypt_batch(samples)
 
-        assert all("sample-splitting" not in str(item.message) for item in caught)
+        assert getattr(enc_batch, "_packed_batch", False) is True
+        assert not any("decrypt/re-encrypt" in str(w.message) for w in record)
+
+    def test_legacy_packed_batch_fallback_raises(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+
+        self._patch_mock_backend(monkeypatch)
+
+        ctx = CKKSInferenceContext(device="cpu", batch_size=2)
+        enc_batch = ctx.encrypt_batch([torch.tensor([1.0]), torch.tensor([2.0])])
+
+        with pytest.raises(RuntimeError, match="fallback has been disabled"):
+            ctx._forward_packed_batch(object(), enc_batch)
+
+    def test_packed_batch_mlp_forward_never_decrypts(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+        from cukks.nn import EncryptedLinear, EncryptedSquare
+
+        self._patch_mock_backend(monkeypatch)
+
+        torch.manual_seed(42)
+        batch_size = 4
+        in_features = 8
+        hidden_features = 8
+        out_features = 4
+
+        fc1 = torch.nn.Linear(in_features, hidden_features)
+        fc2 = torch.nn.Linear(hidden_features, out_features)
+        ctx = CKKSInferenceContext(device="cpu", batch_size=batch_size, max_rotation_dim=in_features, use_bsgs=True)
+        enc_fc1 = EncryptedLinear.from_torch(fc1)
+        enc_sq = EncryptedSquare()
+        enc_fc2 = EncryptedLinear.from_torch(fc2)
+
+        samples = [torch.randn(in_features) for _ in range(batch_size)]
+        enc_batch = ctx.encrypt_batch(samples, slots_per_sample=in_features)
+
+        original_decrypt = ctx.decrypt
+        original_decrypt_batch = ctx.decrypt_batch
+
+        def _forbid(*args: Any, **kwargs: Any):
+            raise AssertionError("packed forward must not decrypt")
+
+        monkeypatch.setattr(ctx, "decrypt", _forbid)
+        monkeypatch.setattr(ctx, "decrypt_batch", _forbid)
+
+        enc_out = enc_fc2(enc_sq(enc_fc1(enc_batch)))
+
+        monkeypatch.setattr(ctx, "decrypt", original_decrypt)
+        monkeypatch.setattr(ctx, "decrypt_batch", original_decrypt_batch)
+
+        recovered = ctx.decrypt_batch(enc_out, num_samples=batch_size)
+
+        with torch.no_grad():
+            expected = [fc2(fc1(sample) ** 2) for sample in samples]
+
+        assert getattr(enc_out, "_packed_batch", False) is True
+        for exp, got in zip(expected, recovered):
+            torch.testing.assert_close(got[:out_features], exp.to(torch.float32), rtol=1e-4, atol=1e-4)
+
+    def test_packed_batch_cnn_forward_never_decrypts(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+        from cukks.nn import EncryptedAvgPool2d, EncryptedConv2d, EncryptedSquare
+
+        self._patch_mock_backend(monkeypatch)
+
+        torch.manual_seed(7)
+        batch_size = 3
+        channels = 1
+        height = 4
+        width = 4
+        out_channels = 2
+
+        conv = torch.nn.Conv2d(channels, out_channels, kernel_size=3, padding=1)
+        conv.eval()
+        enc_conv = EncryptedConv2d.from_torch(conv)
+        enc_sq = EncryptedSquare()
+        enc_pool = EncryptedAvgPool2d(kernel_size=2, stride=2)
+
+        ctx = CKKSInferenceContext(device="cpu", batch_size=batch_size, max_rotation_dim=64, use_bsgs=True)
+        images = [torch.randn(channels, height, width) for _ in range(batch_size)]
+        conv_params = [{"kernel_size": (3, 3), "stride": (1, 1), "padding": (1, 1)}]
+        enc_batch = ctx.encrypt_cnn_input_batch(images, conv_params)
+
+        original_decrypt = ctx.decrypt
+        original_decrypt_batch = ctx.decrypt_batch
+
+        def _forbid(*args: Any, **kwargs: Any):
+            raise AssertionError("packed forward must not decrypt")
+
+        monkeypatch.setattr(ctx, "decrypt", _forbid)
+        monkeypatch.setattr(ctx, "decrypt_batch", _forbid)
+
+        enc_out = enc_pool(enc_sq(enc_conv(enc_batch)))
+
+        monkeypatch.setattr(ctx, "decrypt", original_decrypt)
+        monkeypatch.setattr(ctx, "decrypt_batch", original_decrypt_batch)
+
+        recovered = ctx.decrypt_batch(enc_out, num_samples=batch_size)
+
+        with torch.no_grad():
+            expected = []
+            for image in images:
+                plain = conv(image.unsqueeze(0))
+                plain = plain.squeeze(0) ** 2
+                plain = torch.nn.functional.avg_pool2d(plain, kernel_size=2, stride=2)
+                expected.append(plain.permute(1, 2, 0).reshape(-1, out_channels).to(torch.float64))
+
+        assert getattr(enc_out, "_packed_batch", False) is True
+        assert enc_out._cnn_layout is not None
+        assert enc_out._cnn_layout.get("batch_size") == batch_size
+        sparse_positions = enc_out._cnn_layout["sparse_positions"]
+        slots_per_sample = enc_out._slots_per_sample
+        assert slots_per_sample is not None
+        values_per_sample = expected[0].numel()
+        for sample_idx, (exp, got) in enumerate(zip(expected, recovered)):
+            block_start = sample_idx * slots_per_sample
+            local_positions = [pos - block_start for pos in sparse_positions if block_start <= pos < block_start + slots_per_sample]
+            dense = got[local_positions[:values_per_sample]].reshape(4, out_channels)
+            torch.testing.assert_close(dense, exp.to(torch.float32), rtol=1e-4, atol=1e-4)
 
     def test_layernorm_supports_packed_batch(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
