@@ -54,7 +54,7 @@ jobs:
 
   build-docker:
     needs: setup
-    if: needs.setup.outputs.run_ci == 'true'
+    if: needs.setup.outputs.run_ci == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,7 +92,7 @@ jobs:
 
   build-gpu:
     needs: [setup, build-docker]
-    if: needs.setup.outputs.run_ci == 'true'
+    if: needs.setup.outputs.run_ci == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -166,9 +166,87 @@ jobs:
           name: wheels-gpu-cu${{ matrix.cuda_version }}
           path: wheelhouse/*.whl
 
+  build-gpu-pr:
+    needs: setup
+    if: needs.setup.outputs.run_ci == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.build_gpu_matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local CUDA image for PR wheel job
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/manylinux-cuda${{ matrix.cuda_version }}.Dockerfile
+          load: true
+          tags: local/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+          cache-from: type=gha,scope=pr-cuda${{ matrix.cuda_version }}
+          cache-to: type=gha,mode=max,scope=pr-cuda${{ matrix.cuda_version }},ignore-error=true
+
+      - name: Verify local CUDA image is available
+        run: docker image inspect local/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }} >/dev/null
+
+      - name: Build GPU wheels for PR (CUDA ${{ matrix.cuda_version }})
+        uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: ${{ matrix.package_dir }}
+        env:
+          CIBW_MANYLINUX_X86_64_IMAGE: local/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+          CIBW_BEFORE_ALL_LINUX: |
+            set -ex
+            echo "CC=$CC CXX=$CXX CUDA_HOME=$CUDA_HOME"
+            echo "PATH=$PATH"
+            $CC --version
+            nvcc --version || echo "nvcc not found"
+            cd /project/openfhe-gpu-public
+            mkdir -p build && cd build
+            cmake .. \
+                -DWITH_CUDA=ON \
+                -DWITH_OPENMP=ON \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/usr/local \
+                -DCMAKE_C_COMPILER=$CC \
+                -DCMAKE_CXX_COMPILER=$CXX \
+                -DBUILD_SHARED=ON \
+                -DBUILD_EXAMPLES=OFF \
+                -DBUILD_UNITTESTS=OFF \
+                -DCMAKE_CUDA_ARCHITECTURES="${{ matrix.cuda_arch }}" \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+                -DOPENFHE_SKIP_EXPORT=ON
+            make -j$(nproc) OPENFHEcore OPENFHEpke OPENFHEbinfhe
+            mkdir -p /usr/local/lib /usr/local/include/openfhe
+            cp -a lib/*.so* /usr/local/lib/
+            cp -a ../src/core/include/* /usr/local/include/
+            cp -a ../src/pke/include/* /usr/local/include/
+            cp -a ../src/binfhe/include/* /usr/local/include/
+            cp -a src/core/config_core.h /usr/local/include/openfhe/
+            ldconfig
+          CIBW_ENVIRONMENT_LINUX: >
+            OPENFHE_GPU_ROOT=/project/openfhe-gpu-public
+            OPENFHE_GPU_BUILD_DIR=/project/openfhe-gpu-public/build
+            CUDA_HOME=/usr/local/cuda-${{ matrix.cuda_path }}
+            PATH=/usr/local/cuda-${{ matrix.cuda_path }}/bin:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin:$PATH
+            LD_LIBRARY_PATH=/usr/local/cuda-${{ matrix.cuda_path }}/lib64:/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/lib64:$LD_LIBRARY_PATH
+            CC=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/gcc
+            CXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
+            CUDAHOSTCXX=/opt/rh/gcc-toolset-${{ matrix.gcc_toolset }}/root/usr/bin/g++
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: auditwheel repair -w {dest_dir} {wheel} --exclude libcuda.so.1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: wheelhouse/*.whl
+
   test-gpu:
     needs: [setup, build-gpu]
-    if: needs.setup.outputs.run_ci == 'true'
+    if: needs.setup.outputs.run_ci == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -205,6 +283,41 @@ jobs:
 
           echo "All required files present for CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }}!"
           echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
+
+  test-gpu-pr:
+    needs: [setup, build-gpu-pr]
+    if: needs.setup.outputs.run_ci == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ${{ fromJson(needs.setup.outputs.test_gpu_cuda_versions) }}
+        python-version: ${{ fromJson(needs.setup.outputs.test_gpu_python_versions) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: wheelhouse
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Test PR GPU wheel structure (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+
+          SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
+          test -f "$SITE_PACKAGES/ckks/__init__.py"
+          test -f "$SITE_PACKAGES/ckks/torch_api.py"
+          test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_backend.cpython-*.so
+          ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
 
   build-main:
     needs: setup
