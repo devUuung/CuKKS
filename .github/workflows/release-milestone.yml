@@ -259,15 +259,57 @@ jobs:
     uses: ./.github/workflows/publish-packages.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}
-      publish_pypi: true
+      publish_pypi: false
     secrets: inherit
 
+  publish_main:
+    if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' }}
+    needs:
+      - validate
+      - publish_packages
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-main
+          path: dist
+
+      - name: Publish cukks to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish_gpu:
+    if: ${{ inputs.publish_pypi && needs.publish_packages.result == 'success' }}
+    needs:
+      - validate
+      - publish_packages
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ["118", "121", "124", "128"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: dist
+
+      - name: Publish cukks-cu${{ matrix.cuda_version }} to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
   finalize_release:
-    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') }}
+    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') && (needs.publish_main.result == 'success' || needs.publish_main.result == 'skipped') && (needs.publish_gpu.result == 'success' || needs.publish_gpu.result == 'skipped') }}
     needs:
       - validate
       - create_release
       - publish_packages
+      - publish_main
+      - publish_gpu
     runs-on: ubuntu-latest
     permissions:
       contents: write
