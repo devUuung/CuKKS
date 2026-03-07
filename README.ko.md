@@ -94,7 +94,6 @@ cukks-install-backend --status    # CUDA 호환성 상태 확인
 | 환경변수 | 효과 |
 |----------|--------|
 | `CUKKS_BACKEND=cukks-cu128` | 특정 백엔드 강제 지정 |
-| `CUKKS_NO_BACKEND=1` | 백엔드 건너뛰기 (CPU 전용) |
 
 </details>
 
@@ -279,14 +278,6 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 ```
 
 </details>
-
-## 문제 해결
-
-| 문제 | 해결책 |
-|-------|----------|
-| 메모리 부족 | `poly_mod_degree` 감소 (16384 대신 8192) |
-| 낮은 정확도 | `activation_degree` 증가 (예: 8 또는 16) |
-| 느린 성능 | 배치 처리 활성화, 네트워크 깊이 감소 |
 
 ## 문서
 

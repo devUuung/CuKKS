@@ -94,7 +94,6 @@ cukks-install-backend --status    # Show CUDA compatibility status
 | Variable | Effect |
 |----------|--------|
 | `CUKKS_BACKEND=cukks-cu128` | Force a specific backend |
-| `CUKKS_NO_BACKEND=1` | Skip backend (CPU-only) |
 
 </details>
 
@@ -277,14 +276,6 @@ outputs = ctx.decrypt_batch(enc_output, num_samples=8)
 ```
 
 </details>
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| Out of Memory | Reduce `poly_mod_degree` (8192 instead of 16384) |
-| Low Accuracy | Increase `activation_degree` (e.g., 8 or 16) for better approximation |
-| Slow Performance | Enable batch processing, reduce network depth |
 
 ## Documentation
 
