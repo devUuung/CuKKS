@@ -236,6 +236,35 @@ def compute_bsgs_rotations(max_dim: int, bsgs_n1: Optional[int] = None) -> List[
     rotations = sorted(set(baby_steps + giant_steps))
     return rotations
 
+def compute_packed_batch_rotations(
+    max_dim: int,
+    batch_size: int = 1,
+    bsgs_n1: Optional[int] = None,
+) -> List[int]:
+    """Compute rotation indices for packed-batch CKKS inference.
+
+    Returns the union of within-sample BSGS rotations and cross-block
+    offsets.  Total count grows as O(sqrt(max_dim) + batch_size) instead
+    of O(batch_size * max_dim).
+
+    Args:
+        max_dim: Slots per sample (*K*).
+        batch_size: Number of samples packed per ciphertext (*B*).
+        bsgs_n1: Optional baby-step size override.
+
+    Returns:
+        Sorted list of **positive** rotation indices.  The caller is
+        responsible for adding negatives.
+    """
+    # Within-sample rotations: O(sqrt(K))
+    rotations = set(compute_bsgs_rotations(max_dim, bsgs_n1))
+
+    # Cross-block offsets: O(B) — shift between packed sample blocks
+    if batch_size > 1:
+        for i in range(1, batch_size):
+            rotations.add(i * max_dim)
+
+    return sorted(rotations)
 
 def compute_cnn_rotations(
     image_height: int,
@@ -302,6 +331,7 @@ class CKKSInferenceContext:
         bootstrap_threshold: int = 2,
         cnn_config: Optional[Dict[str, Any]] = None,
         enable_gpu: bool = True,
+        batch_size: int = 1,
     ):
         if cnn_config is not None and config is None:
             config = InferenceConfig(mult_depth=6, security_level=None)
@@ -313,17 +343,22 @@ class CKKSInferenceContext:
         self._bootstrap_threshold = bootstrap_threshold
         self._cnn_config = cnn_config
         self._enable_gpu = enable_gpu
+        self._batch_size = batch_size
         
         _resolved_max_dim = max_rotation_dim
         if rotations is None:
             max_dim = max_rotation_dim or min(self.config.num_slots, 1024)
             _resolved_max_dim = max_dim
             if use_bsgs:
-                rotations = compute_bsgs_rotations(max_dim)
+                rotations = compute_packed_batch_rotations(max_dim, batch_size)
                 neg_rotations = [-r for r in rotations if r > 0]
                 rotations = sorted(set(rotations + neg_rotations))
             else:
                 rotations = list(range(1, max_dim)) + list(range(-max_dim + 1, 0))
+                if batch_size > 1:
+                    for i in range(1, batch_size):
+                        rotations.extend([i * max_dim, -(i * max_dim)])
+                    rotations = sorted(set(rotations))
             
             if cnn_config is not None:
                 cnn_rots = compute_cnn_rotations(
@@ -445,6 +480,11 @@ class CKKSInferenceContext:
         return self.config.num_slots
     
     @property
+    def batch_size(self) -> int:
+        """Number of samples this context was configured to pack."""
+        return self._batch_size
+
+    @property
     def auto_bootstrap(self) -> bool:
         return self._auto_bootstrap
     
@@ -528,6 +568,25 @@ class CKKSInferenceContext:
         samples: List[torch.Tensor],
         slots_per_sample: Optional[int] = None,
     ) -> Any:
+        """Pack *samples* into a single ciphertext and return an EncryptedTensor.
+        
+        Slot layout (contiguous block packing)::
+        
+            [s0[0..K-1], s1[0..K-1], ..., s(B-1)[0..K-1], padding...]
+        
+        where *B* = ``len(samples)`` and *K* = ``slots_per_sample``.
+        
+        The returned tensor carries ``_packed_batch=True``,
+        ``_batch_size=B``, and ``_slots_per_sample=K`` so that every
+        subsequent operation preserves the packed-batch contract.
+        
+        Args:
+            samples: List of plaintext tensors (all same numel).
+            slots_per_sample: Slots reserved per sample (default: sample numel).
+        
+        Returns:
+            EncryptedTensor with packed-batch metadata set.
+        """
         from .tensor import EncryptedTensor
 
         self._ensure_initialized()
@@ -535,15 +594,12 @@ class CKKSInferenceContext:
         if not samples:
             raise ValueError("Cannot encrypt empty list of samples")
 
-        import warnings
-        warnings.warn(
-            "encrypt_batch() packs multiple samples into a single ciphertext. "
-            "Packed-batch model forward will run through the context batch path for correctness "
-            "(decrypt/re-encrypt per sample), which is significantly slower than native packed "
-            "homomorphic execution.",
-            stacklevel=2,
-        )
-        
+        if self._batch_size > 1 and len(samples) != self._batch_size:
+            raise ValueError(
+                f"Context was created with batch_size={self._batch_size} but "
+                f"encrypt_batch() received {len(samples)} samples. "
+                f"Provide exactly {self._batch_size} samples."
+            )
         first_sample_size = samples[0].numel()
         if slots_per_sample is None:
             slots_per_sample = first_sample_size
@@ -561,25 +617,11 @@ class CKKSInferenceContext:
         return enc_tensor
 
     def _forward_packed_batch(self, model: Any, packed_batch: "EncryptedTensor") -> "EncryptedTensor":
-        self._ensure_initialized()
-
-        if not getattr(packed_batch, "_packed_batch", False):
-            raise ValueError("Expected packed batch tensor")
-
-        num_samples = getattr(packed_batch, "_batch_size", None)
-        if num_samples is None:
-            if len(packed_batch.shape) < 1:
-                raise ValueError("Cannot infer packed batch size from tensor shape")
-            num_samples = packed_batch.shape[0]
-
-        samples = self.decrypt_batch(packed_batch, num_samples=num_samples)
-        outputs: List[torch.Tensor] = []
-        for sample in samples:
-            enc_input = self.encrypt(sample)
-            enc_output = model(enc_input)
-            outputs.append(self.decrypt(enc_output))
-        repacked = self.encrypt_batch(outputs)
-        return repacked
+        raise RuntimeError(
+            "Legacy packed-batch plaintext fallback has been disabled. "
+            "Packed EncryptedTensor inputs must execute through native layer "
+            "implementations without decrypt/re-encrypt."
+        )
     
     def decrypt_batch(
         self,
@@ -604,7 +646,10 @@ class CKKSInferenceContext:
                     "Please provide num_samples explicitly."
                 )
         
-        if len(encrypted.shape) >= 2:
+        packed_slots = getattr(encrypted, "_slots_per_sample", None)
+        if getattr(encrypted, "_packed_batch", False) and packed_slots is not None:
+            slots_per_sample = packed_slots
+        elif len(encrypted.shape) >= 2:
             slots_per_sample = encrypted.shape[1]
         else:
             slots_per_sample = encrypted.size // num_samples
@@ -680,6 +725,7 @@ class CKKSInferenceContext:
         use_bsgs: bool = True,
         activation_degree: int = 4,
         use_square_activation: bool = False,
+        batch_size: int = 1,
         **kwargs: Any,
     ) -> "CKKSInferenceContext":
         enable_bootstrap = kwargs.pop("enable_bootstrap", False)
@@ -708,7 +754,12 @@ class CKKSInferenceContext:
 
         # Generate rotation keys using the final max_dim to ensure consistency
         # between key generation (n1 for baby/giant steps) and matmul usage.
-        rotations = compute_bsgs_rotations(max_dim) if use_bsgs else list(range(1, max_dim))
+        if use_bsgs:
+            rotations = compute_packed_batch_rotations(max_dim, batch_size)
+        else:
+            rotations = list(range(1, max_dim))
+            if batch_size > 1:
+                rotations.extend(i * max_dim for i in range(1, batch_size))
         neg_rotations = [-r for r in rotations if r > 0]
         rotations = sorted(set(rotations + neg_rotations))
 
@@ -722,7 +773,7 @@ class CKKSInferenceContext:
             rotations.extend(extra_rotations)
             rotations = sorted(list(set(rotations)))
         
-        return cls(config, rotations=rotations, use_bsgs=use_bsgs, max_rotation_dim=max_dim, **kwargs)
+        return cls(config, rotations=rotations, use_bsgs=use_bsgs, max_rotation_dim=max_dim, batch_size=batch_size, **kwargs)
     
     @classmethod
     def for_depth(
@@ -781,6 +832,7 @@ class CKKSInferenceContext:
             "max_rotation_dim": self._max_rotation_dim,
             "auto_bootstrap": self._auto_bootstrap,
             "bootstrap_threshold": self._bootstrap_threshold,
+            "batch_size": self._batch_size,
         }
         with open(path, "wb") as f:
             pickle.dump(config_data, f)
@@ -812,6 +864,95 @@ class CKKSInferenceContext:
             max_rotation_dim=config_data["max_rotation_dim"],
             auto_bootstrap=config_data["auto_bootstrap"],
             bootstrap_threshold=config_data["bootstrap_threshold"],
+            batch_size=config_data.get("batch_size", 1),
         )
     
     load = load_context
+
+    def encrypt_cnn_input_batch(
+        self,
+        images: List[torch.Tensor],
+        conv_params: List[Dict[str, Any]],
+    ) -> "EncryptedTensor":
+        """Pack *B* images into a single ciphertext after im2col unfolding.
+        
+        Slot layout::
+        
+            [img0_patches, img1_patches, ..., img(B-1)_patches, padding...]
+        
+        Each image is independently unfolded (im2col) using *conv_params*,
+        then all patches are concatenated into one flat vector and encrypted.
+        
+        The returned tensor carries ``_packed_batch=True`` and ``_cnn_layout``
+        with ``batch_size`` so downstream :class:`EncryptedConv2d` can apply
+        the weight matrix as a block-diagonal without mixing images.
+        
+        Args:
+            images: List of B image tensors, each (C, H, W) or (1, C, H, W).
+            conv_params: List of conv parameter dicts (same as encrypt_cnn_input).
+        
+        Returns:
+            EncryptedTensor with packed-batch and CNN layout metadata.
+        """
+        import torch.nn.functional as F
+        
+        self._ensure_initialized()
+        
+        if not images:
+            raise ValueError("Cannot encrypt empty list of images")
+        
+        if self._batch_size > 1 and len(images) != self._batch_size:
+            raise ValueError(
+                f"Context was created with batch_size={self._batch_size} but "
+                f"received {len(images)} images. "
+                f"Provide exactly {self._batch_size} images."
+            )
+        
+        batch_size = len(images)
+        processed_images = []
+        
+        for img in images:
+            if img.ndim == 3:
+                img = img.unsqueeze(0)
+            processed_images.append(img)
+        
+        if not conv_params:
+            # Fallback to regular batch encryption
+            return self.encrypt_batch([img.flatten() for img in processed_images])
+        
+        first_conv = conv_params[0]
+        kernel_size = first_conv['kernel_size']
+        stride = first_conv.get('stride', (1, 1))
+        padding = first_conv.get('padding', (0, 0))
+        
+        all_patches = []
+        for image in processed_images:
+            if padding != (0, 0):
+                image = F.pad(image, (padding[1], padding[1], padding[0], padding[0]))
+            
+            patches = F.unfold(image.to(torch.float64), kernel_size, stride=stride)
+            patches = patches.transpose(1, 2)
+            patches = patches.squeeze(0)
+            all_patches.append(patches)
+        
+        # Concatenate all patches from all images
+        concatenated = torch.cat(all_patches, dim=0)
+        num_patches_per_image = all_patches[0].shape[0]
+        patch_features = all_patches[0].shape[1]
+        flat_patches = concatenated.flatten()
+        
+        enc_tensor = self.encrypt(flat_patches)
+        
+        enc_tensor._cnn_layout = {
+            'num_patches': num_patches_per_image * batch_size,
+            'num_patches_per_image': num_patches_per_image,
+            'patch_features': patch_features,
+            'batch_size': batch_size,
+            'original_shape': tuple(processed_images[0].shape),
+        }
+        enc_tensor._shape = (num_patches_per_image * batch_size, patch_features)
+        enc_tensor._packed_batch = True
+        enc_tensor._batch_size = batch_size
+        enc_tensor._slots_per_sample = num_patches_per_image * patch_features
+        
+        return enc_tensor
