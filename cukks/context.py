@@ -536,6 +536,7 @@ class CKKSInferenceContext:
             raise ValueError("Cannot encrypt empty list of samples")
 
         first_sample_size = samples[0].numel()
+        sample_shape = tuple(samples[0].shape)
         if slots_per_sample is None:
             slots_per_sample = first_sample_size
         
@@ -544,11 +545,12 @@ class CKKSInferenceContext:
         
         cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
 
-        batch_shape = (len(samples), slots_per_sample)
+        batch_shape = (len(samples), *sample_shape) if slots_per_sample == first_sample_size else (len(samples), slots_per_sample)
         enc_tensor = EncryptedTensor(cipher, batch_shape, self)
         enc_tensor._packed_batch = True
         enc_tensor._batch_size = len(samples)
         enc_tensor._slots_per_sample = slots_per_sample
+        enc_tensor._packed_sample_shape = sample_shape
         return enc_tensor
 
     def _forward_packed_batch(self, model: Any, packed_batch: "EncryptedTensor") -> List["EncryptedTensor"]:
@@ -583,7 +585,9 @@ class CKKSInferenceContext:
                     "Please provide num_samples explicitly."
                 )
         
-        if len(encrypted.shape) >= 2:
+        if getattr(encrypted, "_packed_batch", False) and getattr(encrypted, "_slots_per_sample", None) is not None:
+            slots_per_sample = int(getattr(encrypted, "_slots_per_sample"))
+        elif len(encrypted.shape) >= 2:
             slots_per_sample = encrypted.shape[1]
         else:
             slots_per_sample = encrypted.size // num_samples
