@@ -55,7 +55,6 @@ class EncryptedModule(ABC):
         if isinstance(x, list):
             return [self.__call__(item) for item in x]
 
-
         if not isinstance(x, EncryptedTensor):
             raise TypeError(
                 "Input must be an encrypted ciphertext (EncryptedTensor). "

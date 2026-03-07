@@ -131,6 +131,18 @@ class EncryptedConv2d(EncryptedModule):
         Raises:
             RuntimeError: If input is 4D, 3D, or 2D without CNN layout.
         """
+        if getattr(x, '_packed_batch', False):
+            sample_shape = getattr(x, '_packed_sample_shape', None) or x.shape[1:]
+            if len(sample_shape) == 2 and sample_shape[1] == self.weight_matrix.shape[1]:
+                self.input_shape = tuple(sample_shape)
+                self.output_shape = (sample_shape[0], self.out_channels)
+                self._ensure_weight_matrix_cache()
+                return x.matmul(self.weight_matrix, self.bias,
+                                weight_list=self._wm_list,
+                                bias_list=self._wm_bias_list,
+                                weight_hash=self._wm_hash,
+                                diag_nonzero=self._wm_diag_nonzero)
+
         input_ndim = len(x.shape)
         
         if input_ndim == 4:

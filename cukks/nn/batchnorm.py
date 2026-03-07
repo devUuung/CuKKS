@@ -155,17 +155,32 @@ class EncryptedBatchNorm1d(EncryptedModule):
         Returns:
             Encrypted output after affine transformation.
         """
+        if getattr(x, "_packed_batch", False):
+            sample_shape = getattr(x, "_packed_sample_shape", None) or x.shape[1:]
+            if len(sample_shape) == 0:
+                raise RuntimeError("EncryptedBatchNorm1d requires packed sample shape metadata")
+
+            if sample_shape[0] == self.num_features:
+                trailing = int(torch.tensor(sample_shape[1:]).prod().item()) if len(sample_shape) > 1 else 1
+                scale_pattern = self.scale.repeat_interleave(trailing).tolist()
+                shift_pattern = self.shift.repeat_interleave(trailing).tolist()
+            elif sample_shape[-1] == self.num_features:
+                leading = int(torch.tensor(sample_shape[:-1]).prod().item()) if len(sample_shape) > 1 else 1
+                scale_pattern = self.scale.repeat(leading).tolist()
+                shift_pattern = self.shift.repeat(leading).tolist()
+            else:
+                raise RuntimeError(
+                    "EncryptedBatchNorm1d requires packed sample shape to contain num_features on the "
+                    f"first or last axis, got sample_shape={sample_shape} and num_features={self.num_features}."
+                )
+        else:
+            scale_pattern = self.scale.tolist()
+            shift_pattern = self.shift.tolist()
+
         # y = scale * x + shift
-        slot_count = x._cipher.size
-        scale_list = self.scale.tolist()
-        shift_list = self.shift.tolist()
-        if len(scale_list) < slot_count:
-            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
-        if len(shift_list) < slot_count:
-            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
-        result = x.mul(scale_list)
+        result = x.mul(scale_pattern)
         result = result.rescale()
-        result = result.add(shift_list)
+        result = result.add(shift_pattern)
         return result
     
     def mult_depth(self) -> int:
@@ -228,16 +243,29 @@ class EncryptedBatchNorm2d(EncryptedModule):
                 "EncryptedBatchNorm2d does not support CNN packed layout. "
                 "Use fold_batchnorm=True in convert() to fold BatchNorm into Conv2d."
             )
-        slot_count = x._cipher.size
-        scale_list = self.scale.tolist()
-        shift_list = self.shift.tolist()
-        if len(scale_list) < slot_count:
-            scale_list = scale_list + [0.0] * (slot_count - len(scale_list))
-        if len(shift_list) < slot_count:
-            shift_list = shift_list + [0.0] * (slot_count - len(shift_list))
-        result = x.mul(scale_list)
+
+        if getattr(x, "_packed_batch", False):
+            sample_shape = getattr(x, "_packed_sample_shape", None) or x.shape[1:]
+            if len(sample_shape) == 3 and sample_shape[0] == self.num_features:
+                spatial = int(torch.tensor(sample_shape[1:]).prod().item())
+                scale_pattern = self.scale.repeat_interleave(spatial).tolist()
+                shift_pattern = self.shift.repeat_interleave(spatial).tolist()
+            elif len(sample_shape) == 2 and sample_shape[1] == self.num_features:
+                repeats = sample_shape[0]
+                scale_pattern = self.scale.repeat(repeats).tolist()
+                shift_pattern = self.shift.repeat(repeats).tolist()
+            else:
+                raise RuntimeError(
+                    "EncryptedBatchNorm2d requires packed sample shape (C,H,W) or (num_patches,C), got "
+                    f"sample_shape={sample_shape} with num_features={self.num_features}."
+                )
+        else:
+            scale_pattern = self.scale.tolist()
+            shift_pattern = self.shift.tolist()
+
+        result = x.mul(scale_pattern)
         result = result.rescale()
-        result = result.add(shift_list)
+        result = result.add(shift_pattern)
         return result
     
     def mult_depth(self) -> int:

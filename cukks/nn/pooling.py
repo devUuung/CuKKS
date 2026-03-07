@@ -167,6 +167,11 @@ class EncryptedAvgPool2d(EncryptedModule):
         Raises:
             RuntimeError: If input is 4D.
         """
+        if getattr(x, '_packed_batch', False):
+            sample_shape = getattr(x, '_packed_sample_shape', None) or x.shape[1:]
+            if len(sample_shape) == 2:
+                return self._forward_he_packed_batch(x, sample_shape)
+
         input_ndim = len(x.shape)
         
         if input_ndim == 4:
@@ -188,6 +193,48 @@ class EncryptedAvgPool2d(EncryptedModule):
             avg_plain = [self.avg_factor] * slot_count
             result = x.mul(avg_plain)
             return result.rescale()
+
+    def _infer_spatial_dims(self, num_patches: int) -> Tuple[int, int]:
+        hw = int(math.sqrt(num_patches))
+        if hw * hw != num_patches:
+            raise ValueError(
+                f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                "Packed pooling requires square patch grids unless explicit CNN layout metadata is present."
+            )
+        return hw, hw
+
+    def _forward_he_packed_batch(self, x: "EncryptedTensor", sample_shape: Tuple[int, int]) -> "EncryptedTensor":
+        num_patches, channels = sample_shape
+        H, W = self._infer_spatial_dims(num_patches)
+        kH, kW = self.kernel_size
+        sH, sW = self.stride
+        out_H = H // sH
+        out_W = W // sW
+        out_patches = out_H * out_W
+        total_in = num_patches * channels
+        total_out = out_patches * channels
+
+        pool_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
+        for out_y in range(out_H):
+            for out_x in range(out_W):
+                out_patch_idx = out_y * out_W + out_x
+                for ky in range(kH):
+                    for kx in range(kW):
+                        in_y = out_y * sH + ky
+                        in_x = out_x * sW + kx
+                        in_patch_idx = in_y * W + in_x
+                        for c in range(channels):
+                            out_flat_idx = out_patch_idx * channels + c
+                            in_flat_idx = in_patch_idx * channels + c
+                            pool_weight[out_flat_idx, in_flat_idx] = self.avg_factor
+
+        batch_size = getattr(x, '_batch_size', None)
+        if batch_size is None:
+            raise RuntimeError("Packed average pooling requires batch_size metadata")
+
+        x_flat = x.view(batch_size, total_in)
+        result = x_flat.matmul(pool_weight)
+        return result.view(batch_size, out_patches, channels)
     
     def _forward_he_packed(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply average pooling on im2col CNN layout using HE operations.
@@ -202,6 +249,8 @@ class EncryptedAvgPool2d(EncryptedModule):
         import torch
         
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedAvgPool2d requires _cnn_layout metadata for CNN-packed input")
         num_patches = layout['num_patches']
         channels = layout['patch_features']
         batch_size = layout.get('batch_size', 1)
@@ -307,6 +356,8 @@ class EncryptedAvgPool2d(EncryptedModule):
         import math
         
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedMaxPool2d requires _cnn_layout metadata for CNN-packed input")
         num_patches = layout['num_patches']
         channels = layout['patch_features']
         batch_size = layout.get('batch_size', 1)
@@ -537,6 +588,11 @@ class EncryptedMaxPool2d(EncryptedModule):
         return result.mul(0.5).rescale()
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
+        if getattr(x, '_packed_batch', False):
+            sample_shape = getattr(x, '_packed_sample_shape', None) or x.shape[1:]
+            if len(sample_shape) == 2:
+                return self._forward_he_packed_batch(x, sample_shape)
+
         input_ndim = len(x.shape)
 
         if input_ndim == 4:
@@ -555,8 +611,95 @@ class EncryptedMaxPool2d(EncryptedModule):
         else:
             return x
 
+    def _rotate_packed_within_sample(self, x: "EncryptedTensor", offset: int) -> "EncryptedTensor":
+        batch_size = getattr(x, '_batch_size', None)
+        slots_per_sample = getattr(x, '_slots_per_sample', None)
+        if batch_size is None or slots_per_sample is None:
+            raise RuntimeError("Packed max pooling requires packed batch metadata")
+
+        slot_count = x._cipher.size
+        source_mask = [0.0] * slot_count
+        for batch_idx in range(batch_size):
+            sample_start = batch_idx * slots_per_sample
+            sample_end = sample_start + slots_per_sample
+            if offset >= 0:
+                valid_start = sample_start + offset
+                valid_end = sample_end
+            else:
+                valid_start = sample_start
+                valid_end = sample_end + offset
+            for pos in range(max(sample_start, valid_start), min(sample_end, valid_end)):
+                source_mask[pos] = 1.0
+
+        return x.mul(source_mask).rescale().rotate(offset)
+
+    def _forward_he_packed_batch(self, x: "EncryptedTensor", sample_shape: Tuple[int, int]) -> "EncryptedTensor":
+        num_patches, channels = sample_shape
+        H, W = self._infer_spatial_dims(num_patches)
+        out_H = (H + 2 * self.padding[0] - self.kernel_size[0]) // self.stride[0] + 1
+        out_W = (W + 2 * self.padding[1] - self.kernel_size[1]) // self.stride[1] + 1
+        out_patches = out_H * out_W
+
+        batch_size = getattr(x, '_batch_size', None)
+        slots_per_sample = getattr(x, '_slots_per_sample', None)
+        if batch_size is None or slots_per_sample is None:
+            raise RuntimeError("Packed max pooling requires batch metadata")
+        out_slots_per_sample = out_patches * channels
+
+        slot_count = x._cipher.size
+
+        accumulated = None
+        for batch_idx in range(batch_size):
+            sample_start = batch_idx * slots_per_sample
+            sample_mask = [0.0] * slot_count
+            for pos in range(sample_start, min(sample_start + slots_per_sample, slot_count)):
+                sample_mask[pos] = 1.0
+
+            isolated = x.mul(sample_mask).rescale()
+            if sample_start:
+                isolated = isolated.rotate(sample_start)
+            isolated._shape = (num_patches, channels)
+            isolated._packed_batch = False
+            isolated._batch_size = None
+            isolated._slots_per_sample = None
+            isolated._packed_sample_shape = None
+            isolated._cnn_layout = {
+                'num_patches': num_patches,
+                'patch_features': channels,
+                'height': H,
+                'width': W,
+            }
+
+            pooled = self._forward_he_cnn(isolated)
+            target_base = batch_idx * out_slots_per_sample
+            if target_base:
+                pooled = pooled.rotate(-target_base)
+            accumulated = pooled if accumulated is None else accumulated.add(pooled)
+
+        if accumulated is None:
+            raise RuntimeError("Packed max pooling produced no outputs")
+
+        accumulated._shape = (batch_size, out_patches, channels)
+        accumulated._packed_batch = True
+        accumulated._batch_size = batch_size
+        accumulated._slots_per_sample = out_slots_per_sample
+        accumulated._packed_sample_shape = (out_patches, channels)
+        accumulated._cnn_layout = None
+        return accumulated
+
+    def _infer_spatial_dims(self, num_patches: int) -> Tuple[int, int]:
+        hw = int(math.sqrt(num_patches))
+        if hw * hw != num_patches:
+            raise ValueError(
+                f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                "Packed pooling requires square patch grids unless explicit CNN layout metadata is present."
+            )
+        return hw, hw
+
     def _forward_he_cnn(self, x: "EncryptedTensor") -> "EncryptedTensor":
         layout = x._cnn_layout
+        if layout is None:
+            raise RuntimeError("EncryptedMaxPool2d requires _cnn_layout metadata for CNN-packed input")
         num_patches = layout['num_patches']
         channels = layout['patch_features']
 

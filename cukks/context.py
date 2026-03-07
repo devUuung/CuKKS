@@ -159,12 +159,12 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
 
     # Track spatial dimensions through conv layers for im2col expansion
     # Default to MNIST (1, 28, 28) if not provided
-    spatial_h, spatial_w, spatial_c = 28, 28, 1
+    spatial_h, spatial_w = 28, 28
     if input_shape is not None:
         if len(input_shape) == 4:  # (B, C, H, W)
-            spatial_c, spatial_h, spatial_w = input_shape[1], input_shape[2], input_shape[3]
+            spatial_h, spatial_w = input_shape[2], input_shape[3]
         elif len(input_shape) == 3:  # (C, H, W)
-            spatial_c, spatial_h, spatial_w = input_shape[0], input_shape[1], input_shape[2]
+            spatial_h, spatial_w = input_shape[1], input_shape[2]
 
     for module in model.modules():
         if isinstance(module, (BlockDiagonalLinear, BlockDiagLowRankLinear)):
@@ -200,7 +200,7 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
             dims.append(total_out)
 
             # Update spatial dims for next conv/pool layer
-            spatial_h, spatial_w, spatial_c = out_h, out_w, out_c
+            spatial_h, spatial_w = out_h, out_w
 
         elif isinstance(module, torch.nn.AvgPool2d):
             # Track spatial reduction through pooling
@@ -397,13 +397,13 @@ class CKKSInferenceContext:
             from ckks import CKKSConfig as _Cfg, CKKSContext as _Ctx
             CKKSConfig = _Cfg
             CKKSContext = _Ctx
-            _BACKEND_AVAILABLE = True
+            _BACKEND_AVAILABLE = True  # pyright: ignore[reportConstantRedefinition]
             return
         except ImportError:
             pass  # Fall through to auto-install attempt
         # Second attempt: auto-install the backend
         from ._cuda_compat import auto_install_backend
-        success, package, err = auto_install_backend(quiet=False)
+        success, _package, _err = auto_install_backend(quiet=False)
         if success:
             # Retry import after successful installation
             try:
@@ -413,7 +413,7 @@ class CKKSInferenceContext:
                 from ckks import CKKSConfig as _Cfg, CKKSContext as _Ctx
                 CKKSConfig = _Cfg
                 CKKSContext = _Ctx
-                _BACKEND_AVAILABLE = True
+                _BACKEND_AVAILABLE = True  # pyright: ignore[reportConstantRedefinition]
                 return
             except ImportError:
                 pass  # Installation succeeded but import still failed
@@ -601,6 +601,7 @@ class CKKSInferenceContext:
                 f"Provide exactly {self._batch_size} samples."
             )
         first_sample_size = samples[0].numel()
+        sample_shape = tuple(samples[0].shape)
         if slots_per_sample is None:
             slots_per_sample = first_sample_size
         
@@ -609,11 +610,12 @@ class CKKSInferenceContext:
         
         cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
 
-        batch_shape = (len(samples), slots_per_sample)
+        batch_shape = (len(samples), *sample_shape) if slots_per_sample == first_sample_size else (len(samples), slots_per_sample)
         enc_tensor = EncryptedTensor(cipher, batch_shape, self)
         enc_tensor._packed_batch = True
         enc_tensor._batch_size = len(samples)
         enc_tensor._slots_per_sample = slots_per_sample
+        enc_tensor._packed_sample_shape = sample_shape
         return enc_tensor
 
     def _forward_packed_batch(self, model: Any, packed_batch: "EncryptedTensor") -> "EncryptedTensor":
@@ -636,6 +638,9 @@ class CKKSInferenceContext:
             if num_samples is not None:
                 return samples[:num_samples]
             return samples
+
+        if num_samples is None and getattr(encrypted, "_packed_batch", False):
+            num_samples = getattr(encrypted, "_batch_size", None)
         
         if num_samples is None:
             if len(encrypted.shape) >= 1:
@@ -646,9 +651,8 @@ class CKKSInferenceContext:
                     "Please provide num_samples explicitly."
                 )
         
-        packed_slots = getattr(encrypted, "_slots_per_sample", None)
-        if getattr(encrypted, "_packed_batch", False) and packed_slots is not None:
-            slots_per_sample = packed_slots
+        if getattr(encrypted, "_packed_batch", False) and getattr(encrypted, "_slots_per_sample", None) is not None:
+            slots_per_sample = int(getattr(encrypted, "_slots_per_sample"))
         elif len(encrypted.shape) >= 2:
             slots_per_sample = encrypted.shape[1]
         else:
