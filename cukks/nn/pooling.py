@@ -141,6 +141,16 @@ class EncryptedAvgPool2d(EncryptedModule):
         self.pool_area = self.kernel_size[0] * self.kernel_size[1]
         self.avg_factor = 1.0 / self.pool_area
     
+    def __call__(self, x: "EncryptedTensor") -> "EncryptedTensor":
+        """Bypass the base-class packed-batch fallback.
+        
+        EncryptedAvgPool2d natively handles packed batches in forward(),
+        so we call forward() directly instead of going through the
+        context._forward_packed_batch decrypt/re-encrypt loop.
+        """
+        if isinstance(x, list):
+            return [self.__call__(item) for item in x]
+        return self.forward(x)
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply average pooling using pure HE operations.
         
@@ -182,31 +192,34 @@ class EncryptedAvgPool2d(EncryptedModule):
     def _forward_he_packed(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply average pooling on im2col CNN layout using HE operations.
         
-        Input shape: (num_patches, channels) where num_patches = H * W
-        Output shape: (out_patches, channels) where out_patches = (H/sH) * (W/sW)
+        Supports packed batches (batch_size > 1).  The pool weight matrix is
+        built as a block-diagonal with one block per image so that patches
+        from different images never interact.
         
-        This uses matrix multiplication to sum and average pooling windows.
-        
-        Args:
-            x: Encrypted input with _cnn_layout metadata.
-            
-        Returns:
-            Encrypted pooled output.
+        Input shape: (num_patches, channels) where num_patches = B * H * W
+        Output shape: (out_patches, channels) where out_patches = B * (H/sH) * (W/sW)
         """
         import torch
         
         layout = x._cnn_layout
         num_patches = layout['num_patches']
         channels = layout['patch_features']
+        batch_size = layout.get('batch_size', 1)
+        
+        # Per-image spatial dimensions
+        if batch_size > 1:
+            npp = layout.get('num_patches_per_image', num_patches // batch_size)
+        else:
+            npp = num_patches
         
         if 'height' in layout and 'width' in layout:
             height, width = layout['height'], layout['width']
         else:
             import math
-            hw = int(math.sqrt(num_patches))
-            if hw * hw != num_patches:
+            hw = int(math.sqrt(npp))
+            if hw * hw != npp:
                 raise ValueError(
-                    f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
+                    f"Cannot infer H, W from num_patches_per_image={npp} (not a perfect square). "
                     f"For rectangular inputs, set layout['height'] and layout['width'] explicitly."
                 )
             height, width = hw, hw
@@ -215,48 +228,59 @@ class EncryptedAvgPool2d(EncryptedModule):
         kH, kW = self.kernel_size
         sH, sW = self.stride
         
-        # Output spatial size
+        # Output spatial size (per image)
         out_H = H // sH
         out_W = W // sW
-        out_patches = out_H * out_W
+        out_patches_per_image = out_H * out_W
+        out_patches = out_patches_per_image * batch_size
         
-        # Build pooling matrix that sums elements in each pooling window
-        # Input flat: [pos(0,0)_c0, pos(0,0)_c1, ..., pos(0,1)_c0, ...]
-        # For 2x2 pool with stride 2:
-        # output[out_y, out_x, c] = avg(input[out_y*2:out_y*2+2, out_x*2:out_x*2+2, c])
+        total_in = num_patches * channels   # B * H * W * C
+        total_out = out_patches * channels   # B * (H/sH) * (W/sW) * C
         
-        total_in = num_patches * channels  # H * W * C
-        total_out = out_patches * channels  # (H/2) * (W/2) * C
-        
-        # Create sparse pooling weight matrix
+        # Build block-diagonal pooling weight matrix.
+        # Each block corresponds to one image; inter-image entries are zero.
         pool_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
         
-        for out_y in range(out_H):
-            for out_x in range(out_W):
-                out_patch_idx = out_y * out_W + out_x
-                
-                for ky in range(kH):
-                    for kx in range(kW):
-                        in_y = out_y * sH + ky
-                        in_x = out_x * sW + kx
-                        in_patch_idx = in_y * W + in_x
-                        
-                        for c in range(channels):
-                            out_flat_idx = out_patch_idx * channels + c
-                            in_flat_idx = in_patch_idx * channels + c
-                            pool_weight[out_flat_idx, in_flat_idx] = self.avg_factor
+        for b in range(batch_size):
+            in_block = b * npp * channels
+            out_block = b * out_patches_per_image * channels
+            
+            for out_y in range(out_H):
+                for out_x in range(out_W):
+                    out_patch_idx = out_y * out_W + out_x
+                    
+                    for ky in range(kH):
+                        for kx in range(kW):
+                            in_y = out_y * sH + ky
+                            in_x = out_x * sW + kx
+                            in_patch_idx = in_y * W + in_x
+                            
+                            for c in range(channels):
+                                out_flat = out_block + out_patch_idx * channels + c
+                                in_flat = in_block + in_patch_idx * channels + c
+                                pool_weight[out_flat, in_flat] = self.avg_factor
         
-        # Apply pooling via matmul
-        x = x.view(total_in)
-        result = x.matmul(pool_weight, None)
+        # Bypass packed-matmul dispatch: create a plain 1-D wrapper without
+        # packed-batch flags so that the standard matmul path is used.
+        from ..tensor import EncryptedTensor as _ET
+        x_flat = _ET(x._cipher, (total_in,), x._context, x._depth)
+        x_flat._needs_rescale = x._needs_rescale
+        result = x_flat.matmul(pool_weight, None)
         
         # Update CNN layout for next layer
         result._cnn_layout = {
             'num_patches': out_patches,
+            'num_patches_per_image': out_patches_per_image,
             'patch_features': channels,
             'original_shape': layout.get('original_shape'),
+            'batch_size': batch_size,
         }
         result._shape = (out_patches, channels)
+        
+        if batch_size > 1:
+            result._packed_batch = True
+            result._batch_size = batch_size
+            result._slots_per_sample = out_patches_per_image * channels
         
         return result
     
@@ -267,16 +291,17 @@ class EncryptedAvgPool2d(EncryptedModule):
         1. Use rotations to align neighboring elements
         2. Add them together
         3. Mask to keep only valid output positions
-        4. Compact using rotation-based gather (no matmul needed)
+        4. Keep sparse layout (FC layer handles extraction)
         
-        This avoids large rotation keys that matmul-based gather requires.
+        Supports packed batches (batch_size > 1).  Rotation offsets are
+        based on the per-image width so that all images are pooled in
+        parallel.  No boundary mask is needed: at every valid output
+        position ``(2*out_y, 2*out_x)``, the four referenced patches
+        ``(2*out_y:2*out_y+2, 2*out_x:2*out_x+2)`` lie entirely within
+        the same image block, so cross-sample bleed cannot occur.
+        The averaging mask zeros out all other positions.
         
-        Layout: (num_patches, channels) in row-major order
-        [P0C0, P0C1, ..., P1C0, P1C1, ..., P(W)C0, ...]
-        
-        For 2x2 pool at output (out_y, out_x), we need to sum:
-        - Input (2*out_y, 2*out_x) + (2*out_y, 2*out_x+1) + 
-          (2*out_y+1, 2*out_x) + (2*out_y+1, 2*out_x+1)
+        Consumes 1 multiplicative level (the averaging-mask ``mul``).
         """
         import torch
         import math
@@ -284,15 +309,24 @@ class EncryptedAvgPool2d(EncryptedModule):
         layout = x._cnn_layout
         num_patches = layout['num_patches']
         channels = layout['patch_features']
+        batch_size = layout.get('batch_size', 1)
+        
+        # Per-image spatial dimensions
+        if batch_size > 1:
+            npp = layout.get('num_patches_per_image', num_patches // batch_size)
+        else:
+            npp = num_patches
         
         if 'height' in layout and 'width' in layout:
             height, width = layout['height'], layout['width']
         else:
-            hw = int(math.sqrt(num_patches))
-            if hw * hw != num_patches:
+            hw = int(math.sqrt(npp))
+            if hw * hw != npp:
                 raise ValueError(
-                    f"Cannot infer H, W from num_patches={num_patches} (not a perfect square). "
-                    f"For rectangular inputs, set layout['height'] and layout['width'] explicitly."
+                    f"Cannot infer H, W from num_patches_per_image={npp} "
+                    f"(not a perfect square). "
+                    f"For rectangular inputs, set layout['height'] and "
+                    f"layout['width'] explicitly."
                 )
             height, width = hw, hw
         H, W = height, width
@@ -306,21 +340,17 @@ class EncryptedAvgPool2d(EncryptedModule):
         
         out_H = H // sH
         out_W = W // sW
-        out_patches = out_H * out_W
+        out_patches_per_image = out_H * out_W
+        out_patches = out_patches_per_image * batch_size
         
         total_in = num_patches * channels
         
-        # Rotation offsets for 2x2 pooling
-        # In flattened (H*W, C) layout:
-        # - offset 0: position (0, 0) relative to pool window
-        # - offset C: position (0, 1) 
-        # - offset W*C: position (1, 0)
-        # - offset (W+1)*C: position (1, 1)
-        
+        # Rotation offsets for 2x2 pooling, using per-image width W.
+        # These work for all images simultaneously because the spatial
+        # layout is identical within each image block.
         offsets = [0, channels, W * channels, (W + 1) * channels]
         
         # Sum the 4 positions via rotation and addition
-        # Start with the first position (offset 0)
         result = x
         
         for offset in offsets[1:]:  # Skip first (already have it)
@@ -328,57 +358,65 @@ class EncryptedAvgPool2d(EncryptedModule):
             result = result + rotated
         
         # Only rescale if input needed rescaling (e.g., came from a mul without rescale)
-        # If input was already rescaled (e.g., from EncryptedSquare), don't rescale again
-        # as that would drop the scale from Δ to ~1, causing precision loss
         if x._needs_rescale:
             result = result.rescale()
         
-        # Now result has the sum of 4 neighbors at each position
-        # But we only want every other position (stride 2 means skip)
-        
-        # Create mask for valid output positions with avg_factor
-        # Valid positions: (2*out_y, 2*out_x) for all out_y, out_x
-        # In flat index: (2*out_y * W + 2*out_x) * channels + c
+        # Create mask for valid output positions across ALL images.
+        # Valid positions: (2*out_y, 2*out_x) for each image's spatial grid.
         mask = torch.zeros(total_in, dtype=torch.float64)
-        for out_y in range(out_H):
-            for out_x in range(out_W):
-                in_y = 2 * out_y
-                in_x = 2 * out_x
-                in_patch_idx = in_y * W + in_x
-                for c in range(channels):
-                    mask[in_patch_idx * channels + c] = self.avg_factor
+        for b in range(batch_size):
+            block_start = b * npp * channels
+            for out_y in range(out_H):
+                for out_x in range(out_W):
+                    in_y = 2 * out_y
+                    in_x = 2 * out_x
+                    in_patch_idx = in_y * W + in_x
+                    for c in range(channels):
+                        mask[block_start + in_patch_idx * channels + c] = self.avg_factor
         
         # Apply mask (multiply by avg_factor at valid positions, 0 elsewhere)
+        # Consumes 1 multiplicative level.
         result = result.mul(mask.tolist())
         result = result.rescale()
-        
-        # Skip the gather step - keep values in sparse format
-        # The FC layer will handle the sparse layout via its weight matrix
-        # This avoids needing large rotation keys for gather matmul
         
         # Store the sparse layout information for downstream layers
         result._cnn_layout = {
             'num_patches': out_patches,
+            'num_patches_per_image': out_patches_per_image,
             'patch_features': channels,
             'original_shape': layout.get('original_shape'),
-            'sparse': True,  # Mark as sparse layout
-            'sparse_positions': self._get_valid_positions(out_H, out_W, W, channels),
+            'batch_size': batch_size,
+            'sparse': True,
+            'sparse_positions': self._get_valid_positions(
+                out_H, out_W, W, channels, batch_size=batch_size, npp=npp,
+            ),
             'total_slots': total_in,
         }
         result._shape = (out_patches, channels)
         
+        # Propagate packed-batch metadata
+        if batch_size > 1:
+            result._packed_batch = True
+            result._batch_size = batch_size
+            result._slots_per_sample = npp * channels
+        
         return result
     
-    def _get_valid_positions(self, out_H: int, out_W: int, W: int, channels: int) -> list:
+    def _get_valid_positions(
+        self, out_H: int, out_W: int, W: int, channels: int,
+        *, batch_size: int = 1, npp: int = 0,
+    ) -> list:
         """Get the positions of valid pooled values in the sparse layout."""
         positions = []
-        for out_y in range(out_H):
-            for out_x in range(out_W):
-                in_y = 2 * out_y
-                in_x = 2 * out_x
-                in_patch_idx = in_y * W + in_x
-                for c in range(channels):
-                    positions.append(in_patch_idx * channels + c)
+        for b in range(batch_size):
+            block_start = b * npp * channels
+            for out_y in range(out_H):
+                for out_x in range(out_W):
+                    in_y = 2 * out_y
+                    in_x = 2 * out_x
+                    in_patch_idx = in_y * W + in_x
+                    for c in range(channels):
+                        positions.append(block_start + in_patch_idx * channels + c)
         return positions
     
     def mult_depth(self) -> int:
