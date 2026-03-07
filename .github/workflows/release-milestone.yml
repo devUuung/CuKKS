@@ -1,0 +1,244 @@
+name: Release From Milestone
+
+on:
+  workflow_dispatch:
+    inputs:
+      milestone_number:
+        description: Closed milestone number to release
+        required: true
+        type: number
+      version:
+        description: Release version without leading v
+        required: true
+        type: string
+      target_ref:
+        description: Git ref to release from
+        required: true
+        default: main
+        type: string
+      draft:
+        description: Keep the GitHub release as draft after publishing
+        required: true
+        default: true
+        type: boolean
+      publish_pypi:
+        description: Publish packages to PyPI after draft release creation
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: release-milestone-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      release_title: ${{ steps.meta.outputs.release_title }}
+      milestone_title: ${{ steps.meta.outputs.milestone_title }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Set release metadata
+        id: meta
+        run: |
+          echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          echo "release_title=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate package versions
+        run: |
+          python - <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          expected = "${{ inputs.version }}"
+          files = [
+              Path("pyproject.toml"),
+              Path("cukks-cu118/pyproject.toml"),
+              Path("cukks-cu121/pyproject.toml"),
+              Path("cukks-cu124/pyproject.toml"),
+              Path("cukks-cu128/pyproject.toml"),
+          ]
+
+          mismatches = []
+          for path in files:
+              data = tomllib.loads(path.read_text())
+              actual = data["project"]["version"]
+              if actual != expected:
+                  mismatches.append(f"{path}: expected {expected}, found {actual}")
+
+          if mismatches:
+              print("Version mismatch detected:")
+              for mismatch in mismatches:
+                  print(f"- {mismatch}")
+              sys.exit(1)
+          PY
+
+      - name: Validate milestone and generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MILESTONE_NUMBER: ${{ inputs.milestone_number }}
+          VERSION: ${{ inputs.version }}
+          TARGET_REF: ${{ inputs.target_ref }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          repo = os.environ["REPOSITORY"]
+          milestone_number = os.environ["MILESTONE_NUMBER"]
+          version = os.environ["VERSION"]
+          target_ref = os.environ["TARGET_REF"]
+
+          def gh_json(*args):
+              out = subprocess.check_output(["gh", *args], text=True)
+              return json.loads(out)
+
+          milestone = gh_json("api", f"repos/{repo}/milestones/{milestone_number}")
+          if milestone["state"] != "closed":
+              raise SystemExit(f"Milestone #{milestone_number} must be closed before release")
+
+          subprocess.check_call(["git", "fetch", "origin", target_ref, "--tags"])
+          subprocess.check_call(["git", "merge-base", "--is-ancestor", f"origin/{target_ref}", "HEAD"])
+
+          existing_tag = subprocess.run(
+              ["git", "ls-remote", "--tags", "origin", f"refs/tags/v{version}"],
+              capture_output=True,
+              text=True,
+              check=True,
+          )
+          if existing_tag.stdout.strip():
+              raise SystemExit(f"Tag v{version} already exists on origin")
+
+          items = gh_json("api", f"repos/{repo}/issues?milestone={milestone_number}&state=closed&per_page=100")
+          prs = []
+          issues = []
+          for item in items:
+              if "pull_request" in item:
+                  pr = gh_json(
+                      "pr",
+                      "view",
+                      str(item["number"]),
+                      "--repo",
+                      repo,
+                      "--json",
+                      "number,title,url,mergedAt,baseRefName,state",
+                  )
+                  if not pr.get("mergedAt"):
+                      raise SystemExit(f"PR #{item['number']} is in milestone but not merged")
+                  if pr.get("baseRefName") != "main":
+                      raise SystemExit(f"PR #{item['number']} targets {pr.get('baseRefName')}, expected main")
+                  prs.append(pr)
+              else:
+                  issues.append(item)
+
+          if not prs:
+              raise SystemExit(f"Milestone #{milestone_number} has no merged PRs to release")
+
+          lines = [
+              f"## {milestone['title']}",
+              "",
+              f"Milestone: #{milestone_number}",
+              "",
+              "### Merged Pull Requests",
+          ]
+          for pr in sorted(prs, key=lambda item: item["number"]):
+              lines.append(f"- #{pr['number']} {pr['title']} ({pr['url']})")
+
+          if issues:
+              lines.extend(["", "### Closed Issues"])
+              for issue in sorted(issues, key=lambda item: item["number"]):
+                  lines.append(f"- #{issue['number']} {issue['title']} ({issue['html_url']})")
+
+          with open("release-notes.md", "w", encoding="utf-8") as fh:
+              fh.write("\n".join(lines) + "\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"milestone_title={milestone['title']}\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  create_release:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Create annotated tag
+        run: |
+          git tag -a "${{ needs.validate.outputs.tag }}" -m "Release ${{ needs.validate.outputs.tag }}"
+          git push origin "${{ needs.validate.outputs.tag }}"
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.validate.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --draft \
+            --title "${{ needs.validate.outputs.release_title }}" \
+            --notes-file release-notes.md \
+            --target "${{ inputs.target_ref }}"
+
+  publish_packages:
+    if: inputs.publish_pypi
+    needs:
+      - validate
+      - create_release
+    uses: ./.github/workflows/publish-packages.yml
+    with:
+      ref: ${{ needs.validate.outputs.tag }}
+      version: ${{ inputs.version }}
+      publish_pypi: true
+    secrets: inherit
+
+  finalize_release:
+    if: ${{ !cancelled() && needs.create_release.result == 'success' && (needs.publish_packages.result == 'success' || needs.publish_packages.result == 'skipped') }}
+    needs:
+      - validate
+      - create_release
+      - publish_packages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish draft release when requested
+        if: ${{ !inputs.draft }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ needs.validate.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false

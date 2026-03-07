@@ -1,21 +1,129 @@
-name: Build Wheels
+name: Publish Packages
 
 on:
-  push:
-    branches: [main]
-    tags-ignore: ['**']
-  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to publish from
+        required: true
+        type: string
+      version:
+        description: Release version without leading v
+        required: true
+        type: string
+      publish_pypi:
+        description: Publish packages to PyPI
+        required: false
+        default: true
+        type: boolean
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to publish from
+        required: true
+        default: main
+        type: string
+      version:
+        description: Release version without leading v
+        required: true
+        type: string
+      publish_pypi:
+        description: Publish packages to PyPI
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-wheels-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: publish-packages-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Validate package versions against requested release version
+        run: |
+          python - <<'PY'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          expected = "${{ inputs.version }}"
+          files = [
+              Path("pyproject.toml"),
+              Path("cukks-cu118/pyproject.toml"),
+              Path("cukks-cu121/pyproject.toml"),
+              Path("cukks-cu124/pyproject.toml"),
+              Path("cukks-cu128/pyproject.toml"),
+          ]
+
+          mismatches = []
+          for path in files:
+              data = tomllib.loads(path.read_text())
+              actual = data["project"]["version"]
+              if actual != expected:
+                  mismatches.append(f"{path}: expected {expected}, found {actual}")
+
+          if mismatches:
+              print("Version mismatch detected:")
+              for mismatch in mismatches:
+                  print(f"- {mismatch}")
+              sys.exit(1)
+
+          print(f"All package versions match {expected}")
+          PY
+
+  preflight-pypi:
+    if: inputs.publish_pypi
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any target package version already exists on PyPI
+        run: |
+          python - <<'PY'
+          import sys
+          import urllib.error
+          import urllib.request
+
+          version = "${{ inputs.version }}"
+          packages = [
+              "cukks",
+              "cukks-cu118",
+              "cukks-cu121",
+              "cukks-cu124",
+              "cukks-cu128",
+          ]
+
+          existing = []
+          for package in packages:
+              url = f"https://pypi.org/pypi/{package}/{version}/json"
+              try:
+                  with urllib.request.urlopen(url) as response:
+                      if response.status == 200:
+                          existing.append(package)
+              except urllib.error.HTTPError as exc:
+                  if exc.code != 404:
+                      raise
+
+          if existing:
+              print(f"PyPI already has version {version} for: {', '.join(existing)}")
+              sys.exit(1)
+
+          print(f"PyPI preflight OK for version {version}")
+          PY
+
   build-docker:
+    needs:
+      - validate-version
+      - preflight-pypi
+    if: ${{ always() && needs.validate-version.result == 'success' && (needs.preflight-pypi.result == 'success' || needs.preflight-pypi.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -26,6 +134,8 @@ jobs:
         cuda_version: ["118", "121", "124", "128"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Get lowercase repo name
         id: repo
@@ -47,9 +157,11 @@ jobs:
           context: .
           file: docker/manylinux-cuda${{ matrix.cuda_version }}.Dockerfile
           push: true
-          tags: ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
-          cache-from: type=gha,scope=cuda${{ matrix.cuda_version }}
-          cache-to: type=gha,mode=max,scope=cuda${{ matrix.cuda_version }},ignore-error=true
+          tags: |
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:v${{ inputs.version }}
+          cache-from: type=gha,scope=publish-cuda${{ matrix.cuda_version }}
+          cache-to: type=gha,mode=max,scope=publish-cuda${{ matrix.cuda_version }},ignore-error=true
 
   build-gpu:
     needs: build-docker
@@ -83,6 +195,8 @@ jobs:
             gcc_toolset: "13"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Get lowercase repo name
         id: repo
@@ -174,21 +288,19 @@ jobs:
           pip install wheelhouse/*cp${PY_VER}*.whl
 
           SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
-          echo "Checking installed package at: $SITE_PACKAGES/ckks"
-
           test -f "$SITE_PACKAGES/ckks/__init__.py"
           test -f "$SITE_PACKAGES/ckks/torch_api.py"
           test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_backend.cpython-*.so
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
 
-          echo "All required files present for CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }}!"
-          echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
-
   build-main:
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -204,3 +316,43 @@ jobs:
         with:
           name: wheels-main
           path: dist/*
+
+  publish-main:
+    if: inputs.publish_pypi
+    needs:
+      - build-main
+      - test-gpu
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-main
+          path: dist
+
+      - name: Publish cukks to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-gpu:
+    if: inputs.publish_pypi
+    needs:
+      - build-main
+      - test-gpu
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    environment: pypi
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ["118", "121", "124", "128"]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-gpu-cu${{ matrix.cuda_version }}
+          path: dist
+
+      - name: Publish cukks-cu${{ matrix.cuda_version }} to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
