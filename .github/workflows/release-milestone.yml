@@ -3,12 +3,8 @@ name: Release From Milestone
 on:
   workflow_dispatch:
     inputs:
-      milestone_number:
-        description: Closed milestone number to release
-        required: true
-        type: number
-      version:
-        description: Release version without leading v
+      milestone_name:
+        description: Closed milestone title to release (used as the release version)
         required: true
         type: string
       target_ref:
@@ -33,7 +29,7 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: release-milestone-${{ inputs.version }}
+  group: release-milestone-${{ inputs.milestone_name }}
   cancel-in-progress: false
 
 jobs:
@@ -47,6 +43,7 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       release_title: ${{ steps.meta.outputs.release_title }}
       milestone_title: ${{ steps.meta.outputs.milestone_title }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,44 +53,14 @@ jobs:
       - name: Set release metadata
         id: meta
         run: |
-          echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          echo "release_title=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-
-      - name: Validate package versions
-        run: |
-          python - <<'PY'
-          import sys
-          import tomllib
-          from pathlib import Path
-
-          expected = "${{ inputs.version }}"
-          files = [
-              Path("pyproject.toml"),
-              Path("cukks-cu118/pyproject.toml"),
-              Path("cukks-cu121/pyproject.toml"),
-              Path("cukks-cu124/pyproject.toml"),
-              Path("cukks-cu128/pyproject.toml"),
-          ]
-
-          mismatches = []
-          for path in files:
-              data = tomllib.loads(path.read_text())
-              actual = data["project"]["version"]
-              if actual != expected:
-                  mismatches.append(f"{path}: expected {expected}, found {actual}")
-
-          if mismatches:
-              print("Version mismatch detected:")
-              for mismatch in mismatches:
-                  print(f"- {mismatch}")
-              sys.exit(1)
-          PY
+          echo "version=${{ inputs.milestone_name }}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${{ inputs.milestone_name }}" >> "$GITHUB_OUTPUT"
+          echo "release_title=v${{ inputs.milestone_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Validate milestone and generate release notes
         env:
           GH_TOKEN: ${{ github.token }}
-          MILESTONE_NUMBER: ${{ inputs.milestone_number }}
-          VERSION: ${{ inputs.version }}
+          MILESTONE_NAME: ${{ inputs.milestone_name }}
           TARGET_REF: ${{ inputs.target_ref }}
           REPOSITORY: ${{ github.repository }}
         run: |
@@ -104,17 +71,21 @@ jobs:
           import sys
 
           repo = os.environ["REPOSITORY"]
-          milestone_number = os.environ["MILESTONE_NUMBER"]
-          version = os.environ["VERSION"]
+          milestone_name = os.environ["MILESTONE_NAME"]
+          version = milestone_name
           target_ref = os.environ["TARGET_REF"]
 
           def gh_json(*args):
               out = subprocess.check_output(["gh", *args], text=True)
               return json.loads(out)
 
-          milestone = gh_json("api", f"repos/{repo}/milestones/{milestone_number}")
+          milestones = gh_json("api", f"repos/{repo}/milestones?state=closed&per_page=100")
+          milestone = next((item for item in milestones if item["title"] == milestone_name), None)
+          if milestone is None:
+              raise SystemExit(f"Closed milestone '{milestone_name}' not found")
+          milestone_number = milestone["number"]
           if milestone["state"] != "closed":
-              raise SystemExit(f"Milestone #{milestone_number} must be closed before release")
+              raise SystemExit(f"Milestone '{milestone_name}' must be closed before release")
 
           subprocess.check_call(["git", "fetch", "origin", target_ref, "--tags"])
           subprocess.check_call(["git", "merge-base", "--is-ancestor", f"origin/{target_ref}", "HEAD"])
@@ -151,12 +122,12 @@ jobs:
                   issues.append(item)
 
           if not prs:
-              raise SystemExit(f"Milestone #{milestone_number} has no merged PRs to release")
+              raise SystemExit(f"Milestone '{milestone_name}' has no merged PRs to release")
 
           lines = [
               f"## {milestone['title']}",
               "",
-              f"Milestone: #{milestone_number}",
+              f"Milestone: {milestone['title']} (#{milestone_number})",
               "",
               "### Merged Pull Requests",
           ]
@@ -180,15 +151,51 @@ jobs:
           name: release-notes
           path: release-notes.md
 
-  create_release:
+  prepare_release_commit:
     needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_sha: ${{ steps.release-sha.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+
+      - name: Sync tracked version files to release version
+        run: |
+          python scripts/set_release_version.py "${{ needs.validate.outputs.version }}" --write
+
+      - name: Configure git author for release prep commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create release prep commit when version files changed
+        run: |
+          if ! git diff --quiet; then
+            git add pyproject.toml cukks-cu118/pyproject.toml cukks-cu121/pyproject.toml cukks-cu124/pyproject.toml cukks-cu128/pyproject.toml bindings/openfhe_backend/pyproject.toml cukks/__init__.py
+            git commit -m "release: v${{ needs.validate.outputs.version }}"
+            git push origin HEAD:${{ inputs.target_ref }}
+          fi
+
+      - name: Record release commit SHA
+        id: release-sha
+        run: echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  create_release:
+    needs:
+      - validate
+      - prepare_release_commit
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.target_ref }}
+          ref: ${{ needs.prepare_release_commit.outputs.release_sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -198,7 +205,7 @@ jobs:
 
       - name: Create annotated tag
         run: |
-          git tag -a "${{ needs.validate.outputs.tag }}" -m "Release ${{ needs.validate.outputs.tag }}"
+          git tag -a "${{ needs.validate.outputs.tag }}" "${{ needs.prepare_release_commit.outputs.release_sha }}" -m "Release ${{ needs.validate.outputs.tag }}"
           git push origin "${{ needs.validate.outputs.tag }}"
 
       - name: Create draft GitHub release
@@ -210,7 +217,7 @@ jobs:
             --draft \
             --title "${{ needs.validate.outputs.release_title }}" \
             --notes-file release-notes.md \
-            --target "${{ inputs.target_ref }}"
+            --target "${{ needs.prepare_release_commit.outputs.release_sha }}"
 
   publish_packages:
     if: inputs.publish_pypi
@@ -220,7 +227,6 @@ jobs:
     uses: ./.github/workflows/publish-packages.yml
     with:
       ref: ${{ needs.validate.outputs.tag }}
-      version: ${{ inputs.version }}
       publish_pypi: true
     secrets: inherit
 

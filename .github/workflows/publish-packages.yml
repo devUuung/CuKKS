@@ -7,10 +7,6 @@ on:
         description: Git ref to publish from
         required: true
         type: string
-      version:
-        description: Release version without leading v
-        required: true
-        type: string
       publish_pypi:
         description: Publish packages to PyPI
         required: false
@@ -22,10 +18,6 @@ on:
         description: Git ref to publish from
         required: true
         default: main
-        type: string
-      version:
-        description: Release version without leading v
-        required: true
         type: string
       publish_pypi:
         description: Publish packages to PyPI
@@ -41,48 +33,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate-version:
+  derive-version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Validate package versions against requested release version
+      - name: Derive release version from checked-out source
+        id: version
+        env:
+          GITHUB_OUTPUT_PATH: ${{ github.output }}
         run: |
           python - <<'PY'
-          import sys
+          import os
           import tomllib
           from pathlib import Path
 
-          expected = "${{ inputs.version }}"
-          files = [
-              Path("pyproject.toml"),
-              Path("cukks-cu118/pyproject.toml"),
-              Path("cukks-cu121/pyproject.toml"),
-              Path("cukks-cu124/pyproject.toml"),
-              Path("cukks-cu128/pyproject.toml"),
-          ]
-
-          mismatches = []
-          for path in files:
-              data = tomllib.loads(path.read_text())
-              actual = data["project"]["version"]
-              if actual != expected:
-                  mismatches.append(f"{path}: expected {expected}, found {actual}")
-
-          if mismatches:
-              print("Version mismatch detected:")
-              for mismatch in mismatches:
-                  print(f"- {mismatch}")
-              sys.exit(1)
-
-          print(f"All package versions match {expected}")
+          data = tomllib.loads(Path('pyproject.toml').read_text())
+          version = data['project']['version']
+          with open(Path(os.environ['GITHUB_OUTPUT_PATH']), 'a', encoding='utf-8') as fh:
+              fh.write(f'version={version}\n')
           PY
+
+      - name: Validate package versions against derived release version
+        run: |
+          python scripts/set_release_version.py "${{ steps.version.outputs.version }}"
 
   preflight-pypi:
     if: inputs.publish_pypi
-    needs: validate-version
+    needs: derive-version
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any target package version already exists on PyPI
@@ -92,7 +74,7 @@ jobs:
           import urllib.error
           import urllib.request
 
-          version = "${{ inputs.version }}"
+          version = "${{ needs.derive-version.outputs.version }}"
           packages = [
               "cukks",
               "cukks-cu118",
@@ -120,7 +102,7 @@ jobs:
           PY
 
   preflight-ghcr:
-    needs: validate-version
+    needs: derive-version
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -130,7 +112,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.derive-version.outputs.version }}
         run: |
           python - <<'PY'
           import json
@@ -173,10 +155,10 @@ jobs:
 
   build-docker:
     needs:
-      - validate-version
+      - derive-version
       - preflight-pypi
       - preflight-ghcr
-    if: ${{ always() && needs.validate-version.result == 'success' && needs.preflight-ghcr.result == 'success' && (needs.preflight-pypi.result == 'success' || needs.preflight-pypi.result == 'skipped') }}
+    if: ${{ always() && needs.derive-version.result == 'success' && needs.preflight-ghcr.result == 'success' && (needs.preflight-pypi.result == 'success' || needs.preflight-pypi.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -212,7 +194,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:${{ github.sha }}
-            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:v${{ inputs.version }}
+            ghcr.io/${{ steps.repo.outputs.lowercase }}/manylinux-cuda${{ matrix.cuda_version }}:v${{ needs.derive-version.outputs.version }}
           cache-from: type=gha,scope=publish-cuda${{ matrix.cuda_version }}
           cache-to: type=gha,mode=max,scope=publish-cuda${{ matrix.cuda_version }},ignore-error=true
 
@@ -348,7 +330,7 @@ jobs:
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
 
   build-main:
-    needs: validate-version
+    needs: derive-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
