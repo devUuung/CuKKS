@@ -220,6 +220,11 @@ python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 External contributions are welcome.
 
+If you want to contribute to CuKKS, start here first:
+
+- `CONTRIBUTING.md`
+- `docs/ci-cd.md`
+
 - start with an issue using the templates in `.github/ISSUE_TEMPLATE/`
 - open a PR using `.github/pull_request_template.md`
 - maintainers assign milestones and cut releases from closed milestones

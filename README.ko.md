@@ -216,6 +216,27 @@ python -m cukks.examples.encrypted_inference --demo conversion
 python examples/mnist_encrypted.py --hidden 64 --samples 5
 ```
 
+## 기여하기
+
+외부 기여도 환영합니다.
+
+기여를 원하신다면 먼저 아래 문서를 읽어 주세요.
+
+- `CONTRIBUTING.ko.md`
+- `docs/ci-cd.ko.md`
+
+기본 흐름은 다음과 같습니다.
+
+- `.github/ISSUE_TEMPLATE/` 템플릿으로 이슈를 먼저 생성
+- `.github/pull_request_template.md`를 사용해 PR 작성
+- 메인테이너가 milestone을 지정하고, 닫힌 milestone 기준으로 릴리즈 진행
+
+추가 문서:
+
+- `CONTRIBUTING.ko.md` - 외부 기여자 참여 흐름
+- `docs/ci-cd.ko.md` - CI/CD 구조
+- `RELEASING.md` - milestone 기반 릴리즈 운영
+
 <details>
 <summary><strong>CNN 예제</strong></summary>
 
