@@ -53,8 +53,7 @@
 
 입력값:
 
-- `milestone_number`
-- `version`
+- `milestone_name`
 - `target_ref`
 - `draft`
 - `publish_pypi`
@@ -63,7 +62,7 @@
 
 - milestone이 존재하고 닫혀 있는지 확인
 - 해당 milestone의 PR이 모두 `main`에 머지됐는지 확인
-- 패키지 버전이 요청한 릴리즈 버전과 맞는지 확인
+- milestone 제목을 릴리즈 버전으로 사용하고, 패키지 버전을 그 값에 맞게 동기화
 - milestone 안의 merged PR / closed issue 기준으로 릴리즈 노트 생성
 - annotated tag 생성
 - GitHub release 생성

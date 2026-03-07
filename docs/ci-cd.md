@@ -33,7 +33,7 @@ Triggered by:
 
 Safety checks:
 
-- validates package versions against the requested release version
+- derives the release version from the checked-out ref and validates all tracked package files against it
 - checks whether the target version already exists on PyPI
 - uses GitHub OIDC trusted publishing with `environment: pypi`
 
@@ -53,8 +53,7 @@ Triggered by:
 
 Inputs:
 
-- `milestone_number`
-- `version`
+- `milestone_name`
 - `target_ref`
 - `draft`
 - `publish_pypi`
@@ -63,7 +62,7 @@ What it does:
 
 - validates that the milestone exists and is closed
 - checks that milestone PRs are merged into `main`
-- verifies package versions match the requested release version
+- uses the milestone title as the release version, syncs tracked version files to it, and creates a release prep commit when needed
 - generates release notes from merged PRs and closed issues in the milestone
 - creates an annotated tag
 - creates a GitHub release
@@ -86,7 +85,6 @@ Before releasing:
 
 - make sure the milestone is closed
 - make sure all milestone PRs are merged
-- bump all package versions consistently
 - verify PyPI Trusted Publishing still matches:
   - owner: `devUuung`
   - repo: `CuKKS`

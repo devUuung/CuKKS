@@ -41,19 +41,14 @@ Before cutting a release:
 
 - confirm the target milestone is closed
 - confirm all milestone PRs are merged into `main`
-- bump all package versions to the new release version:
-  - `pyproject.toml`
-  - `cukks-cu118/pyproject.toml`
-  - `cukks-cu121/pyproject.toml`
-  - `cukks-cu124/pyproject.toml`
-  - `cukks-cu128/pyproject.toml`
+- use the milestone title itself as the release version (for example, `0.1.4`)
+- you do not need to manually edit package version files before running the release workflow
 
 ## Cut a release from a milestone
 
 Run `.github/workflows/release-milestone.yml` with:
 
-- `milestone_number`: the closed milestone number
-- `version`: release version without `v`
+- `milestone_name`: the closed milestone title, used directly as the release version
 - `target_ref`: normally `main`
 - `draft`: keep the GitHub release as draft after build/publish completes
 - `publish_pypi`: whether to publish packages to PyPI
@@ -62,11 +57,12 @@ The workflow will:
 
 1. validate milestone state and package versions
 2. verify that milestone PRs are merged into `main`
-3. generate release notes from merged PRs and closed issues in the milestone
-4. create an annotated git tag
-5. create a draft GitHub release
-6. call `.github/workflows/publish-packages.yml` to build and publish packages
-7. optionally publish the GitHub release if `draft` is false
+3. sync tracked version files to the milestone title and create a release prep commit on `main` when needed
+4. generate release notes from merged PRs and closed issues in the milestone
+5. create an annotated git tag from the release prep commit
+6. create a draft GitHub release
+7. call `.github/workflows/publish-packages.yml` to build and publish packages from that tag
+8. optionally publish the GitHub release if `draft` is false
 
 See `docs/ci-cd.md` for the full automation layout and how this workflow connects to CI and package publishing.
 
@@ -75,7 +71,7 @@ See `docs/ci-cd.md` for the full automation layout and how this workflow connect
 Use `.github/workflows/publish-packages.yml` only for controlled recovery.
 
 - it accepts an explicit `ref`
-- it validates package version alignment
+- it derives the release version from the checked-out source
 - it fails if the target version already exists on PyPI
 
 ## Safety rules
@@ -83,5 +79,5 @@ Use `.github/workflows/publish-packages.yml` only for controlled recovery.
 - do not publish from `release.published`
 - do not publish by creating a GitHub release manually in the UI
 - do not reuse old tags for new package contents
-- do not cut a release until all package version files match the target version
+- do not use a milestone title that is not a valid package version string
 - do not release a milestone while it still contains unmerged PRs
