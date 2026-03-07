@@ -222,12 +222,17 @@ class EncryptedConv2d(EncryptedModule):
         For large inputs (>100M elements) we use the compact BSGS matmul on
         the small per-patch weight matrix W (out_channels × patch_features)
         which avoids allocating the full N×N block-diagonal.
+
+        When the input is a packed batch (batch_size > 1), the patches from
+        all images are concatenated: [img0_patches, img1_patches, ...].
+        The block-diagonal structure naturally keeps images separate.
         """
         layout = x._cnn_layout
         if layout is None:
             raise RuntimeError("EncryptedConv2d requires _cnn_layout metadata for packed forward")
         num_patches = layout['num_patches']
         patch_features = layout['patch_features']
+        batch_size = layout.get('batch_size', 1)
 
         self.input_shape = (num_patches, patch_features)
         self.output_shape = (num_patches, self.out_channels)
@@ -239,9 +244,9 @@ class EncryptedConv2d(EncryptedModule):
         MAX_MATRIX_ELEMENTS = 100_000_000
 
         if matrix_elements <= MAX_MATRIX_ELEMENTS and total_in <= 2048:
-            return self._forward_he_packed_dense(x, num_patches, patch_features, total_out, total_in)
+            return self._forward_he_packed_dense(x, num_patches, patch_features, total_out, total_in, batch_size=batch_size)
 
-        return self._forward_he_packed_compact(x, num_patches, patch_features)
+        return self._forward_he_packed_compact(x, num_patches, patch_features, batch_size=batch_size)
 
     def _forward_he_packed_dense(
         self,
@@ -250,13 +255,19 @@ class EncryptedConv2d(EncryptedModule):
         patch_features: int,
         total_out: int,
         total_in: int,
+        *,
+        batch_size: int = 1,
     ) -> "EncryptedTensor":
         """Small-input path: materialize the full block-diagonal matrix."""
         layout = x._cnn_layout
         if layout is None:
             raise RuntimeError("EncryptedConv2d requires _cnn_layout metadata for dense packed forward")
 
-        x = x.view(total_in)
+        # Bypass packed-matmul dispatch: the block-diagonal weight already
+        # handles all images, so use regular matmul on a plain 1-D wrapper.
+        from ..tensor import EncryptedTensor as _ET
+        x_flat = _ET(x._cipher, (total_in,), x._context, x._depth)
+        x_flat._needs_rescale = x._needs_rescale
 
         block_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
         for p in range(num_patches):
@@ -270,14 +281,23 @@ class EncryptedConv2d(EncryptedModule):
         if self.bias is not None:
             block_bias = self.bias.to(torch.float64).repeat(num_patches)
 
-        result = x.matmul(block_weight, block_bias)
+        result = x_flat.matmul(block_weight, block_bias)
 
+        npp = layout.get('num_patches_per_image', num_patches // max(batch_size, 1))
         result._cnn_layout = {
             'num_patches': num_patches,
             'patch_features': self.out_channels,
             'original_shape': layout.get('original_shape'),
+            'batch_size': batch_size,
+            'num_patches_per_image': npp,
         }
         result._shape = (num_patches, self.out_channels)
+
+        if batch_size > 1:
+            result._packed_batch = True
+            result._batch_size = batch_size
+            result._slots_per_sample = (num_patches // batch_size) * self.out_channels
+
         return result
 
     def _forward_he_packed_compact(
@@ -285,6 +305,8 @@ class EncryptedConv2d(EncryptedModule):
         x: "EncryptedTensor",
         num_patches: int,
         patch_features: int,
+        *,
+        batch_size: int = 1,
     ) -> "EncryptedTensor":
         """Large-input path: diagonal method without materializing block-diagonal.
 
@@ -363,12 +385,20 @@ class EncryptedConv2d(EncryptedModule):
                         bias_plain[idx] = self.bias[c].item()
             accumulator = accumulator.add(bias_plain)
 
+        npp = layout.get('num_patches_per_image', num_patches // max(batch_size, 1))
         accumulator._cnn_layout = {
             'num_patches': num_patches,
             'patch_features': self.out_channels,
             'original_shape': layout.get('original_shape'),
+            'batch_size': batch_size,
+            'num_patches_per_image': npp,
         }
         accumulator._shape = (num_patches, self.out_channels)
+
+        if batch_size > 1:
+            accumulator._packed_batch = True
+            accumulator._batch_size = batch_size
+            accumulator._slots_per_sample = (num_patches // batch_size) * self.out_channels
         return accumulator
 
     @staticmethod
