@@ -150,7 +150,7 @@ pip install -e .
 | `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
 | `nn.BatchNorm` | Folded | Merged into prev layer |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial approx |
-| `nn.Attention` | `EncryptedApproxAttention` | seq_len=1 |
+| `nn.Attention` | `EncryptedApproxAttention` | seq_len=1 or packed/list seq_len <= 8 |
 
 <details>
 <summary><strong>Full layer support table</strong></summary>
@@ -171,7 +171,7 @@ pip install -e .
 | `nn.Sequential` | `EncryptedSequential` | Full support |
 | `nn.Dropout` | `EncryptedDropout` | No-op during inference |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Pure HE polynomial approximation |
-| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Polynomial softmax (seq_len=1) |
+| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Taylor softmax (seq_len=1) or Power-Softmax (packed/list seq_len <= 8) |
 
 </details>
 
@@ -309,3 +309,8 @@ Apache License 2.0
 - [Homomorphic Encryption for Arithmetic of Approximate Numbers](https://eprint.iacr.org/2016/421) — Cheon et al. (CKKS)
 - [Bootstrapping for Approximate Homomorphic Encryption](https://eprint.iacr.org/2018/153) — Cheon et al.
 - [Faster Homomorphic Linear Transformations in HElib](https://eprint.iacr.org/2018/244) — Halevi & Shoup (BSGS)
+- [GAZELLE: A Low Latency Framework for Secure Neural Network Inference](https://www.usenix.org/conference/usenixsecurity18/presentation/juvekar) — Juvekar et al. (Convolution)
+- [PP-STAT: An Efficient Privacy-Preserving Statistical Analysis Framework using Homomorphic Encryption](https://doi.org/10.1145/3583780) — Choi (Encrypted Statistics)
+- [STIP: Efficient and Secure Non-Interactive Transformer Inference via Compact Packing](https://doi.org/10.1145/3696410.3714779) — Wang et al. (Packed Attention)
+- [Efficient Bootstrapping for Approximate Homomorphic Encryption](https://eprint.iacr.org/2020/1203) — Bossuat et al. (Double-Hoisting)
+- [On the Number of Nonscalar Multiplications Necessary to Evaluate Polynomials](https://doi.org/10.1137/0202007) — Paterson & Stockmeyer (Polynomial Evaluation)
