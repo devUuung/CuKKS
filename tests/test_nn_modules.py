@@ -19,7 +19,7 @@ from cukks.nn import (
     EncryptedLayerNorm,
     EncryptedDropout,
 )
-from cukks.converter import ModelConverter
+from cukks.converter import ConversionOptions, ModelConverter
 
 
 class TestEncryptedLinear:
@@ -327,12 +327,18 @@ class TestAttention:
         assert attn.num_heads == 4
         assert attn.head_dim == 16
         assert attn.softmax_degree == 4
+        assert attn.normalization_mode == "power_softmax"
+        assert attn.gaussian_gamma == 0.25
         assert attn.scale == 1.0 / (16 ** 0.5)
 
     def test_attention_creation_invalid_heads(self):
         """Test that invalid num_heads raises ValueError."""
         with pytest.raises(ValueError, match="must be divisible"):
             EncryptedApproxAttention(embed_dim=64, num_heads=5)
+
+    def test_attention_creation_invalid_normalization_mode(self):
+        with pytest.raises(ValueError, match="normalization_mode"):
+            EncryptedApproxAttention(embed_dim=64, num_heads=4, normalization_mode="softmax")
 
     def test_attention_from_torch(self):
         """Test conversion from PyTorch MultiheadAttention."""
@@ -347,6 +353,20 @@ class TestAttention:
         assert enc_attn.k_weight is not None
         assert enc_attn.v_weight is not None
         assert enc_attn.out_weight is not None
+
+    def test_attention_from_torch_gaussian_mode(self):
+        torch_attn = nn.MultiheadAttention(embed_dim=32, num_heads=4, batch_first=True)
+        torch_attn.eval()
+
+        enc_attn = EncryptedApproxAttention.from_torch(
+            torch_attn,
+            softmax_degree=4,
+            normalization_mode="gaussian",
+            gaussian_gamma=0.2,
+        )
+
+        assert enc_attn.normalization_mode == "gaussian"
+        assert enc_attn.gaussian_gamma == 0.2
 
     def test_attention_mult_depth(self):
         """Test multiplicative depth estimation."""
@@ -409,13 +429,21 @@ class TestAttention:
 
     def test_attention_repr(self):
         """Test string representation."""
-        attn = EncryptedApproxAttention(embed_dim=64, num_heads=8, softmax_degree=6)
+        attn = EncryptedApproxAttention(
+            embed_dim=64,
+            num_heads=8,
+            softmax_degree=6,
+            normalization_mode="gaussian",
+            gaussian_gamma=0.2,
+        )
         repr_str = repr(attn)
         
         assert "EncryptedApproxAttention" in repr_str
         assert "embed_dim=64" in repr_str
         assert "num_heads=8" in repr_str
         assert "softmax_degree=6" in repr_str
+        assert "normalization_mode=gaussian" in repr_str
+        assert "gaussian_gamma=0.2" in repr_str
 
     def test_taylor_exp_coeffs(self):
         """Test Taylor expansion coefficients for exp(x)."""
@@ -434,10 +462,15 @@ class TestAttentionMultiToken:
     """Tests for seq_len > 1 attention using Power-Softmax."""
     
     @pytest.mark.parametrize("seq_len", [2, 4, 8])
-    def test_attention_multi_token_forward(self, mock_enc_context, seq_len):
+    @pytest.mark.parametrize("normalization_mode", ["power_softmax", "gaussian"])
+    def test_attention_multi_token_forward(self, mock_enc_context, seq_len, normalization_mode):
         """Test forward pass with multiple tokens."""
         embed_dim = 16
-        attn = EncryptedApproxAttention(embed_dim=embed_dim, num_heads=2)
+        attn = EncryptedApproxAttention(
+            embed_dim=embed_dim,
+            num_heads=2,
+            normalization_mode=normalization_mode,
+        )
         
         q = [mock_enc_context.encrypt(torch.randn(embed_dim) * 0.5) for _ in range(seq_len)]
         k = [mock_enc_context.encrypt(torch.randn(embed_dim) * 0.5) for _ in range(seq_len)]
@@ -462,6 +495,13 @@ class TestAttentionMultiToken:
         
         with pytest.raises(NotImplementedError, match="Maximum is 8"):
             attn.forward_attention(q, k, v)
+
+    def test_single_tensor_seq_len_gt_1_directs_to_supported_api(self, mock_enc_context):
+        attn = EncryptedApproxAttention(embed_dim=8, num_heads=2)
+        query = mock_enc_context.encrypt(torch.randn(4, 8) * 0.5)
+
+        with pytest.raises(NotImplementedError, match=r"List\[EncryptedTensor\].*max seq_len=8"):
+            attn.forward_attention(query, query, query)
 
 
 class TestLayerNorm:
@@ -752,6 +792,85 @@ class TestConverterNewModules:
         enc_attn = converter._convert_attention(torch_attn)
         
         assert isinstance(enc_attn, EncryptedApproxAttention)
+
+    def test_converter_attention_uses_gaussian_mode_from_options(self):
+        torch_attn = nn.MultiheadAttention(embed_dim=8, num_heads=2, batch_first=True)
+        torch_attn.eval()
+
+        converter = ModelConverter(
+            ConversionOptions(
+                attention_normalization_mode="gaussian",
+                attention_gaussian_gamma=0.2,
+            )
+        )
+        enc_attn = converter._convert_attention(torch_attn)
+
+        assert enc_attn.normalization_mode == "gaussian"
+        assert enc_attn.gaussian_gamma == 0.2
+
+    @pytest.mark.parametrize("normalization_mode", ["power_softmax", "gaussian"])
+    def test_converter_attention_supports_packed_multi_token_input(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        normalization_mode: str,
+    ):
+        from cukks import CKKSInferenceContext
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        torch.manual_seed(0)
+        torch_attn = nn.MultiheadAttention(embed_dim=4, num_heads=2, batch_first=True)
+        torch_attn.eval()
+
+        converter = ModelConverter(
+            ConversionOptions(attention_normalization_mode=normalization_mode)
+        )
+        enc_attn = converter._convert_attention(torch_attn)
+
+        ctx = CKKSInferenceContext(device="cpu")
+        samples = [
+            torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]]),
+            torch.tensor([[0.5, 0.1, 0.2, 0.7], [0.6, 0.2, 0.3, 0.1]]),
+        ]
+        enc_batch = ctx.encrypt_batch(samples)
+
+        enc_output = enc_attn(enc_batch)
+        recovered = ctx.decrypt_batch(enc_output, sample_shape=(2, 4))
+
+        expected = []
+        for sample in samples:
+            tokens = [ctx.encrypt(sample[i]) for i in range(sample.shape[0])]
+            enc_tokens = enc_attn.forward_attention(tokens, tokens, tokens)
+            assert isinstance(enc_tokens, list)
+            expected.append(torch.stack([ctx.decrypt(token) for token in enc_tokens]))
+
+        torch.testing.assert_close(recovered[0], expected[0], rtol=1e-4, atol=1e-4)
+        torch.testing.assert_close(recovered[1], expected[1], rtol=1e-4, atol=1e-4)
+
+    def test_converter_attention_packed_seq_len_9_raises(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        torch_attn = nn.MultiheadAttention(embed_dim=4, num_heads=2, batch_first=True)
+        torch_attn.eval()
+
+        converter = ModelConverter()
+        enc_attn = converter._convert_attention(torch_attn)
+
+        ctx = CKKSInferenceContext(device="cpu")
+        enc_batch = ctx.encrypt_batch([torch.randn(9, 4) * 0.1])
+
+        with pytest.raises(NotImplementedError, match="Maximum is 8"):
+            enc_attn(enc_batch)
 
     def test_converter_grouped_conv(self):
         """Test converter handles grouped Conv2d."""

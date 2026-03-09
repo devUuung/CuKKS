@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence, cast
 
 import torch
 
@@ -85,7 +85,8 @@ class MockCKKSContext:
         """Unwrap a MockCKKSTensor back to a regular tensor."""
         final_shape = shape or tensor.shape
         num_elements = int(math.prod(final_shape)) if final_shape else tensor.size
-        values = tensor.data[:num_elements].clone()
+        raw = tensor.data[:num_elements].clone()
+        values = raw.real.to(torch.float64) if raw.is_complex() else raw
         target_device = (
             torch.device(device)
             if device is not None
@@ -113,7 +114,10 @@ class MockCKKSTensor:
         depth: int = 0,
     ):
         self.context = context
-        self.data = data.to(dtype=torch.float64)
+        if data.is_complex():
+            self.data = data.to(dtype=torch.complex128)
+        else:
+            self.data = data.to(dtype=torch.float64)
         self.shape = tuple(shape)
         self.device = torch.device(device) if isinstance(device, str) else device
         self.size = int(math.prod(self.shape)) if len(self.shape) > 0 else 1
@@ -222,8 +226,29 @@ class MockCKKSTensor:
         return result
 
     def conjugate(self) -> "MockCKKSTensor":
-        """Complex conjugate (identity for real values)."""
-        result = MockCKKSTensor(self.context, self.data.clone(), self.shape, self.device, self._depth)
+        """Complex conjugate of slot values."""
+        result = MockCKKSTensor(self.context, self.data.conj().resolve_conj(), self.shape, self.device, self._depth)
+        result._level = self._level
+        return result
+
+    def mul_by_i(self) -> "MockCKKSTensor":
+        """Multiply all slots by the imaginary unit i."""
+        cdata = self.data.to(torch.complex128) * 1j
+        result = MockCKKSTensor(self.context, cdata, self.shape, self.device, self._depth)
+        result._level = self._level
+        return result
+
+    def extract_real(self) -> "MockCKKSTensor":
+        """Extract real part of all slots: Re(ct) = 0.5*(ct + Conj(ct))."""
+        real_part = self.data.real if self.data.is_complex() else self.data.clone()
+        result = MockCKKSTensor(self.context, real_part.to(torch.float64), self.shape, self.device, self._depth)
+        result._level = self._level
+        return result
+
+    def extract_imag(self) -> "MockCKKSTensor":
+        """Extract imaginary part of all slots as a real-valued tensor."""
+        imag_part = self.data.imag if self.data.is_complex() else torch.zeros_like(self.data)
+        result = MockCKKSTensor(self.context, imag_part.to(torch.float64), self.shape, self.device, self._depth)
         result._level = self._level
         return result
 
@@ -232,6 +257,9 @@ class MockCKKSTensor:
         result = MockCKKSTensor(self.context, self.data.clone(), self.shape, self.device, self._depth)
         result._level = max(0, self._level - 1)
         return result
+
+    def _ensure_rescaled(self) -> "MockCKKSTensor":
+        return self
 
     def matmul_dense(
         self, matrix: Sequence[Sequence[float]] | torch.Tensor
@@ -267,7 +295,7 @@ class MockCKKSTensor:
         bsgs_n2: int = 0,
         weight_hash: int = 0,
         diag_nonzero: Sequence[bool] | None = None,
-    ) -> "MockCKKSTensor":
+        ) -> "MockCKKSTensor":
         """BSGS matrix-vector multiplication (mock delegates to dense).
 
         In the real backend, BSGS reduces rotation count from O(n) to O(sqrt(n)).
@@ -275,6 +303,61 @@ class MockCKKSTensor:
         ``matmul_dense`` while accepting the extra parameters silently.
         """
         return self.matmul_dense(matrix)
+
+    def packed_self_attention_power(
+        self,
+        key: "MockCKKSTensor",
+        value: "MockCKKSTensor",
+        batch_size: int,
+        seq_len: int,
+        embed_dim: int,
+        scale: float,
+        shift: float,
+        reciprocal_coeffs: Sequence[float],
+        renorm_reciprocal_coeffs: Sequence[float],
+    ) -> "MockCKKSTensor":
+        from cukks.nn import EncryptedApproxAttention
+
+        slots_per_sample = seq_len * embed_dim
+        outputs = torch.zeros_like(self.data)
+        attn = EncryptedApproxAttention(embed_dim=embed_dim, num_heads=1)
+        attn.scale = scale
+
+        for batch_idx in range(batch_size):
+            sample_start = batch_idx * slots_per_sample
+            sample_end = sample_start + slots_per_sample
+            q_sample = self.data[sample_start:sample_end].view(seq_len, embed_dim)
+            k_sample = key.data[sample_start:sample_end].view(seq_len, embed_dim)
+            v_sample = value.data[sample_start:sample_end].view(seq_len, embed_dim)
+            output_sample = torch.zeros_like(q_sample)
+
+            q_tokens = [self._token_tensor(q_sample[i], embed_dim) for i in range(seq_len)]
+            k_tokens = [self._token_tensor(k_sample[i], embed_dim) for i in range(seq_len)]
+            v_tokens = [self._token_tensor(v_sample[i], embed_dim) for i in range(seq_len)]
+
+            token_outputs = cast(
+                list[MockCKKSTensor],
+                attn.forward_attention(
+                    cast(list, q_tokens),
+                    cast(list, k_tokens),
+                    cast(list, v_tokens),
+                ),
+            )
+            for query_index, token_output in enumerate(token_outputs):
+                output_sample[query_index] = token_output.data[:embed_dim]
+
+            outputs[sample_start:sample_end] = output_sample.reshape(-1)
+
+        result = MockCKKSTensor(self.context, outputs, self.shape, self.device, self._depth + 8)
+        result._level = max(0, min(self._level, key._level, value._level) - 8)
+        return result
+
+    def _token_tensor(self, values: torch.Tensor, size: int) -> "MockCKKSTensor":
+        padded = torch.zeros_like(self.data)
+        padded[:size] = values.to(dtype=torch.float64)
+        tensor = MockCKKSTensor(self.context, padded, (size,), self.device, self._depth)
+        tensor._level = self._level
+        return tensor
 
     def poly_eval(self, coeffs: Sequence[float]) -> "MockCKKSTensor":
         """Evaluate a polynomial on the encrypted data.

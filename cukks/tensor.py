@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Un
 import torch
 
 if TYPE_CHECKING:
+    from .batching import PackingLayout
     from .context import CKKSInferenceContext
 
 
@@ -88,6 +89,9 @@ class EncryptedTensor:
         self._slots_per_sample: Optional[int] = None
         self._packed_sample_shape: Optional[Tuple[int, ...]] = None
         self._needs_rescale: bool = False  # Lazy rescale flag
+        self._packing_layout: Optional["PackingLayout"] = None
+        self._stip_layout_fresh: bool = False
+        self._sigma_factor: Optional["EncryptedTensor"] = None
 
     def _copy_runtime_metadata_from(self, other: "EncryptedTensor") -> None:
         self._original_size = other._original_size
@@ -97,6 +101,8 @@ class EncryptedTensor:
         self._batch_size = other._batch_size
         self._slots_per_sample = other._slots_per_sample
         self._packed_sample_shape = other._packed_sample_shape
+        self._packing_layout = other._packing_layout
+        self._sigma_factor = other._sigma_factor
 
     def _active_size(self) -> int:
         if self._cnn_layout is not None:
@@ -186,6 +192,8 @@ class EncryptedTensor:
             result._packed_sample_shape = self._packed_sample_shape
         if self._cnn_layout is not None:
             result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        result._packing_layout = self._packing_layout
+        result._sigma_factor = self._sigma_factor
         return result
     @property
     def shape(self) -> Tuple[int, ...]:
@@ -505,12 +513,63 @@ class EncryptedTensor:
         result._needs_rescale = self._needs_rescale
         result._copy_runtime_metadata_from(self)
         return result
-    
+
+    def packed_self_attention_power(
+        self,
+        key: "EncryptedTensor",
+        value: "EncryptedTensor",
+        *,
+        batch_size: int,
+        seq_len: int,
+        embed_dim: int,
+        scale: float,
+        shift: float,
+        reciprocal_coeffs: Sequence[float],
+        renorm_reciprocal_coeffs: Sequence[float],
+    ) -> "EncryptedTensor":
+        new_cipher = self._cipher.packed_self_attention_power(
+            key._cipher,
+            value._cipher,
+            batch_size=int(batch_size),
+            seq_len=int(seq_len),
+            embed_dim=int(embed_dim),
+            scale=float(scale),
+            shift=float(shift),
+            reciprocal_coeffs=list(reciprocal_coeffs),
+            renorm_reciprocal_coeffs=list(renorm_reciprocal_coeffs),
+        )
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = True
+        result._copy_runtime_metadata_from(self)
+        return result
+
     def conjugate(self) -> "EncryptedTensor":
         """Apply complex conjugation to slots."""
         new_cipher = self._cipher.conjugate()
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._needs_rescale = self._needs_rescale
+        result._copy_runtime_metadata_from(self)
+        return result
+
+    def mul_by_i(self) -> "EncryptedTensor":
+        """Multiply all slots by the imaginary unit i (for RIHP packing)."""
+        new_cipher = self._cipher.mul_by_i()
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._needs_rescale = self._needs_rescale
+        result._copy_runtime_metadata_from(self)
+        return result
+
+    def extract_real(self) -> "EncryptedTensor":
+        """Extract the real part of all slots."""
+        new_cipher = self._cipher.extract_real()
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
+        result._copy_runtime_metadata_from(self)
+        return result
+
+    def extract_imag(self) -> "EncryptedTensor":
+        """Extract the imaginary part of all slots as real-valued."""
+        new_cipher = self._cipher.extract_imag()
+        result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._copy_runtime_metadata_from(self)
         return result
     
@@ -1191,6 +1250,7 @@ class EncryptedTensor:
         result = EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
         result._needs_rescale = self._needs_rescale
         result._copy_runtime_metadata_from(self)
+        result._stip_layout_fresh = self._stip_layout_fresh
         return result
     
     def __repr__(self) -> str:

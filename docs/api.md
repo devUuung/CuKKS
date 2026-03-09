@@ -932,11 +932,11 @@ attention = EncryptedApproxAttention.from_torch(
 
 **Methods:**
 
-- `forward(x)`: Self-attention — uses `x` as query, key, and value. Supports seq_len=1 only in pure HE mode.
-- `forward_attention(query, key, value)`: Full attention with separate Q, K, V inputs. Supports seq_len=1 only in pure HE mode.
+- `forward(x)`: Self-attention — uses `x` as query, key, and value. Supports single encrypted tensors with `seq_len=1`, or packed encrypted batches with sample shape `(seq_len, embed_dim)` for `seq_len <= 8`.
+- `forward_attention(query, key, value)`: Full attention with separate Q, K, V inputs. Supports single encrypted tensors with `seq_len=1`, or per-token `List[EncryptedTensor]` inputs for `seq_len <= 8`.
 - `mult_depth()`: Returns estimated multiplicative depth (includes projections + Q@K^T + softmax polynomial + attn@V + output projection).
 
-**Note:** This is an approximation using cipher-cipher multiplication for Q@K^T and sum_and_broadcast for attention aggregation. Accuracy depends on input range and polynomial degree. Best results when attention scores are normalized to a small range (e.g., [-2, 2]). `from_torch()` extracts Q, K, V, and output projection weights from `nn.MultiheadAttention`. Limited to seq_len=1 in pure HE mode.
+**Note:** This is an approximation using cipher-cipher multiplication for Q@K^T and sum_and_broadcast for attention aggregation. Accuracy depends on input range and polynomial degree. Best results when attention scores are normalized to a small range (e.g., [-2, 2]). `from_torch()` extracts Q, K, V, and output projection weights from `nn.MultiheadAttention`. Single-tensor inputs are limited to `seq_len=1`; multi-token support is available through packed encrypted batches in `forward()` or `List[EncryptedTensor]` inputs in `forward_attention()`, with a maximum `seq_len` of 8.
 
 ---
 

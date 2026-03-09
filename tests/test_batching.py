@@ -128,6 +128,112 @@ class TestSlotPacker:
             packer.unpack(packed, num_samples=0)
 
 
+class TestPackingLayout:
+
+    def test_layout_creation(self):
+        from cukks.batching import PackingLayout
+
+        layout = PackingLayout(seq_len=4, d_model=16, num_heads=4, block_size=16)
+
+        assert layout.d_head == 4
+        assert layout.total_slots_needed == 64
+
+    def test_layout_token_offset(self):
+        from cukks.batching import PackingLayout
+
+        layout = PackingLayout(seq_len=4, d_model=16, num_heads=4, block_size=16)
+
+        assert layout.token_offset(0) == 0
+        assert layout.token_offset(1) == 16
+        assert layout.token_offset(3) == 48
+
+    def test_layout_head_range(self):
+        from cukks.batching import PackingLayout
+
+        layout = PackingLayout(seq_len=2, d_model=16, num_heads=4, block_size=16)
+
+        assert layout.head_range(0) == (0, 4)
+        assert layout.head_range(3) == (12, 16)
+
+    def test_layout_validation(self):
+        from cukks.batching import PackingLayout
+
+        with pytest.raises(ValueError, match="divisible"):
+            PackingLayout(seq_len=4, d_model=15, num_heads=4, block_size=16)
+        with pytest.raises(ValueError, match="block_size"):
+            PackingLayout(seq_len=4, d_model=16, num_heads=4, block_size=8)
+        with pytest.raises(ValueError, match="seq_len"):
+            PackingLayout(seq_len=0, d_model=16, num_heads=4, block_size=16)
+
+    def test_layout_complex_packing_default(self):
+        from cukks.batching import PackingLayout
+
+        layout = PackingLayout(seq_len=4, d_model=16, num_heads=4, block_size=16)
+
+        assert layout.complex_packing == "real_only"
+
+
+class TestTokenBlockPacker:
+
+    def test_pack_unpack_roundtrip(self):
+        from cukks.batching import PackingLayout, TokenBlockPacker
+
+        layout = PackingLayout(seq_len=4, d_model=16, num_heads=4, block_size=16)
+        packer = TokenBlockPacker(layout, total_slots=128)
+        source = torch.arange(64, dtype=torch.float64).reshape(4, 16)
+
+        packed = packer.pack(source)
+        recovered = packer.unpack(packed)
+
+        assert packed.shape == (128,)
+        torch.testing.assert_close(recovered, source)
+
+    def test_pack_token_positions(self):
+        from cukks.batching import PackingLayout, TokenBlockPacker
+
+        layout = PackingLayout(seq_len=2, d_model=4, num_heads=2, block_size=4)
+        packer = TokenBlockPacker(layout, total_slots=16)
+        source = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+
+        packed = packer.pack(source)
+
+        torch.testing.assert_close(packed[:8], torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], dtype=torch.float64))
+
+    def test_pack_block_padding(self):
+        from cukks.batching import PackingLayout, TokenBlockPacker
+
+        layout = PackingLayout(seq_len=2, d_model=4, num_heads=2, block_size=8)
+        packer = TokenBlockPacker(layout, total_slots=24)
+        source = torch.tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+
+        packed = packer.pack(source)
+
+        torch.testing.assert_close(
+            packed[:16],
+            torch.tensor([1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 5.0, 6.0, 7.0, 8.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float64),
+        )
+
+    def test_head_masks_cover_active_region(self):
+        from cukks.batching import PackingLayout, TokenBlockPacker
+
+        layout = PackingLayout(seq_len=2, d_model=16, num_heads=4, block_size=16)
+        packer = TokenBlockPacker(layout, total_slots=64)
+
+        masks = packer.all_head_masks()
+        mask_sum = [sum(mask[idx] for mask in masks) for idx in range(layout.total_slots_needed)]
+
+        assert all(value == 1.0 for value in mask_sum)
+
+    def test_non_real_packing_not_implemented(self):
+        from cukks.batching import PackingLayout, TokenBlockPacker
+
+        layout = PackingLayout(seq_len=2, d_model=4, num_heads=2, block_size=4, complex_packing="rihp")
+        packer = TokenBlockPacker(layout, total_slots=16)
+
+        with pytest.raises(NotImplementedError, match="rihp"):
+            packer.pack(torch.ones(2, 4))
+
+
 class TestEncryptDecryptBatch:
 
     def test_encrypt_decrypt_batch_basic(self, mock_enc_context: Any):
@@ -190,6 +296,42 @@ class TestContextBatchMethods:
         assert getattr(enc_batch, "_packed_batch", False) is True
         assert getattr(enc_batch, "_batch_size", None) == 2
         assert getattr(enc_batch, "_slots_per_sample", None) == 3
+
+    def test_context_encrypt_decrypt_sequence(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        ctx = CKKSInferenceContext(device="cpu", use_bsgs=False)
+        source = torch.arange(64, dtype=torch.float64).reshape(4, 16)
+
+        enc = ctx.encrypt_sequence(source, num_heads=4)
+        recovered = ctx.decrypt_sequence(enc)
+
+        assert enc.shape == (4, 16)
+        assert getattr(enc, "_packing_layout", None) is not None
+        torch.testing.assert_close(recovered, source.to(torch.float32), rtol=1e-4, atol=1e-4)
+
+    def test_context_encrypt_sequence_validation(self, monkeypatch: pytest.MonkeyPatch):
+        from cukks import CKKSInferenceContext
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        ctx = CKKSInferenceContext(device="cpu", use_bsgs=False)
+
+        with pytest.raises(ValueError, match="Expected 2D tensor"):
+            ctx.encrypt_sequence(torch.arange(8.0), num_heads=2)
+
+        with pytest.raises(ValueError, match="requires"):
+            ctx.encrypt_sequence(torch.ones(2000, 16), num_heads=4)
 
     def test_context_encrypt_batch_forward_with_identity(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
@@ -728,7 +870,12 @@ class TestPackedBatchNativeExecution:
         torch.testing.assert_close(recovered[0], expected[0], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(recovered[1], expected[1], rtol=1e-4, atol=1e-4)
 
-    def test_attention_supports_packed_multi_token_batch(self, monkeypatch: pytest.MonkeyPatch):
+    @pytest.mark.parametrize("normalization_mode", ["power_softmax", "gaussian"])
+    def test_attention_supports_packed_multi_token_batch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        normalization_mode: str,
+    ):
         from cukks import CKKSInferenceContext
         from cukks.nn import EncryptedApproxAttention
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
@@ -745,7 +892,11 @@ class TestPackedBatchNativeExecution:
         ]
         enc_batch = ctx.encrypt_batch(samples)
 
-        attn = EncryptedApproxAttention(embed_dim=2, num_heads=1)
+        attn = EncryptedApproxAttention(
+            embed_dim=2,
+            num_heads=1,
+            normalization_mode=normalization_mode,
+        )
         enc_output = attn(enc_batch)
         recovered = ctx.decrypt_batch(enc_output, sample_shape=(2, 2))
 
@@ -758,6 +909,155 @@ class TestPackedBatchNativeExecution:
 
         torch.testing.assert_close(recovered[0], expected[0], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(recovered[1], expected[1], rtol=1e-4, atol=1e-4)
+
+    @pytest.mark.parametrize("seq_len", [2, 4])
+    @pytest.mark.parametrize("normalization_mode", ["power_softmax", "gaussian"])
+    def test_attention_packed_multi_token_reuses_rotations(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        seq_len: int,
+        normalization_mode: str,
+    ):
+        from cukks import CKKSInferenceContext
+        from cukks.nn import EncryptedApproxAttention
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig, MockCKKSTensor
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        rotate_calls = 0
+        original_rotate = MockCKKSTensor.rotate
+
+        def counting_rotate(self: MockCKKSTensor, steps: int) -> MockCKKSTensor:
+            nonlocal rotate_calls
+            rotate_calls += 1
+            return original_rotate(self, steps)
+
+        monkeypatch.setattr(MockCKKSTensor, "rotate", counting_rotate)
+
+        ctx = CKKSInferenceContext(device="cpu")
+        samples = [torch.randn(seq_len, 2) * 0.1, torch.randn(seq_len, 2) * 0.1]
+        enc_batch = ctx.encrypt_batch(samples)
+
+        attn = EncryptedApproxAttention(
+            embed_dim=2,
+            num_heads=1,
+            normalization_mode=normalization_mode,
+        )
+        _ = attn(enc_batch)
+
+        if normalization_mode == "power_softmax":
+            assert rotate_calls == 0
+        else:
+            assert rotate_calls == (2 * seq_len * seq_len) + (4 * (seq_len - 1))
+
+    def test_attention_packed_power_softmax_uses_native_fast_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from cukks import CKKSInferenceContext
+        from cukks.nn import EncryptedApproxAttention
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig, MockCKKSTensor
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        native_calls = 0
+        original_native = MockCKKSTensor.packed_self_attention_power
+
+        def counting_native(
+            self: MockCKKSTensor,
+            key: MockCKKSTensor,
+            value: MockCKKSTensor,
+            batch_size: int,
+            seq_len: int,
+            embed_dim: int,
+            scale: float,
+            shift: float,
+            reciprocal_coeffs: list[float],
+            renorm_reciprocal_coeffs: list[float],
+        ) -> MockCKKSTensor:
+            nonlocal native_calls
+            native_calls += 1
+            return original_native(
+                self,
+                key,
+                value,
+                batch_size,
+                seq_len,
+                embed_dim,
+                scale,
+                shift,
+                reciprocal_coeffs,
+                renorm_reciprocal_coeffs,
+            )
+
+        monkeypatch.setattr(MockCKKSTensor, "packed_self_attention_power", counting_native)
+
+        ctx = CKKSInferenceContext(device="cpu")
+        enc_batch = ctx.encrypt_batch([torch.randn(2, 2) * 0.1, torch.randn(2, 2) * 0.1])
+        attn = EncryptedApproxAttention(embed_dim=2, num_heads=1, normalization_mode="power_softmax")
+
+        _ = attn(enc_batch)
+
+        assert native_calls == 1
+
+    def test_attention_packed_gaussian_keeps_python_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from cukks import CKKSInferenceContext
+        from cukks.nn import EncryptedApproxAttention
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig, MockCKKSTensor
+        import cukks.context as ctx_module
+
+        monkeypatch.setattr(ctx_module, "CKKSConfig", MockCKKSConfig, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", MockCKKSContext, raising=False)
+        monkeypatch.setattr(ctx_module, "_BACKEND_AVAILABLE", True, raising=False)
+
+        native_calls = 0
+        original_native = MockCKKSTensor.packed_self_attention_power
+
+        def counting_native(
+            self: MockCKKSTensor,
+            key: MockCKKSTensor,
+            value: MockCKKSTensor,
+            batch_size: int,
+            seq_len: int,
+            embed_dim: int,
+            scale: float,
+            shift: float,
+            reciprocal_coeffs: list[float],
+            renorm_reciprocal_coeffs: list[float],
+        ) -> MockCKKSTensor:
+            nonlocal native_calls
+            native_calls += 1
+            return original_native(
+                self,
+                key,
+                value,
+                batch_size,
+                seq_len,
+                embed_dim,
+                scale,
+                shift,
+                reciprocal_coeffs,
+                renorm_reciprocal_coeffs,
+            )
+
+        monkeypatch.setattr(MockCKKSTensor, "packed_self_attention_power", counting_native)
+
+        ctx = CKKSInferenceContext(device="cpu")
+        enc_batch = ctx.encrypt_batch([torch.randn(2, 2) * 0.1, torch.randn(2, 2) * 0.1])
+        attn = EncryptedApproxAttention(embed_dim=2, num_heads=1, normalization_mode="gaussian")
+
+        _ = attn(enc_batch)
+
+        assert native_calls == 0
 
     def test_conv2d_supports_packed_batch_of_patches(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext

@@ -7,6 +7,7 @@ Use this page as the main index for project documentation.
 - [API Reference](api.md)
 - [CKKS Concepts](concepts.md)
 - [GPU Acceleration](gpu-acceleration.md)
+- [STIP Packed Attention](stip-attention.md)
 - [Examples Overview](examples/README.md)
 
 ## Contribution and release operations

@@ -11,6 +11,7 @@ from cukks.converter import (
     convert,
     estimate_depth,
 )
+from cukks.context import CKKSInferenceContext
 from cukks.nn import (
     EncryptedLinear,
     EncryptedSquare,
@@ -114,12 +115,11 @@ class TestModelConverter:
             atol=1e-6,
         )
         
-        if model.bias is not None:
-            assert torch.allclose(
-                enc_model.bias.float(),
-                model.bias.data.float(),
-                atol=1e-6,
-            )
+        assert torch.allclose(
+            enc_model.bias.float(),
+            model.bias.data.float(),
+            atol=1e-6,
+        )
 
 
 class TestConvertFunction:
@@ -136,6 +136,7 @@ class TestConvertFunction:
         assert len(result) == 2
         enc_model, ctx = result
         assert isinstance(enc_model, EncryptedLinear)
+        assert isinstance(ctx, CKKSInferenceContext)
     
     def test_convert_with_options(self):
         """Test convert() with custom options."""
@@ -150,9 +151,35 @@ class TestConvertFunction:
             use_square_activation=True,
             fold_batchnorm=True,
         )
-        
+
         assert isinstance(enc_model, EncryptedSequential)
         assert isinstance(enc_model[1], EncryptedSquare)
+        assert isinstance(ctx, CKKSInferenceContext)
+
+    def test_convert_accepts_stip_architecture(self):
+        model = nn.Linear(10, 5)
+        model.eval()
+
+        enc_model, _ctx = convert(model, architecture="stip")
+
+        assert isinstance(enc_model, EncryptedLinear)
+
+
+class TestArchitectureOptions:
+
+    def test_options_default_architecture(self):
+        options = ConversionOptions()
+
+        assert options.architecture == "default"
+
+    def test_options_stip_architecture(self):
+        options = ConversionOptions(architecture="stip")
+
+        assert options.architecture == "stip"
+
+    def test_options_invalid_architecture(self):
+        with pytest.raises(ValueError, match="architecture"):
+            ConversionOptions(architecture="bogus")
 
 
 class TestEstimateDepth:

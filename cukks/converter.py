@@ -33,9 +33,11 @@ from .nn import (
     EncryptedBatchNorm1d,
     EncryptedBatchNorm2d,
     EncryptedLayerNorm,
+    EncryptedInverseFreeLayerNorm,
     EncryptedDropout,
     EncryptedApproxAttention,
 )
+from .analysis import detect_inverse_free_layernorms
 from .nn.batchnorm import fold_batchnorm_into_linear, fold_batchnorm_into_conv
 from .nn.block_diagonal import BlockDiagonalLinear
 from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
@@ -69,6 +71,9 @@ class ConversionOptions:
         use_square_activation: If True, replace all activations with x^2.
         optimize_cnn: If True, apply CNN-specific optimizations (Flatten absorption).
         batch_size: Number of samples to pack per ciphertext for packed-batch inference.
+        attention_normalization_mode: Multi-token attention normalization kernel.
+        attention_gaussian_gamma: Scale factor for gaussian attention mode.
+        architecture: Conversion architecture profile.
     """
     
     def __init__(
@@ -79,13 +84,24 @@ class ConversionOptions:
         use_square_activation: bool = False,
         optimize_cnn: bool = True,
         batch_size: int = 1,
+        attention_normalization_mode: str = "power_softmax",
+        attention_gaussian_gamma: float = 0.25,
+        architecture: str = "default",
     ):
+        if architecture not in {"default", "stip"}:
+            raise ValueError(
+                "architecture must be 'default' or 'stip', "
+                f"got {architecture!r}"
+            )
         self.fold_batchnorm = fold_batchnorm
         self.activation_degree = activation_degree
         self.activation_map = activation_map if activation_map is not None else DEFAULT_ACTIVATION_MAP.copy()
         self.use_square_activation = use_square_activation
         self.optimize_cnn = optimize_cnn
         self.batch_size = batch_size
+        self.attention_normalization_mode = attention_normalization_mode
+        self.attention_gaussian_gamma = attention_gaussian_gamma
+        self.architecture = architecture
 
 
 # =============================================================================
@@ -145,6 +161,12 @@ class ModelConverter:
         self._is_cnn_model = False
         self._last_cnn_layout: Optional[Dict] = None
         self._pending_flatten = False
+
+        # Inverse-free LayerNorm: set of module names eligible for conversion.
+        # Populated by torch.fx analysis in convert().
+        self._inverse_free_ln_names: frozenset[str] = frozenset()
+        # Track the current module path during recursive conversion
+        self._current_path: List[str] = []
     
     def convert(
         self,
@@ -173,6 +195,10 @@ class ModelConverter:
             self._is_cnn_model = self._detect_cnn(model)
             if self._is_cnn_model:
                 self._analyze_cnn_structure(model)
+
+        # Detect LayerNorms eligible for inverse-free conversion
+        if self.options.architecture == "stip":
+            self._inverse_free_ln_names = detect_inverse_free_layernorms(model)
         
         # Convert the model
         return self._convert_module(model)
@@ -276,11 +302,15 @@ class ModelConverter:
                         continue
             
             try:
+                self._current_path.append(name)
                 converted[name] = self._convert_module(child)
             except NotImplementedError:
                 if isinstance(child, nn.Identity):
+                    self._current_path.pop()
                     continue
+                self._current_path.pop()
                 raise
+            self._current_path.pop()
         return EncryptedSequential(converted)
     
     def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
@@ -345,11 +375,15 @@ class ModelConverter:
                         continue
             
             try:
+                self._current_path.append(name)
                 converted[name] = self._convert_module(child)
             except NotImplementedError:
                 if isinstance(child, nn.Identity):
+                    self._current_path.pop()
                     continue
+                self._current_path.pop()
                 raise
+            self._current_path.pop()
                 
         return EncryptedSequential(converted)
     
@@ -531,11 +565,19 @@ class ModelConverter:
         p = getattr(module, 'p', 0.5)
         return EncryptedDropout(p=p)
     
-    def _convert_layernorm(self, module: nn.LayerNorm) -> EncryptedLayerNorm:
+    def _convert_layernorm(self, module: nn.LayerNorm) -> EncryptedModule:
+        current_name = ".".join(self._current_path)
+        if current_name in self._inverse_free_ln_names:
+            return EncryptedInverseFreeLayerNorm.from_torch(module)
         return EncryptedLayerNorm.from_torch(module)
     
     def _convert_attention(self, module: nn.MultiheadAttention) -> EncryptedApproxAttention:
-        return EncryptedApproxAttention.from_torch(module)
+        return EncryptedApproxAttention.from_torch(
+            module,
+            softmax_degree=self.options.activation_degree,
+            normalization_mode=self.options.attention_normalization_mode,
+            gaussian_gamma=self.options.attention_gaussian_gamma,
+        )
     
     def _convert_maxpool2d(self, module: nn.MaxPool2d) -> EncryptedMaxPool2d:
         """Convert a MaxPool2d layer."""
@@ -658,6 +700,9 @@ def convert(
     bootstrap_threshold: int = 8,
     pre_encode: bool = False,
     batch_size: int = 1,
+    attention_normalization_mode: str = "power_softmax",
+    attention_gaussian_gamma: float = 0.25,
+    architecture: str = "default",
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -683,6 +728,9 @@ def convert(
             Requires ``input_shape`` for CNN models.
         batch_size: Number of samples to pack per ciphertext. When > 1, rotation
             keys include cross-block offsets for native packed-batch inference.
+        attention_normalization_mode: Multi-token attention normalization kernel.
+        attention_gaussian_gamma: Scale factor for gaussian attention mode.
+        architecture: Conversion architecture profile.
         
     Returns:
         Tuple of (encrypted_model, context).
@@ -715,6 +763,9 @@ def convert(
         use_square_activation=use_square_activation,
         optimize_cnn=optimize_cnn,
         batch_size=batch_size,
+        attention_normalization_mode=attention_normalization_mode,
+        attention_gaussian_gamma=attention_gaussian_gamma,
+        architecture=architecture,
     )
     
     converter = ModelConverter(options, input_shape=input_shape)
@@ -734,6 +785,7 @@ def convert(
             model,
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
+            attention_normalization_mode=attention_normalization_mode,
         )
         enable_bootstrap = est_depth > _AUTO_BOOTSTRAP_DEPTH_THRESHOLD
     if auto_bootstrap is None:
@@ -750,6 +802,7 @@ def convert(
             bootstrap_threshold=bootstrap_threshold,
             enable_bootstrap=enable_bootstrap,
             batch_size=batch_size,
+            architecture=architecture,
         )
     
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:
@@ -889,13 +942,18 @@ def warm_cache(
     _ = enc_model(enc_input)
 
 
-def estimate_depth(model: nn.Module, activation_degree: int = 4) -> int:
+def estimate_depth(
+    model: nn.Module,
+    activation_degree: int = 4,
+    attention_normalization_mode: str = "power_softmax",
+) -> int:
     """Estimate the multiplicative depth required for a model.
     
     Args:
         model: The PyTorch model to analyze.
         activation_degree: Polynomial degree used for activation approximation.
             Default is 4, matching ConversionOptions default.
+        attention_normalization_mode: Multi-token attention normalization kernel.
         
     Returns:
         Estimated multiplicative depth.
@@ -910,6 +968,8 @@ def estimate_depth(model: nn.Module, activation_degree: int = 4) -> int:
     for module in model.modules():
         if isinstance(module, (nn.Linear, nn.Conv2d)):
             depth += 1  # matmul
+        elif isinstance(module, nn.MultiheadAttention):
+            depth += 9 if attention_normalization_mode == "gaussian" else 10
         elif isinstance(module, (nn.ReLU, nn.GELU, nn.SiLU, nn.Sigmoid, nn.Tanh)):
             depth += poly_depth  # polynomial approximation
     return max(1, depth)

@@ -42,6 +42,7 @@ from .flatten import EncryptedFlatten
 from .sequential import EncryptedSequential
 from .batchnorm import EncryptedBatchNorm1d, EncryptedBatchNorm2d
 from .layernorm import EncryptedLayerNorm
+from .inverse_free_layernorm import EncryptedInverseFreeLayerNorm
 from .dropout import EncryptedDropout
 from .residual import EncryptedResidualBlock
 from .attention import EncryptedApproxAttention
@@ -70,4 +71,5 @@ __all__ = [
     "EncryptedDropout",
     "EncryptedResidualBlock",
     "EncryptedApproxAttention",
+    "EncryptedInverseFreeLayerNorm",
 ]
