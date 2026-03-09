@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .tensor import EncryptedTensor
 
 from .batching.packing import SlotPacker
+from .batching import PackingLayout, TokenBlockPacker
 
 CKKSConfig = None  # type: ignore
 CKKSContext = None  # type: ignore
@@ -111,11 +112,13 @@ class InferenceConfig:
         **kwargs: Any,
     ) -> "InferenceConfig":
         enable_gpu = kwargs.pop("enable_gpu", False)
+        attention_normalization_mode = kwargs.pop("attention_normalization_mode", "power_softmax")
         depth = _estimate_model_depth(
             model,
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
             enable_gpu=enable_gpu,
+            attention_normalization_mode=attention_normalization_mode,
         )
         return cls.for_depth(depth, **kwargs)
 
@@ -125,6 +128,7 @@ def _estimate_model_depth(
     activation_degree: int = 4,
     use_square_activation: bool = False,
     enable_gpu: bool = False,
+    attention_normalization_mode: str = "power_softmax",
 ) -> int:
     depth = 0
     if use_square_activation:
@@ -147,6 +151,8 @@ def _estimate_model_depth(
             torch.nn.Sigmoid, torch.nn.Tanh,
         )):
             depth += poly_depth
+        elif isinstance(module, torch.nn.MultiheadAttention):
+            depth += 9 if attention_normalization_mode == "gaussian" else 10
     return max(1, depth)
 
 
@@ -173,6 +179,9 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
         elif isinstance(module, torch.nn.Linear):
             dims.append(module.in_features)
             dims.append(module.out_features)
+        elif isinstance(module, torch.nn.MultiheadAttention):
+            dims.append(module.embed_dim)
+            dims.append(module.embed_dim * 8)
         elif isinstance(module, torch.nn.Conv2d):
             has_conv = True
             kh, kw = (module.kernel_size, module.kernel_size) if isinstance(module.kernel_size, int) else module.kernel_size
@@ -332,7 +341,13 @@ class CKKSInferenceContext:
         cnn_config: Optional[Dict[str, Any]] = None,
         enable_gpu: bool = True,
         batch_size: int = 1,
+        architecture: str = "default",
     ):
+        if architecture not in {"default", "stip"}:
+            raise ValueError(
+                "architecture must be 'default' or 'stip', "
+                f"got {architecture!r}"
+            )
         if cnn_config is not None and config is None:
             config = InferenceConfig(mult_depth=6, security_level=None)
         
@@ -344,6 +359,7 @@ class CKKSInferenceContext:
         self._cnn_config = cnn_config
         self._enable_gpu = enable_gpu
         self._batch_size = batch_size
+        self._architecture = architecture
         
         _resolved_max_dim = max_rotation_dim
         if rotations is None:
@@ -680,6 +696,62 @@ class CKKSInferenceContext:
             samples = [s.to(self.device) for s in samples]
         
         return samples
+
+    def encrypt_sequence(
+        self,
+        tensor: torch.Tensor,
+        *,
+        num_heads: int,
+        block_size: Optional[int] = None,
+    ) -> "EncryptedTensor":
+        from .tensor import EncryptedTensor
+
+        self._ensure_initialized()
+
+        if tensor.ndim != 2:
+            raise ValueError(f"Expected 2D tensor (seq_len, d_model), got shape {tuple(tensor.shape)}")
+
+        seq_len, d_model = tensor.shape
+        resolved_block_size = int(block_size) if block_size is not None else int(d_model)
+        layout = PackingLayout(
+            seq_len=int(seq_len),
+            d_model=int(d_model),
+            num_heads=int(num_heads),
+            block_size=resolved_block_size,
+        )
+        if layout.total_slots_needed > self.num_slots:
+            raise ValueError(
+                f"Sequence requires {layout.total_slots_needed} slots but context has {self.num_slots}"
+            )
+
+        packer = TokenBlockPacker(layout, self.num_slots)
+        packed = packer.pack(tensor)
+        cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
+        enc_tensor = EncryptedTensor(cipher, (layout.seq_len, layout.d_model), self)
+        enc_tensor._packing_layout = layout
+        enc_tensor._stip_layout_fresh = True
+        return enc_tensor
+
+    def decrypt_sequence(self, encrypted: "EncryptedTensor") -> torch.Tensor:
+        self._ensure_initialized()
+
+        layout = getattr(encrypted, "_packing_layout", None)
+        if layout is None:
+            raise ValueError("EncryptedTensor has no STIP packing layout")
+        if not getattr(encrypted, "_stip_layout_fresh", False):
+            raise ValueError("EncryptedTensor does not have fresh STIP sequence-layout provenance")
+        if encrypted.shape != (layout.seq_len, layout.d_model):
+            raise ValueError(
+                "EncryptedTensor shape does not match STIP packing layout. "
+                f"Got tensor shape {encrypted.shape} and layout {(layout.seq_len, layout.d_model)}."
+            )
+
+        full_result = self._ctx.decrypt(encrypted._cipher, shape=None)
+        packer = TokenBlockPacker(layout, self.num_slots)
+        recovered = packer.unpack(full_result)
+        if self.device != "cpu":
+            recovered = recovered.to(self.device)
+        return recovered.to(torch.float32)
     
     def encrypt_cnn_input(
         self,
@@ -730,6 +802,8 @@ class CKKSInferenceContext:
         activation_degree: int = 4,
         use_square_activation: bool = False,
         batch_size: int = 1,
+        attention_normalization_mode: str = "power_softmax",
+        architecture: str = "default",
         **kwargs: Any,
     ) -> "CKKSInferenceContext":
         enable_bootstrap = kwargs.pop("enable_bootstrap", False)
@@ -743,6 +817,7 @@ class CKKSInferenceContext:
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
             enable_gpu=kwargs.get("enable_gpu", False),
+            attention_normalization_mode=attention_normalization_mode,
             enable_bootstrap=enable_bootstrap,
             level_budget=level_budget,
             scale_bits=scale_bits,
@@ -777,7 +852,15 @@ class CKKSInferenceContext:
             rotations.extend(extra_rotations)
             rotations = sorted(list(set(rotations)))
         
-        return cls(config, rotations=rotations, use_bsgs=use_bsgs, max_rotation_dim=max_dim, batch_size=batch_size, **kwargs)
+        return cls(
+            config,
+            rotations=rotations,
+            use_bsgs=use_bsgs,
+            max_rotation_dim=max_dim,
+            batch_size=batch_size,
+            architecture=architecture,
+            **kwargs,
+        )
     
     @classmethod
     def for_depth(
@@ -801,6 +884,7 @@ class CKKSInferenceContext:
             "bootstrap_threshold",
             "cnn_config",
             "enable_gpu",
+            "architecture",
         }
 
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_keys}
@@ -837,6 +921,7 @@ class CKKSInferenceContext:
             "auto_bootstrap": self._auto_bootstrap,
             "bootstrap_threshold": self._bootstrap_threshold,
             "batch_size": self._batch_size,
+            "architecture": self._architecture,
         }
         with open(path, "wb") as f:
             pickle.dump(config_data, f)
@@ -869,6 +954,7 @@ class CKKSInferenceContext:
             auto_bootstrap=config_data["auto_bootstrap"],
             bootstrap_threshold=config_data["bootstrap_threshold"],
             batch_size=config_data.get("batch_size", 1),
+            architecture=config_data.get("architecture", "default"),
         )
     
     load = load_context

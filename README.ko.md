@@ -311,3 +311,8 @@ Apache License 2.0
 - [Homomorphic Encryption for Arithmetic of Approximate Numbers](https://eprint.iacr.org/2016/421) — Cheon et al. (CKKS)
 - [Bootstrapping for Approximate Homomorphic Encryption](https://eprint.iacr.org/2018/153) — Cheon et al.
 - [Faster Homomorphic Linear Transformations in HElib](https://eprint.iacr.org/2018/244) — Halevi & Shoup (BSGS)
+- [GAZELLE: A Low Latency Framework for Secure Neural Network Inference](https://www.usenix.org/conference/usenixsecurity18/presentation/juvekar) — Juvekar et al. (합성곱)
+- [PP-STAT: An Efficient Privacy-Preserving Statistical Analysis Framework using Homomorphic Encryption](https://doi.org/10.1145/3583780) — Choi (암호화 통계)
+- [STIP: Efficient and Secure Non-Interactive Transformer Inference via Compact Packing](https://doi.org/10.1145/3696410.3714779) — Wang et al. (패킹 어텐션)
+- [Efficient Bootstrapping for Approximate Homomorphic Encryption](https://eprint.iacr.org/2020/1203) — Bossuat et al. (Double-Hoisting)
+- [On the Number of Nonscalar Multiplications Necessary to Evaluate Polynomials](https://doi.org/10.1137/0202007) — Paterson & Stockmeyer (다항식 평가)

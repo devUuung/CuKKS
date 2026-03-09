@@ -89,6 +89,22 @@ class EncryptedLinear(EncryptedModule):
         """
         if getattr(self, '_sparse_input', False):
             return self._forward_sparse(x)
+
+        sigma = getattr(x, '_sigma_factor', None)
+        if sigma is not None and self.bias is not None:
+            result = x.matmul(self.weight, None,
+                              weight_list=self._weight_list,
+                              bias_list=None,
+                              weight_hash=self._weight_hash,
+                              diag_nonzero=self._diag_nonzero)
+            bias_vec = self.bias.reshape(-1).tolist()
+            padded_bias = bias_vec + [0.0] * (sigma.size - len(bias_vec))
+            bias_scaled = sigma.mul(padded_bias).rescale()
+            bias_scaled._shape = result._shape
+            result = result.add(bias_scaled)
+            result._sigma_factor = sigma
+            return result
+
         return x.matmul(self.weight, self.bias,
                         weight_list=self._weight_list,
                         bias_list=self._bias_list,

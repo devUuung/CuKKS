@@ -120,7 +120,9 @@ class EncryptedLayerNorm(EncryptedModule):
             normalized = centered.mul(inv_std).rescale()
             output = normalized.mul(self.weight.reshape(-1).tolist()).rescale()
             output = output.add(self.bias.reshape(-1).tolist())
-            return output.view(*x.shape)
+            result = output.view(*x.shape)
+            result._sigma_factor = None
+            return result
         
         # Step 1: Compute mean via sum_and_broadcast
         # sum_and_broadcast(n) sums first n slots and replicates to all n positions
@@ -155,7 +157,7 @@ class EncryptedLayerNorm(EncryptedModule):
         # self.weight is a torch.Tensor (plaintext), self.bias is a torch.Tensor (plaintext)
         output = normalized.mul(self.weight).rescale()
         output = output.add(self.bias)
-        
+        output._sigma_factor = None
         return output
     
     def mult_depth(self) -> int:
