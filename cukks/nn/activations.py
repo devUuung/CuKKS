@@ -8,6 +8,7 @@ various approximation methods.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any, List, Sequence
 
 from .module import EncryptedModule
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 # Polynomial Approximation Coefficients
 # =============================================================================
 
+@functools.lru_cache(maxsize=32)
 def _chebyshev_relu_coeffs(degree: int = 7, domain: tuple = (-1, 1)) -> List[float]:
     """Compute power-basis polynomial coefficients for ReLU approximation.
     
@@ -39,6 +41,7 @@ def _chebyshev_relu_coeffs(degree: int = 7, domain: tuple = (-1, 1)) -> List[flo
         return [0.0, 0.5, 0.25]
 
 
+@functools.lru_cache(maxsize=32)
 def _minimax_relu_coeffs(degree: int = 4, domain: tuple = (-4, 4)) -> List[float]:
     """Minimax polynomial approximation for ReLU.
     
@@ -57,6 +60,7 @@ def _minimax_relu_coeffs(degree: int = 4, domain: tuple = (-4, 4)) -> List[float
     return _chebyshev_relu_coeffs(degree, domain)
 
 
+@functools.lru_cache(maxsize=32)
 def _gelu_poly_coeffs(degree: int = 4) -> List[float]:
     """Polynomial approximation for GELU: x * Phi(x).
     
@@ -83,6 +87,7 @@ def _gelu_poly_coeffs(degree: int = 4) -> List[float]:
         return [0.0, 0.5, 0.0, 0.0398942, 0.0]
 
 
+@functools.lru_cache(maxsize=32)
 def _sigmoid_poly_coeffs(degree: int = 4) -> List[float]:
     """Polynomial approximation for sigmoid on [-4, 4].
     
@@ -105,6 +110,7 @@ def _sigmoid_poly_coeffs(degree: int = 4) -> List[float]:
         return [0.5, 0.25, 0.0, -0.0208333, 0.0]
 
 
+@functools.lru_cache(maxsize=32)
 def _tanh_poly_coeffs(degree: int = 5) -> List[float]:
     """Polynomial approximation for tanh.
     
@@ -124,6 +130,7 @@ def _tanh_poly_coeffs(degree: int = 5) -> List[float]:
         return [0.0, 1.0, 0.0, -0.333333, 0.0, 0.133333]
 
 
+@functools.lru_cache(maxsize=32)
 def _silu_poly_coeffs(degree: int = 4) -> List[float]:
     """Polynomial approximation for SiLU (x * sigmoid(x)).
     
