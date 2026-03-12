@@ -13,27 +13,8 @@ import torch.nn as nn
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from cukks.nn.block_diagonal import BlockDiagonalLinear
 from cukks.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
-
-
-class SquareActivation(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * x
-
-
-class BlockDiagMNIST(nn.Module):
-    def __init__(self, hidden: int, block_size: int) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(784, hidden)
-        self.act1 = SquareActivation()
-        self.fc2 = BlockDiagonalLinear(hidden, hidden, block_size=block_size)
-        self.act2 = SquareActivation()
-        self.fc3 = nn.Linear(hidden, 10)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(x.size(0), -1)
-        return self.fc3(self.act2(self.fc2(self.act1(self.fc1(x)))))
+from experiments._block_diag_bench_common import BlockDiagMNIST, SquareActivation
 
 
 class ConvertibleModel(nn.Module):
