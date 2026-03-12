@@ -38,7 +38,7 @@ def mock_enc_context():
     return EncryptedMockContext()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def use_mock_backend():
     monkeypatch = pytest.MonkeyPatch()
 
