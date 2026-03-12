@@ -141,7 +141,7 @@ class EncryptedAvgPool2d(EncryptedModule):
         self.pool_area = self.kernel_size[0] * self.kernel_size[1]
         self.avg_factor = 1.0 / self.pool_area
     
-    def __call__(self, x: "EncryptedTensor") -> "EncryptedTensor":
+    def __call__(self, x: Union["EncryptedTensor", List["EncryptedTensor"]]) -> Union["EncryptedTensor", List["EncryptedTensor"]]:
         """Bypass the base-class packed-batch fallback.
         
         EncryptedAvgPool2d natively handles packed batches in forward(),
@@ -149,7 +149,7 @@ class EncryptedAvgPool2d(EncryptedModule):
         context._forward_packed_batch decrypt/re-encrypt loop.
         """
         if isinstance(x, list):
-            return [self.__call__(item) for item in x]
+            return [self.forward(item) for item in x]
         return self.forward(x)
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Apply average pooling using pure HE operations.
@@ -203,6 +203,45 @@ class EncryptedAvgPool2d(EncryptedModule):
             )
         return hw, hw
 
+    @staticmethod
+    def _pool_patch_indices(
+        out_H: int,
+        out_W: int,
+        W: int,
+        kH: int,
+        kW: int,
+        sH: int,
+        sW: int,
+    ) -> torch.Tensor:
+        out_y = torch.arange(out_H, dtype=torch.long)
+        out_x = torch.arange(out_W, dtype=torch.long)
+        ky = torch.arange(kH, dtype=torch.long)
+        kx = torch.arange(kW, dtype=torch.long)
+        base = (out_y[:, None] * sH * W + out_x[None, :] * sW).reshape(-1, 1)
+        kernel = (ky[:, None] * W + kx[None, :]).reshape(1, -1)
+        return base + kernel
+
+    @staticmethod
+    def _expand_patch_indices_with_channels(
+        patch_indices: torch.Tensor,
+        channels: int,
+        *,
+        patch_offset: int = 0,
+    ) -> torch.Tensor:
+        channel_offsets = torch.arange(channels, dtype=torch.long)
+        return (patch_indices[..., None] + patch_offset) * channels + channel_offsets
+
+    @staticmethod
+    def _output_indices_for_channels(
+        num_out_patches: int,
+        channels: int,
+        *,
+        patch_offset: int = 0,
+    ) -> torch.Tensor:
+        out_patch_indices = torch.arange(num_out_patches, dtype=torch.long) + patch_offset
+        channel_offsets = torch.arange(channels, dtype=torch.long)
+        return out_patch_indices[:, None] * channels + channel_offsets
+
     def _forward_he_packed_batch(self, x: "EncryptedTensor", sample_shape: Tuple[int, int]) -> "EncryptedTensor":
         num_patches, channels = sample_shape
         H, W = self._infer_spatial_dims(num_patches)
@@ -214,19 +253,14 @@ class EncryptedAvgPool2d(EncryptedModule):
         total_in = num_patches * channels
         total_out = out_patches * channels
 
+        patch_indices = self._pool_patch_indices(out_H, out_W, W, kH, kW, sH, sW)
+        out_indices = self._output_indices_for_channels(out_patches, channels)
+        in_indices = self._expand_patch_indices_with_channels(patch_indices, channels)
         pool_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
-        for out_y in range(out_H):
-            for out_x in range(out_W):
-                out_patch_idx = out_y * out_W + out_x
-                for ky in range(kH):
-                    for kx in range(kW):
-                        in_y = out_y * sH + ky
-                        in_x = out_x * sW + kx
-                        in_patch_idx = in_y * W + in_x
-                        for c in range(channels):
-                            out_flat_idx = out_patch_idx * channels + c
-                            in_flat_idx = in_patch_idx * channels + c
-                            pool_weight[out_flat_idx, in_flat_idx] = self.avg_factor
+        pool_weight[
+            out_indices[:, None, :].expand(-1, patch_indices.shape[1], -1).reshape(-1),
+            in_indices.reshape(-1),
+        ] = self.avg_factor
 
         batch_size = getattr(x, '_batch_size', None)
         if batch_size is None:
@@ -285,29 +319,25 @@ class EncryptedAvgPool2d(EncryptedModule):
         
         total_in = num_patches * channels   # B * H * W * C
         total_out = out_patches * channels   # B * (H/sH) * (W/sW) * C
-        
-        # Build block-diagonal pooling weight matrix.
-        # Each block corresponds to one image; inter-image entries are zero.
+
+        patch_indices = self._pool_patch_indices(out_H, out_W, W, kH, kW, sH, sW)
+        pool_area = patch_indices.shape[1]
         pool_weight = torch.zeros(total_out, total_in, dtype=torch.float64)
-        
         for b in range(batch_size):
-            in_block = b * npp * channels
-            out_block = b * out_patches_per_image * channels
-            
-            for out_y in range(out_H):
-                for out_x in range(out_W):
-                    out_patch_idx = out_y * out_W + out_x
-                    
-                    for ky in range(kH):
-                        for kx in range(kW):
-                            in_y = out_y * sH + ky
-                            in_x = out_x * sW + kx
-                            in_patch_idx = in_y * W + in_x
-                            
-                            for c in range(channels):
-                                out_flat = out_block + out_patch_idx * channels + c
-                                in_flat = in_block + in_patch_idx * channels + c
-                                pool_weight[out_flat, in_flat] = self.avg_factor
+            out_indices = self._output_indices_for_channels(
+                out_patches_per_image,
+                channels,
+                patch_offset=b * out_patches_per_image,
+            )
+            in_indices = self._expand_patch_indices_with_channels(
+                patch_indices,
+                channels,
+                patch_offset=b * npp,
+            )
+            pool_weight[
+                out_indices[:, None, :].expand(-1, pool_area, -1).reshape(-1),
+                in_indices.reshape(-1),
+            ] = self.avg_factor
         
         # Bypass packed-matmul dispatch: create a plain 1-D wrapper without
         # packed-batch flags so that the standard matmul path is used.
@@ -415,15 +445,8 @@ class EncryptedAvgPool2d(EncryptedModule):
         # Create mask for valid output positions across ALL images.
         # Valid positions: (2*out_y, 2*out_x) for each image's spatial grid.
         mask = torch.zeros(total_in, dtype=torch.float64)
-        for b in range(batch_size):
-            block_start = b * npp * channels
-            for out_y in range(out_H):
-                for out_x in range(out_W):
-                    in_y = 2 * out_y
-                    in_x = 2 * out_x
-                    in_patch_idx = in_y * W + in_x
-                    for c in range(channels):
-                        mask[block_start + in_patch_idx * channels + c] = self.avg_factor
+        valid_positions = self._get_valid_positions(out_H, out_W, W, channels, batch_size=batch_size, npp=npp)
+        mask[torch.as_tensor(valid_positions, dtype=torch.long)] = self.avg_factor
         
         # Apply mask (multiply by avg_factor at valid positions, 0 elsewhere)
         # Consumes 1 multiplicative level.
@@ -457,18 +480,16 @@ class EncryptedAvgPool2d(EncryptedModule):
         self, out_H: int, out_W: int, W: int, channels: int,
         *, batch_size: int = 1, npp: int = 0,
     ) -> list:
-        """Get the positions of valid pooled values in the sparse layout."""
-        positions = []
-        for b in range(batch_size):
-            block_start = b * npp * channels
-            for out_y in range(out_H):
-                for out_x in range(out_W):
-                    in_y = 2 * out_y
-                    in_x = 2 * out_x
-                    in_patch_idx = in_y * W + in_x
-                    for c in range(channels):
-                        positions.append(block_start + in_patch_idx * channels + c)
-        return positions
+        base_patch_indices = self._pool_patch_indices(out_H, out_W, W, 1, 1, 2, 2).reshape(-1)
+        positions = [
+            self._expand_patch_indices_with_channels(
+                base_patch_indices[:, None],
+                channels,
+                patch_offset=batch_idx * npp,
+            ).reshape(-1)
+            for batch_idx in range(batch_size)
+        ]
+        return torch.cat(positions).tolist() if positions else []
     
     def mult_depth(self) -> int:
         """Average pooling uses 1 multiplication for scaling."""
@@ -722,12 +743,9 @@ class EncryptedMaxPool2d(EncryptedModule):
         out_patches = out_H * out_W
         total_in = num_patches * channels
 
-        offsets = []
-        for ky in range(kH):
-            for kx in range(kW):
-                if ky == 0 and kx == 0:
-                    continue
-                offsets.append((ky * W + kx) * channels)
+        offsets = (
+            self._pool_patch_indices(1, 1, W, kH, kW, 1, 1).reshape(-1)[1:] * channels
+        ).tolist()
 
         result = x
         for offset in offsets:
@@ -735,13 +753,9 @@ class EncryptedMaxPool2d(EncryptedModule):
             result = self._approx_max(result, rotated)
 
         mask = torch.zeros(total_in, dtype=torch.float64)
-        for out_y in range(out_H):
-            for out_x in range(out_W):
-                in_y = out_y * sH
-                in_x = out_x * sW
-                idx = (in_y * W + in_x) * channels
-                for c in range(channels):
-                    mask[idx + c] = 1.0
+        valid_patch_indices = self._pool_patch_indices(out_H, out_W, W, 1, 1, sH, sW).reshape(-1)
+        mask_indices = self._expand_patch_indices_with_channels(valid_patch_indices[:, None], channels).reshape(-1)
+        mask[mask_indices] = 1.0
 
         result = result.mul(mask.tolist())
         result = result.rescale()
