@@ -319,16 +319,15 @@ class ModelConverter:
                 skip_next = True
                 continue
 
+            self._current_path.append(name)
             try:
-                self._current_path.append(name)
                 converted[name] = self._convert_module(child)
             except NotImplementedError:
                 if isinstance(child, nn.Identity):
-                    self._current_path.pop()
                     continue
-                self._current_path.pop()
                 raise
-            self._current_path.pop()
+            finally:
+                self._current_path.pop()
         return converted
     
     def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
