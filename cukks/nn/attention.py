@@ -8,6 +8,7 @@ All attention computations run in pure HE using cipher-cipher operations.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import functools
 import math
 from typing import TYPE_CHECKING, Any, List, Optional, Union, cast
@@ -125,6 +126,10 @@ class EncryptedApproxAttention(EncryptedModule):
         self._exp_coeffs = _taylor_exp_coeffs(softmax_degree)
         self._gaussian_exp_coeffs = _gaussian_exp_coeffs(self._gaussian_domain, softmax_degree)
         self._reciprocal_degree = 15
+        self._packed_metadata_cache: OrderedDict[
+            tuple[int, int, int, int, int, int],
+            tuple[list[list[float]], list[list[float]], list[list[float]], tuple[int, ...], torch.Tensor],
+        ] = OrderedDict()
         
         # Projection weights (initialized as identity for now)
         # These can be set via from_torch or manually
@@ -178,7 +183,18 @@ class EncryptedApproxAttention(EncryptedModule):
         x: "EncryptedTensor",
         seq_len: int,
         embed_dim: int,
-    ) -> tuple[list[list[float]], list[list[float]], list[list[float]], set[int], torch.Tensor]:
+    ) -> tuple[list[list[float]], list[list[float]], list[list[float]], tuple[int, ...], torch.Tensor]:
+        batch_size = getattr(x, "_batch_size", None)
+        slots_per_sample = getattr(x, "_slots_per_sample", None)
+        if batch_size is None or slots_per_sample is None:
+            raise RuntimeError("Packed attention requires packed batch metadata")
+
+        cache_key = (x._cipher.size, batch_size, slots_per_sample, seq_len, embed_dim, self.num_heads)
+        cached = self._packed_metadata_cache.get(cache_key)
+        if cached is not None:
+            self._packed_metadata_cache.move_to_end(cache_key)
+            return cached
+
         query_masks = [self._packed_token_mask(x, token_index, seq_len) for token_index in range(seq_len)]
         power_outside_fills = [
             [-2.0 * (1.0 - value) for value in query_mask]
@@ -189,13 +205,17 @@ class EncryptedApproxAttention(EncryptedModule):
             [gaussian_distance_cap * (1.0 - value) for value in query_mask]
             for query_mask in query_masks
         ]
-        rotation_offsets = {
+        rotation_offsets = tuple(sorted({
             (key_index - query_index) * embed_dim
             for query_index in range(seq_len)
             for key_index in range(seq_len)
-        }
+        }))
         ones_block = torch.ones(embed_dim, embed_dim, dtype=torch.float64)
-        return query_masks, power_outside_fills, gaussian_outside_fills, rotation_offsets, ones_block
+        cached = (query_masks, power_outside_fills, gaussian_outside_fills, rotation_offsets, ones_block)
+        if len(self._packed_metadata_cache) >= 8:
+            self._packed_metadata_cache.popitem(last=False)
+        self._packed_metadata_cache[cache_key] = cached
+        return cached
 
     def _validate_stip_layout(self, x: "EncryptedTensor") -> tuple[int, int]:
         layout = getattr(x, "_packing_layout", None)

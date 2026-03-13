@@ -88,6 +88,7 @@ class EncryptedConv2d(EncryptedModule):
         self._wm_bias_list: list | None = None
         self._wm_hash: int = 0
         self._wm_diag_nonzero: list | None = None
+        self._packed_compact_cache: dict[tuple[int, int, int], list[int]] = {}
         if hasattr(self, "weight_matrix"):
             self._ensure_weight_matrix_cache()
         
@@ -340,42 +341,36 @@ class EncryptedConv2d(EncryptedModule):
         total_in = num_patches * patch_features
 
         slot_count = x._cipher.size
-        W = self.weight_matrix.to(torch.float64)
         C = self.out_channels
-        K = patch_features
 
         x_flat = x.view(total_in)
-
-        nonzero_diags = set()
-        for p in range(num_patches):
-            for delta in range(-(C - 1), K):
-                d = (p * (K - C) + delta) % total_in
-                nonzero_diags.add(d)
+        diagonal_offsets = self._get_packed_compact_offsets(
+            num_patches,
+            patch_features,
+            slot_count,
+        )
+        W = self.weight_matrix.to(torch.float64)
 
         accumulator = None
 
-        for d in sorted(nonzero_diags):
+        for d in diagonal_offsets:
             diag_vals = torch.zeros(slot_count, dtype=torch.float64)
             has_nonzero = False
-
             for i in range(min(total_out, slot_count)):
                 row = i
                 col = (i + d) % total_in
-
                 row_patch = row // C
+                col_patch = col // patch_features
+                if row_patch != col_patch:
+                    continue
                 row_c = row % C
-                col_patch = col // K
-                col_k = col % K
-
-                if row_patch == col_patch:
-                    val = W[row_c, col_k].item()
-                    if abs(val) > 1e-30:
-                        diag_vals[i] = val
-                        has_nonzero = True
-
+                col_k = col % patch_features
+                val = W[row_c, col_k].item()
+                if abs(val) > 1e-30:
+                    diag_vals[i] = val
+                    has_nonzero = True
             if not has_nonzero:
                 continue
-
             rotated = x_flat.rotate(d) if d != 0 else x_flat
             term = rotated.mul(diag_vals.tolist())
             term = term.rescale()
@@ -412,6 +407,30 @@ class EncryptedConv2d(EncryptedModule):
             accumulator._batch_size = batch_size
             accumulator._slots_per_sample = (num_patches // batch_size) * self.out_channels
         return accumulator
+
+    def _get_packed_compact_offsets(
+        self,
+        num_patches: int,
+        patch_features: int,
+        slot_count: int,
+    ) -> list[int]:
+        cache_key = (num_patches, patch_features, slot_count)
+        cached = self._packed_compact_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        total_in = num_patches * patch_features
+        C = self.out_channels
+        K = patch_features
+
+        nonzero_diags = set()
+        for p in range(num_patches):
+            for delta in range(-(C - 1), K):
+                nonzero_diags.add((p * (K - C) + delta) % total_in)
+
+        cached = sorted(nonzero_diags)
+        self._packed_compact_cache[cache_key] = cached
+        return cached
 
     @staticmethod
     def unfold_input(
