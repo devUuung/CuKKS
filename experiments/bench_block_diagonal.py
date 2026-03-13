@@ -12,6 +12,8 @@ import json
 import os
 import subprocess
 
+from experiments._block_diag_bench_common import default_worker_env, parse_result_json
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -30,15 +32,8 @@ def run_single_benchmark(
         "--num-samples", str(num_samples),
         "--device", device,
     ]
-    env = os.environ.copy()
-    env.setdefault(
-        "LD_LIBRARY_PATH",
-        "/workspace/ckks-torch/openfhe-gpu-public/build/lib:"
-        "/workspace/ckks-torch/openfhe-gpu-public/build/_deps/rmm-build",
-    )
-
     print(f"\n--- block_size={block_size} (subprocess) ---")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=default_worker_env(), timeout=600)
 
     if result.returncode != 0:
         print(f"STDERR:\n{result.stderr}")
@@ -47,9 +42,9 @@ def run_single_benchmark(
             "error": result.stderr.strip()[-500:],
         }
 
-    for line in result.stdout.strip().split("\n"):
-        if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+    parsed = parse_result_json(result.stdout)
+    if parsed is not None:
+        return parsed
 
     print(f"STDOUT:\n{result.stdout}")
     return {"block_size": block_size, "error": "no RESULT_JSON found in output"}

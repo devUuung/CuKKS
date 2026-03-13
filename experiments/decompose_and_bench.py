@@ -13,35 +13,22 @@ import json
 import os
 import subprocess
 import sys
+from typing import cast
 
 import torch
 import torch.nn as nn
 from torchvision import datasets, transforms
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from cukks.nn.block_diagonal import BlockDiagonalLinear
 from cukks.nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+from experiments._block_diag_bench_common import (
+    BlockDiagMNIST,
+    SquareActivation,
+    default_worker_env,
+    parse_result_json,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-class SquareActivation(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * x
-
-
-class BlockDiagMNIST(nn.Module):
-    def __init__(self, hidden: int, block_size: int) -> None:
-        super().__init__()
-        self.fc1 = nn.Linear(784, hidden)
-        self.act1 = SquareActivation()
-        self.fc2 = BlockDiagonalLinear(hidden, hidden, block_size=block_size)
-        self.act2 = SquareActivation()
-        self.fc3 = nn.Linear(hidden, 10)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(x.size(0), -1)
-        return self.fc3(self.act2(self.fc2(self.act1(self.fc1(x)))))
 
 
 def load_dense_model(hidden: int) -> BlockDiagMNIST:
@@ -110,19 +97,13 @@ def run_encrypted_bench(hidden: int, block_size: int, rank: int, num_samples: in
         "--num-samples", str(num_samples),
         "--device", device,
     ]
-    env = os.environ.copy()
-    env.setdefault(
-        "LD_LIBRARY_PATH",
-        "/workspace/ckks-torch/openfhe-gpu-public/build/lib:"
-        "/workspace/ckks-torch/openfhe-gpu-public/build/_deps/rmm-build",
-    )
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=default_worker_env(), timeout=600)
     if result.returncode != 0:
         print(f"  STDERR: {result.stderr[-300:]}", file=sys.stderr)
         return {"block_size": block_size, "rank": rank, "error": result.stderr.strip()[-200:]}
-    for line in result.stdout.strip().split("\n"):
-        if line.startswith("RESULT_JSON:"):
-            return json.loads(line[len("RESULT_JSON:"):])
+    parsed = parse_result_json(result.stdout)
+    if parsed is not None:
+        return parsed
     return {"block_size": block_size, "rank": rank, "error": "no RESULT_JSON"}
 
 
@@ -153,7 +134,7 @@ def main():
             continue
         print(f"block_size={bs}, rank={rank}:")
         decomposed = decompose_fc2(dense_model, bs, rank)
-        bd_lr = decomposed.fc2
+        bd_lr = cast(BlockDiagLowRankLinear, decomposed.fc2)
         acc = measure_accuracy(decomposed, args.data_dir)
         err = approx_error(dense_model, bd_lr)
         nz_diags = 2 * bs - 1 if bs < args.hidden else args.hidden
