@@ -80,39 +80,31 @@ class SlotPacker:
                 f"or smaller sample size."
             )
         
-        # Validate and flatten all samples
-        flat_samples: List[torch.Tensor] = []
-        sample_size: int | None = None
-        
-        for i, sample in enumerate(samples):
-            flat = sample.detach().to(dtype=torch.float64).reshape(-1)
-            
-            if flat.numel() > self.slots_per_sample:
+        flat_samples = [sample.detach().to(dtype=torch.float64).reshape(-1) for sample in samples]
+        sample_sizes = [flat.numel() for flat in flat_samples]
+
+        for i, sample_size in enumerate(sample_sizes):
+            if sample_size > self.slots_per_sample:
                 raise ValueError(
-                    f"Sample {i} has {flat.numel()} elements, exceeds "
+                    f"Sample {i} has {sample_size} elements, exceeds "
                     f"slots_per_sample={self.slots_per_sample}"
                 )
-            
-            if sample_size is None:
-                sample_size = flat.numel()
-            elif flat.numel() != sample_size:
+
+        sample_size = sample_sizes[0]
+        for i, current_size in enumerate(sample_sizes[1:], start=1):
+            if current_size != sample_size:
                 raise ValueError(
                     f"Inconsistent sample sizes: sample 0 has {sample_size} elements, "
-                    f"sample {i} has {flat.numel()} elements"
+                    f"sample {i} has {current_size} elements"
                 )
-            
-            # Pad sample to slots_per_sample if needed
-            if flat.numel() < self.slots_per_sample:
-                padded = torch.zeros(self.slots_per_sample, dtype=torch.float64)
-                padded[:flat.numel()] = flat
-                flat_samples.append(padded)
-            else:
-                flat_samples.append(flat)
-        
-        # Concatenate all samples
-        packed = torch.cat(flat_samples, dim=0)
-        
-        return packed
+
+        stacked = torch.stack(flat_samples, dim=0)
+        if sample_size == self.slots_per_sample:
+            return stacked.reshape(-1)
+
+        packed = torch.zeros(num_samples, self.slots_per_sample, dtype=torch.float64)
+        packed[:, :sample_size] = stacked
+        return packed.reshape(-1)
     
     def unpack(self, packed: torch.Tensor, num_samples: int) -> List[torch.Tensor]:
         """Unpack a slot vector into individual samples.
@@ -137,7 +129,7 @@ class SlotPacker:
             )
         
         required_slots = num_samples * self.slots_per_sample
-        flat_packed = packed.detach().to(dtype=torch.float64).reshape(-1)
+        flat_packed = packed.detach().to(dtype=torch.float64).contiguous().reshape(-1)
         
         if flat_packed.numel() < required_slots:
             raise ValueError(
@@ -145,14 +137,8 @@ class SlotPacker:
                 f"but {required_slots} are required for {num_samples} samples"
             )
         
-        samples: List[torch.Tensor] = []
-        for i in range(num_samples):
-            start = i * self.slots_per_sample
-            end = start + self.slots_per_sample
-            sample = flat_packed[start:end].clone()
-            samples.append(sample)
-        
-        return samples
+        reshaped = flat_packed[:required_slots].reshape(num_samples, self.slots_per_sample)
+        return [sample.clone() for sample in reshaped.unbind(dim=0)]
     
     def __repr__(self) -> str:
         return (
