@@ -19,7 +19,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cukks-cu124"
-version = "0.1.4"
+version = "0.2.0"
 description = "CKKS Homomorphic Encryption backend with CUDA 12.4 GPU acceleration"
 readme = "../README.md"
 license = {text = "Apache-2.0"}
