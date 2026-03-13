@@ -22,24 +22,6 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ------------------------------------------------------------------------------
-# Optimization Flags
-# NOTE: -march=native targets the build machine's CPU instruction set.
-#       For portable wheel distribution swap it for -march=x86-64-v3 (AVX2).
-# ------------------------------------------------------------------------------
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-O3 -march=native)
-endif()
-
-include(CheckIPOSupported)
-check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_output)
-if(_ipo_supported)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-    message(STATUS "IPO/LTO enabled")
-else()
-    message(STATUS "IPO/LTO not supported: ${_ipo_output}")
-endif()
-
-# ------------------------------------------------------------------------------
 # GPU Support
 # ------------------------------------------------------------------------------
 option(CUKKS_ENABLE_GPU "Enable GPU support" ON)
