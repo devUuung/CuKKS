@@ -1666,47 +1666,73 @@ PYBIND11_MODULE(ckks_openfhe_gpu_backend, m) {
             return handle.gpu_loaded;
         });
 
-    m.def("create_context", &create_context, 
+    m.def("create_context", &create_context,
           py::arg("poly_mod_degree"), py::arg("coeff_mod_bits"),
-          py::arg("scale_bits"), py::arg("security_level_code"), 
+          py::arg("scale_bits"), py::arg("security_level_code"),
           py::arg("enable_bootstrap"), py::arg("level_budget"),
-          py::arg("batch_size"), py::arg("enable_gpu") = true);
-    m.def("keygen", &keygen, 
-          py::arg("context"), py::arg("rotations"), 
-          py::arg("relin"), py::arg("conj"), 
-          py::arg("enable_gpu") = true);
-    m.def("encrypt", &encrypt, py::arg("context"), py::arg("keys"), py::arg("values"));
-    m.def("decrypt", &decrypt, py::arg("context"), py::arg("keys"), py::arg("cipher"));
-    m.def("add_cipher", &add_cipher, py::arg("lhs"), py::arg("rhs"));
-    m.def("add_plain", &add_plain, py::arg("lhs"), py::arg("plain"));
-    m.def("sub_cipher", &sub_cipher, py::arg("lhs"), py::arg("rhs"));
-    m.def("sub_plain", &sub_plain, py::arg("lhs"), py::arg("plain"));
-    m.def("mul_cipher", &mul_cipher, py::arg("lhs"), py::arg("rhs"));
-    m.def("mul_plain", &mul_plain, py::arg("lhs"), py::arg("plain"));
-    m.def("square", &square_cipher, py::arg("cipher"));
-    m.def("rescale", &rescale_cipher, py::arg("tensor"));
-    m.def("rotate", &rotate_cipher, py::arg("tensor"), py::arg("index"));
-    m.def("sum_slots", &sum_slots_cipher, py::arg("tensor"));
-    m.def("matvec_diag", &matvec_diag_cipher, py::arg("tensor"), py::arg("diagonals"));
-    m.def("matmul_dense", &matmul_dense_cipher, py::arg("tensor"), py::arg("matrix"));
-    m.def("matmul_bsgs", &matmul_bsgs_cipher, py::arg("tensor"), py::arg("matrix"), 
+          py::arg("batch_size"), py::arg("enable_gpu") = true,
+          py::call_guard<py::gil_scoped_release>());
+    m.def("keygen", &keygen,
+          py::arg("context"), py::arg("rotations"),
+          py::arg("relin"), py::arg("conj"),
+          py::arg("enable_gpu") = true,
+          py::call_guard<py::gil_scoped_release>());
+    m.def("encrypt", &encrypt, py::arg("context"), py::arg("keys"), py::arg("values"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("decrypt", &decrypt, py::arg("context"), py::arg("keys"), py::arg("cipher"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("add_cipher", &add_cipher, py::arg("lhs"), py::arg("rhs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("add_plain", &add_plain, py::arg("lhs"), py::arg("plain"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("sub_cipher", &sub_cipher, py::arg("lhs"), py::arg("rhs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("sub_plain", &sub_plain, py::arg("lhs"), py::arg("plain"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("mul_cipher", &mul_cipher, py::arg("lhs"), py::arg("rhs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("mul_plain", &mul_plain, py::arg("lhs"), py::arg("plain"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("square", &square_cipher, py::arg("cipher"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("rescale", &rescale_cipher, py::arg("tensor"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("rotate", &rotate_cipher, py::arg("tensor"), py::arg("index"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("sum_slots", &sum_slots_cipher, py::arg("tensor"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("matvec_diag", &matvec_diag_cipher, py::arg("tensor"), py::arg("diagonals"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("matmul_dense", &matmul_dense_cipher, py::arg("tensor"), py::arg("matrix"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("matmul_bsgs", &matmul_bsgs_cipher, py::arg("tensor"), py::arg("matrix"),
           py::arg("bsgs_n1") = 0, py::arg("bsgs_n2") = 0,
-          py::arg("weight_hash") = 0, py::arg("diag_nonzero") = std::vector<bool>{});
+          py::arg("weight_hash") = 0, py::arg("diag_nonzero") = std::vector<bool>{},
+          py::call_guard<py::gil_scoped_release>());
     m.def("packed_self_attention_power", &packed_self_attention_power_cipher,
           py::arg("query"), py::arg("key"), py::arg("value"),
           py::arg("batch_size"), py::arg("seq_len"), py::arg("embed_dim"),
           py::arg("scale"), py::arg("shift"),
-          py::arg("reciprocal_coeffs"), py::arg("renorm_reciprocal_coeffs"));
-    m.def("poly_eval", &poly_eval_cipher, py::arg("tensor"), py::arg("coeffs"));
-    m.def("conjugate", &conjugate_cipher, py::arg("tensor"));
-    m.def("bootstrap", &bootstrap_cipher, py::arg("tensor"));
+          py::arg("reciprocal_coeffs"), py::arg("renorm_reciprocal_coeffs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("poly_eval", &poly_eval_cipher, py::arg("tensor"), py::arg("coeffs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("conjugate", &conjugate_cipher, py::arg("tensor"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("bootstrap", &bootstrap_cipher, py::arg("tensor"),
+          py::call_guard<py::gil_scoped_release>());
     m.def("cipher_metadata", &cipher_metadata, py::arg("cipher"));
     m.def("is_gpu_available", &is_gpu_available);
     m.def("get_gpu_info", &get_gpu_info);
     m.def("set_plain_cache_limit", &set_plain_cache_limit,
-          py::arg("context"), py::arg("limit"));
-    m.def("pin_plain_cache", &pin_plain_cache, py::arg("context"));
-    m.def("clear_pinned_plain_cache", &clear_pinned_plain_cache, py::arg("context"));
-    m.def("plain_cache_stats_count", &plain_cache_stats_count, py::arg("context"));
-    m.def("plain_cache_stats_pinned", &plain_cache_stats_pinned, py::arg("context"));
+          py::arg("context"), py::arg("limit"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("pin_plain_cache", &pin_plain_cache, py::arg("context"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("clear_pinned_plain_cache", &clear_pinned_plain_cache, py::arg("context"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("plain_cache_stats_count", &plain_cache_stats_count, py::arg("context"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("plain_cache_stats_pinned", &plain_cache_stats_pinned, py::arg("context"),
+          py::call_guard<py::gil_scoped_release>());
 }
