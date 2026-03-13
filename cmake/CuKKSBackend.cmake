@@ -23,11 +23,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ------------------------------------------------------------------------------
 # Optimization Flags
-# NOTE: -march=native targets the build machine's CPU instruction set.
-#       For portable wheel distribution swap it for -march=x86-64-v3 (AVX2).
 # ------------------------------------------------------------------------------
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-O3 -march=native)
+    add_compile_options(-O3)
 endif()
 
 include(CheckIPOSupported)
