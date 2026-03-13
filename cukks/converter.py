@@ -43,6 +43,8 @@ from .nn.block_diagonal import BlockDiagonalLinear
 from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
 from .nn.encrypted_block_diag_lr import EncryptedBlockDiagLowRank
 
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # Default Activation Mapping
@@ -556,57 +558,155 @@ class ModelConverter:
         return EncryptedMaxPool2d.from_torch(module)
     
     def _fold_batchnorms(self, model: nn.Module) -> nn.Module:
-        """Fold BatchNorm layers into preceding Linear/Conv layers."""
-        model = _fold_bn_recursive(model)
-        return model
+        """Fold BatchNorm layers into preceding Linear/Conv layers.
+
+        Uses torch.fx symbolic tracing when possible so that BN inside
+        non-Sequential containers (e.g. ResNet blocks with self.conv / self.bn
+        as separate attributes) is also folded automatically.  Falls back to
+        the structural sibling-adjacency pass when tracing fails.
+        """
+        return _fold_batchnorms_fx(model)
+
+
+def _fold_batchnorms_fx(model: nn.Module) -> nn.Module:
+    """FX-based BN fold.
+
+    Symbolically traces the model to obtain a dataflow graph, then finds
+    every node N where:
+      - N is a call to BatchNorm1d / BatchNorm2d
+      - N's single input is a call to Linear / Conv2d
+    and folds the BN parameters into the preceding layer.
+
+    Falls back to the structural _fold_bn_recursive() pass when the model
+    cannot be symbolically traced (dynamic control flow, custom ops, etc.).
+    """
+    import torch.fx as fx
+
+    try:
+        traced: fx.GraphModule = fx.symbolic_trace(model)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("torch.fx trace failed (%s); using structural BN fold", exc)
+        return _fold_bn_recursive(model)
+
+    # ---- collect foldable (linear/conv_node, bn_node) pairs ---------------
+    pairs: list[tuple[fx.Node, fx.Node]] = []
+    for node in list(traced.graph.nodes):
+        if node.op != "call_module":
+            continue
+        try:
+            mod = traced.get_submodule(str(node.target))
+        except AttributeError:
+            continue
+        if not isinstance(mod, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            continue
+        # BN must have exactly one input and it must be a module call
+        if len(node.args) != 1 or not isinstance(node.args[0], fx.Node):
+            continue
+        prev = node.args[0]
+        if prev.op != "call_module":
+            continue
+        try:
+            prev_mod = traced.get_submodule(str(prev.target))
+        except AttributeError:
+            continue
+        if (
+            isinstance(prev_mod, nn.Linear) and isinstance(mod, nn.BatchNorm1d)
+            or isinstance(prev_mod, nn.Conv2d) and isinstance(mod, nn.BatchNorm2d)
+        ):
+            pairs.append((prev, node))
+
+    if not pairs:
+        # Nothing found by FX — run structural pass as belt-and-suspenders
+        return _fold_bn_recursive(model)
+
+    # ---- apply folds -------------------------------------------------------
+    for prev_node, bn_node in pairs:
+        try:
+            prev_mod = traced.get_submodule(str(prev_node.target))
+            bn_mod = traced.get_submodule(str(bn_node.target))
+        except AttributeError:
+            continue
+        if isinstance(prev_mod, nn.Linear) and isinstance(bn_mod, nn.BatchNorm1d):
+            folded = fold_batchnorm_into_linear(prev_mod, bn_mod)
+        elif isinstance(prev_mod, nn.Conv2d) and isinstance(bn_mod, nn.BatchNorm2d):
+            folded = fold_batchnorm_into_conv(prev_mod, bn_mod)
+        else:
+            continue
+
+        # Swap linear/conv → folded version in traced model
+        _set_module_at_path(traced, str(prev_node.target), folded)
+
+        # Bypass BN node in graph: rewire all consumers to prev_node
+        bn_node.replace_all_uses_with(prev_node)
+        traced.graph.erase_node(bn_node)
+
+        # Remove BN submodule attribute
+        _del_module_at_path(traced, str(bn_node.target))
+
+    traced.graph.lint()
+    traced.recompile()
+    return traced
+
+
+def _set_module_at_path(root: nn.Module, path: str, new_mod: nn.Module) -> None:
+    """Set the submodule at a dotted attribute path."""
+    parts = path.split(".")
+    parent: nn.Module = root
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    setattr(parent, parts[-1], new_mod)
+
+
+def _del_module_at_path(root: nn.Module, path: str) -> None:
+    """Delete the submodule attribute at a dotted path."""
+    parts = path.split(".")
+    parent: nn.Module = root
+    for part in parts[:-1]:
+        parent = getattr(parent, part)
+    delattr(parent, parts[-1])
 
 
 def _fold_bn_recursive(module: nn.Module) -> nn.Module:
-    """Recursively fold BatchNorm into preceding layers."""
-    # Check if this is a Sequential-like container
+    """Structural fallback: fold BN into adjacent sibling in child list."""
     children = list(module.named_children())
     if not children:
         return module
-    
+
     new_children = []
     skip_next = False
-    
+
     for i, (name, child) in enumerate(children):
         if skip_next:
             skip_next = False
             continue
-        
-        # Check if next layer is BatchNorm
+
         if i + 1 < len(children):
             _, next_child = children[i + 1]
-            
+
             if isinstance(child, nn.Linear) and isinstance(next_child, nn.BatchNorm1d):
                 folded = fold_batchnorm_into_linear(child, next_child)
                 new_children.append((name, folded))
                 skip_next = True
                 continue
-            
+
             if isinstance(child, nn.Conv2d) and isinstance(next_child, nn.BatchNorm2d):
                 folded = fold_batchnorm_into_conv(child, next_child)
                 new_children.append((name, folded))
                 skip_next = True
                 continue
-        
-        # Recursively process child
+
         new_children.append((name, _fold_bn_recursive(child)))
-    
-    # Rebuild the module
+
     if isinstance(module, nn.Sequential):
         return nn.Sequential(OrderedDict(new_children))
-    
-    # For other containers, replace children in-place and remove folded BN layers
+
     new_names = {name for name, _ in new_children}
     for name, _ in children:
         if name not in new_names:
             delattr(module, name)
     for name, new_child in new_children:
         setattr(module, name, new_child)
-    
+
     return module
 
 
