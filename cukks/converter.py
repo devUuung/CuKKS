@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import warnings
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, cast
 
 import torch
 import torch.nn as nn
@@ -270,48 +270,65 @@ class ModelConverter:
         children: List[Tuple[str, nn.Module]],
     ) -> EncryptedSequential:
         """Convert a container module with children."""
+        return EncryptedSequential(self._convert_children(children))
+
+    def _maybe_convert_cnn_flatten_linear_pair(
+        self,
+        children: List[Tuple[str, nn.Module]],
+        index: int,
+        converted: "OrderedDict[str, EncryptedModule]",
+    ) -> bool:
+        if not (
+            self.options.optimize_cnn
+            and self._is_cnn_model
+            and isinstance(children[index][1], nn.Flatten)
+            and index + 1 < len(children)
+        ):
+            return False
+
+        name, child = children[index]
+        flatten = cast(nn.Flatten, child)
+        next_name, next_child = children[index + 1]
+        if not isinstance(next_child, nn.Linear):
+            return False
+
+        cnn_layout = self._compute_cnn_layout_from_linear(next_child)
+        if cnn_layout is None:
+            return False
+
+        converted[name] = EncryptedFlatten._with_absorbed_permutation(
+            flatten.start_dim,
+            flatten.end_dim,
+        )
+        converted[next_name] = EncryptedLinear.from_torch_cnn(next_child, cnn_layout)
+        return True
+
+    def _convert_children(
+        self,
+        children: List[Tuple[str, nn.Module]],
+    ) -> "OrderedDict[str, EncryptedModule]":
         converted = OrderedDict()
         skip_next = False
-        
+
         for i, (name, child) in enumerate(children):
             if skip_next:
                 skip_next = False
                 continue
-            
-            # CNN optimization: Flatten + Linear -> optimized Linear
-            if (self.options.optimize_cnn and 
-                self._is_cnn_model and
-                isinstance(child, nn.Flatten) and 
-                i + 1 < len(children)):
-                
-                _, next_child = children[i + 1]
-                if isinstance(next_child, nn.Linear):
-                    cnn_layout = self._compute_cnn_layout_from_linear(next_child)
-                    
-                    if cnn_layout is not None:
-                        converted[name] = EncryptedFlatten._with_absorbed_permutation(
-                            child.start_dim, 
-                            child.end_dim
-                        )
-                        next_name = children[i + 1][0]
-                        converted[next_name] = EncryptedLinear.from_torch_cnn(
-                            next_child, 
-                            cnn_layout
-                        )
-                        skip_next = True
-                        continue
-            
+
+            if self._maybe_convert_cnn_flatten_linear_pair(children, i, converted):
+                skip_next = True
+                continue
+
+            self._current_path.append(name)
             try:
-                self._current_path.append(name)
                 converted[name] = self._convert_module(child)
             except NotImplementedError:
                 if isinstance(child, nn.Identity):
-                    self._current_path.pop()
                     continue
-                self._current_path.pop()
                 raise
-            self._current_path.pop()
-        return EncryptedSequential(converted)
+            finally:
+                self._current_path.pop()
+        return converted
     
     def _convert_linear(self, module: nn.Linear) -> EncryptedModule:
         """Convert a Linear layer."""
@@ -339,53 +356,8 @@ class ModelConverter:
     
     def _convert_sequential(self, module: nn.Sequential) -> EncryptedSequential:
         """Convert a Sequential container with CNN optimizations."""
-        converted = OrderedDict()
         children = list(module.named_children())
-        skip_next = False
-        
-        for i, (name, child) in enumerate(children):
-            if skip_next:
-                skip_next = False
-                continue
-            
-            # CNN optimization: Flatten + Linear -> optimized Linear (absorb permutation)
-            if (self.options.optimize_cnn and 
-                self._is_cnn_model and
-                isinstance(child, nn.Flatten) and 
-                i + 1 < len(children)):
-                
-                _, next_child = children[i + 1]
-                if isinstance(next_child, nn.Linear):
-                    # Compute CNN layout from the Linear layer's input size
-                    cnn_layout = self._compute_cnn_layout_from_linear(next_child)
-                    
-                    if cnn_layout is not None:
-                        # Create Flatten with internal flag (no-op)
-                        converted[name] = EncryptedFlatten._with_absorbed_permutation(
-                            child.start_dim, 
-                            child.end_dim
-                        )
-                        # Create Linear with permuted weights
-                        next_name = children[i + 1][0]
-                        converted[next_name] = EncryptedLinear.from_torch_cnn(
-                            next_child, 
-                            cnn_layout
-                        )
-                        skip_next = True
-                        continue
-            
-            try:
-                self._current_path.append(name)
-                converted[name] = self._convert_module(child)
-            except NotImplementedError:
-                if isinstance(child, nn.Identity):
-                    self._current_path.pop()
-                    continue
-                self._current_path.pop()
-                raise
-            self._current_path.pop()
-                
-        return EncryptedSequential(converted)
+        return EncryptedSequential(self._convert_children(children))
     
     def _compute_cnn_layout_from_linear(self, linear: nn.Linear) -> Optional[Dict]:
         """Compute the CNN layout from Linear layer's input features.

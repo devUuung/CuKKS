@@ -8,6 +8,7 @@ various approximation methods.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any, List, Sequence
 
 from .module import EncryptedModule
@@ -20,7 +21,8 @@ if TYPE_CHECKING:
 # Polynomial Approximation Coefficients
 # =============================================================================
 
-def _chebyshev_relu_coeffs(degree: int = 7, domain: tuple = (-1, 1)) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _chebyshev_relu_coeffs(degree: int = 7, domain: tuple = (-1, 1)) -> tuple[float, ...]:
     """Compute power-basis polynomial coefficients for ReLU approximation.
     
     Uses least-squares fitting on uniform samples, then converts to power basis.
@@ -34,12 +36,13 @@ def _chebyshev_relu_coeffs(degree: int = 7, domain: tuple = (-1, 1)) -> List[flo
         power_coeffs = np.polynomial.chebyshev.cheb2poly(cheb_coeffs)
         while len(power_coeffs) > 1 and abs(power_coeffs[-1]) < 1e-12:
             power_coeffs = power_coeffs[:-1]
-        return power_coeffs.tolist()
+        return tuple(float(value) for value in power_coeffs.tolist())
     except ImportError:
-        return [0.0, 0.5, 0.25]
+        return (0.0, 0.5, 0.25)
 
 
-def _minimax_relu_coeffs(degree: int = 4, domain: tuple = (-4, 4)) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _minimax_relu_coeffs(degree: int = 4, domain: tuple = (-4, 4)) -> tuple[float, ...]:
     """Minimax polynomial approximation for ReLU.
     
     Pre-computed coefficients are available for [-1,1]. For other domains,
@@ -48,16 +51,17 @@ def _minimax_relu_coeffs(degree: int = 4, domain: tuple = (-4, 4)) -> List[float
     a, b = domain
     if a == -1 and b == 1:
         coefficients = {
-            2: [0.375, 0.5, 0.125],
-            3: [0.3125, 0.5, 0.25, -0.0625],
-            4: [0.2734375, 0.5, 0.3125, -0.125, 0.0234375],
+            2: (0.375, 0.5, 0.125),
+            3: (0.3125, 0.5, 0.25, -0.0625),
+            4: (0.2734375, 0.5, 0.3125, -0.125, 0.0234375),
         }
         if degree in coefficients:
             return coefficients[degree]
     return _chebyshev_relu_coeffs(degree, domain)
 
 
-def _gelu_poly_coeffs(degree: int = 4) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _gelu_poly_coeffs(degree: int = 4) -> tuple[float, ...]:
     """Polynomial approximation for GELU: x * Phi(x).
     
     Uses Chebyshev approximation for GELU on [-1, 1].
@@ -76,14 +80,15 @@ def _gelu_poly_coeffs(degree: int = 4) -> List[float]:
         cheb_coeffs = chebfit(x, y, degree)
         # Convert from Chebyshev basis to power basis for poly_eval
         power_coeffs = cheb2poly(cheb_coeffs)
-        return power_coeffs.tolist()
+        return tuple(float(value) for value in power_coeffs.tolist())
     except ImportError:
         # Fallback: hardcoded degree-4 power-basis coefficients
         # GELU(x) ≈ 0.5*x*(1 + tanh(sqrt(2/π)*(x + 0.044715*x^3)))
-        return [0.0, 0.5, 0.0, 0.0398942, 0.0]
+        return (0.0, 0.5, 0.0, 0.0398942, 0.0)
 
 
-def _sigmoid_poly_coeffs(degree: int = 4) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _sigmoid_poly_coeffs(degree: int = 4) -> tuple[float, ...]:
     """Polynomial approximation for sigmoid on [-4, 4].
     
     sigmoid(x) = 1 / (1 + exp(-x))
@@ -100,12 +105,13 @@ def _sigmoid_poly_coeffs(degree: int = 4) -> List[float]:
         y = sigmoid(x)
         cheb_coeffs = chebfit(x, y, degree)
         power_coeffs = cheb2poly(cheb_coeffs)
-        return power_coeffs.tolist()
+        return tuple(float(value) for value in power_coeffs.tolist())
     except ImportError:
-        return [0.5, 0.25, 0.0, -0.0208333, 0.0]
+        return (0.5, 0.25, 0.0, -0.0208333, 0.0)
 
 
-def _tanh_poly_coeffs(degree: int = 5) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _tanh_poly_coeffs(degree: int = 5) -> tuple[float, ...]:
     """Polynomial approximation for tanh.
     
     Returns power-basis coefficients [a0, a1, a2, ...] for poly_eval.
@@ -119,12 +125,13 @@ def _tanh_poly_coeffs(degree: int = 5) -> List[float]:
         cheb_coeffs = chebfit(x, y, degree)
         # Convert from Chebyshev basis to power basis for poly_eval
         power_coeffs = cheb2poly(cheb_coeffs)
-        return power_coeffs.tolist()
+        return tuple(float(value) for value in power_coeffs.tolist())
     except ImportError:
-        return [0.0, 1.0, 0.0, -0.333333, 0.0, 0.133333]
+        return (0.0, 1.0, 0.0, -0.333333, 0.0, 0.133333)
 
 
-def _silu_poly_coeffs(degree: int = 4) -> List[float]:
+@functools.lru_cache(maxsize=32)
+def _silu_poly_coeffs(degree: int = 4) -> tuple[float, ...]:
     """Polynomial approximation for SiLU (x * sigmoid(x)).
     
     Returns power-basis coefficients [a0, a1, a2, ...] for poly_eval.
@@ -140,9 +147,9 @@ def _silu_poly_coeffs(degree: int = 4) -> List[float]:
         y = silu(x)
         cheb_coeffs = chebfit(x, y, degree)
         power_coeffs = cheb2poly(cheb_coeffs)
-        return power_coeffs.tolist()
+        return tuple(float(value) for value in power_coeffs.tolist())
     except ImportError:
-        return [0.0, 0.5, 0.25, 0.0, -0.0104167]
+        return (0.0, 0.5, 0.25, 0.0, -0.0104167)
 
 
 # =============================================================================
@@ -189,9 +196,9 @@ class EncryptedReLU(EncryptedModule):
         self.method = method
         
         if method == "minimax":
-            self.coeffs = _minimax_relu_coeffs(degree, domain)
+            self.coeffs = list(_minimax_relu_coeffs(degree, domain))
         else:
-            self.coeffs = _chebyshev_relu_coeffs(degree, domain)
+            self.coeffs = list(_chebyshev_relu_coeffs(degree, domain))
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         result = x.poly_eval(self.coeffs)
@@ -217,7 +224,7 @@ class EncryptedGELU(EncryptedModule):
     def __init__(self, degree: int = 4) -> None:
         super().__init__()
         self.degree = degree
-        self.coeffs = _gelu_poly_coeffs(degree)
+        self.coeffs = list(_gelu_poly_coeffs(degree))
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         result = x.poly_eval(self.coeffs)
@@ -243,7 +250,7 @@ class EncryptedSiLU(EncryptedModule):
     def __init__(self, degree: int = 4) -> None:
         super().__init__()
         self.degree = degree
-        self.coeffs = _silu_poly_coeffs(degree)
+        self.coeffs = list(_silu_poly_coeffs(degree))
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         result = x.poly_eval(self.coeffs)
@@ -267,7 +274,7 @@ class EncryptedSigmoid(EncryptedModule):
     def __init__(self, degree: int = 4) -> None:
         super().__init__()
         self.degree = degree
-        self.coeffs = _sigmoid_poly_coeffs(degree)
+        self.coeffs = list(_sigmoid_poly_coeffs(degree))
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         result = x.poly_eval(self.coeffs)
@@ -291,7 +298,7 @@ class EncryptedTanh(EncryptedModule):
     def __init__(self, degree: int = 5) -> None:
         super().__init__()
         self.degree = degree
-        self.coeffs = _tanh_poly_coeffs(degree)
+        self.coeffs = list(_tanh_poly_coeffs(degree))
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         result = x.poly_eval(self.coeffs)
