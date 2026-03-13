@@ -7,7 +7,6 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
-import copy
 import math
 import pickle
 import warnings
@@ -63,6 +62,23 @@ class EncryptedTensor:
         >>> result = ctx.decrypt(z)
     """
     
+    __slots__ = (
+        "_cipher",
+        "_shape",
+        "_context",
+        "_depth",
+        "_original_size",
+        "_cnn_layout",
+        "_packed_batch",
+        "_batch_size",
+        "_slots_per_sample",
+        "_packed_sample_shape",
+        "_needs_rescale",
+        "_packing_layout",
+        "_stip_layout_fresh",
+        "_sigma_factor",
+    )
+
     def __init__(
         self,
         cipher: Any,
@@ -93,10 +109,15 @@ class EncryptedTensor:
         self._stip_layout_fresh: bool = False
         self._sigma_factor: Optional["EncryptedTensor"] = None
 
+    @staticmethod
+    def _copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if layout is None:
+            return None
+        return dict(layout)
+
     def _copy_runtime_metadata_from(self, other: "EncryptedTensor") -> None:
         self._original_size = other._original_size
-        if other._cnn_layout is not None:
-            self._cnn_layout = copy.deepcopy(other._cnn_layout)
+        self._cnn_layout = self._copy_cnn_layout(other._cnn_layout)
         self._packed_batch = other._packed_batch
         self._batch_size = other._batch_size
         self._slots_per_sample = other._slots_per_sample
@@ -192,8 +213,7 @@ class EncryptedTensor:
             result._batch_size = self._batch_size
             result._slots_per_sample = self._slots_per_sample
             result._packed_sample_shape = self._packed_sample_shape
-        if self._cnn_layout is not None:
-            result._cnn_layout = copy.deepcopy(self._cnn_layout)
+        result._cnn_layout = self._copy_cnn_layout(self._cnn_layout)
         result._packing_layout = self._packing_layout
         result._sigma_factor = self._sigma_factor
         return result
@@ -1327,7 +1347,7 @@ class EncryptedTensor:
         
         result = cls(cipher, shape, context, depth)
         result._needs_rescale = tensor_data.get("needs_rescale", False)
-        result._cnn_layout = tensor_data.get("cnn_layout", None)
+        result._cnn_layout = cls._copy_cnn_layout(tensor_data.get("cnn_layout", None))
         result._packed_batch = tensor_data.get("packed_batch", False)
         result._batch_size = tensor_data.get("batch_size", None)
         result._slots_per_sample = tensor_data.get("slots_per_sample", None)
