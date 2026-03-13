@@ -8,6 +8,8 @@ matrix-vector multiplication (im2col method).
 from __future__ import annotations
 
 import hashlib
+import math
+from collections import defaultdict
 from typing import TYPE_CHECKING, Optional, Tuple, Union, cast
 
 import torch
@@ -321,18 +323,23 @@ class EncryptedConv2d(EncryptedModule):
         *,
         batch_size: int = 1,
     ) -> "EncryptedTensor":
-        """Large-input path: diagonal method without materializing block-diagonal.
+        """Large-input path: diagonal method with BSGS rotation optimization.
 
-        For block-diagonal B (total_out × total_in) with repeated block W (C × K):
+        For block-diagonal B (total_out x total_in) with repeated block W (C x K):
             B[p*C+c, p*K+k] = W[c, k]   (same block p)
             B[i, j] = 0                  (different blocks)
 
-        Standard diagonal encoding for rectangular M×N matrix:
+        Standard diagonal encoding for rectangular M x N matrix:
             diag_d[i] = M[i % M_rows, (i + d) % M_cols]
 
         We compute each diagonal analytically from W, never allocating B.
-        Number of non-zero diagonals ≤ K × ceil(total_out / total_in + 1).
+        Number of non-zero diagonals <= K x ceil(total_out / total_in + 1).
         Memory per diagonal: O(num_slots).
+
+        BSGS optimization (Halevi-Shoup): decompose each offset d = q*g + j
+        (g = ceil(sqrt(|D|))).  Precompute g baby-step ciphertext rotations;
+        for each giant group q accumulate mul+rescale ops, then apply one
+        giant-step rotation.  Total HE rotations ~= 2*sqrt(|D|) vs naive |D|.
         """
         layout = x._cnn_layout
         if layout is None:
@@ -353,32 +360,81 @@ class EncryptedConv2d(EncryptedModule):
 
         accumulator = None
 
+        # BSGS rotation optimization: decompose each diagonal offset d as
+        # d = q*g + j  (giant step q*g, baby step j, g = ceil(sqrt(|D|))).
+        # Precompute g baby-step ciphertext rotations upfront, then for each
+        # giant group q accumulate baby_cipher[j] * counter_rotated_plaintext,
+        # and finally apply a single giant-step rotation.  Total rotations:
+        # g + |giant groups| ≈ 2*sqrt(|D|) vs the naive |D|.
+        num_diags = len(diagonal_offsets)
+        if num_diags == 0:
+            raise RuntimeError("Conv2d: no non-zero diagonals found")
+
+        g = max(1, math.ceil(math.sqrt(num_diags)))
+
+        # Group diagonal offsets by giant step index q = d // g
+        giant_groups: dict = defaultdict(list)
         for d in diagonal_offsets:
-            diag_vals = torch.zeros(slot_count, dtype=torch.float64)
-            has_nonzero = False
-            for i in range(min(total_out, slot_count)):
-                row = i
-                col = (i + d) % total_in
-                row_patch = row // C
-                col_patch = col // patch_features
-                if row_patch != col_patch:
+            q = d // g
+            giant_groups[q].append(d)
+
+        # Precompute baby-step ciphertexts: baby[j] = rotate(x_flat, j)
+        # We only need baby steps j that actually appear (j = d % g for d in D).
+        needed_baby_steps = sorted({d % g for d in diagonal_offsets})
+        baby_ciphers: dict = {}
+        for j in needed_baby_steps:
+            baby_ciphers[j] = x_flat.rotate(j) if j != 0 else x_flat
+
+        for q, diags_in_group in sorted(giant_groups.items()):
+            giant_step = q * g
+            block_acc = None
+
+            for d in diags_in_group:
+                j = d % g  # baby step
+
+                # Build diagonal plaintext
+                diag_vals = torch.zeros(slot_count, dtype=torch.float64)
+                has_nonzero = False
+                for i in range(min(total_out, slot_count)):
+                    row = i
+                    col = (i + d) % total_in
+                    row_patch = row // C
+                    col_patch = col // patch_features
+                    if row_patch != col_patch:
+                        continue
+                    row_c = row % C
+                    col_k = col % patch_features
+                    val = W[row_c, col_k].item()
+                    if abs(val) > 1e-30:
+                        diag_vals[i] = val
+                        has_nonzero = True
+                if not has_nonzero:
                     continue
-                row_c = row % C
-                col_k = col % patch_features
-                val = W[row_c, col_k].item()
-                if abs(val) > 1e-30:
-                    diag_vals[i] = val
-                    has_nonzero = True
-            if not has_nonzero:
+
+                # Counter-rotate plaintext by -giant_step so that after the
+                # giant-step ciphertext rotation the indices align correctly.
+                if giant_step != 0:
+                    diag_vals = torch.roll(diag_vals, -giant_step)
+
+                term = baby_ciphers[j].mul(diag_vals.tolist())
+                term = term.rescale()
+
+                if block_acc is None:
+                    block_acc = term
+                else:
+                    block_acc = block_acc.add(term)
+
+            if block_acc is None:
                 continue
-            rotated = x_flat.rotate(d) if d != 0 else x_flat
-            term = rotated.mul(diag_vals.tolist())
-            term = term.rescale()
+
+            # Apply giant-step rotation to the block accumulator
+            if giant_step != 0:
+                block_acc = block_acc.rotate(giant_step)
 
             if accumulator is None:
-                accumulator = term
+                accumulator = block_acc
             else:
-                accumulator = accumulator.add(term)
+                accumulator = accumulator.add(block_acc)
 
         if accumulator is None:
             raise RuntimeError("Conv2d: all weight diagonals are zero")

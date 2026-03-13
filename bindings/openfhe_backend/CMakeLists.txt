@@ -110,7 +110,7 @@ find_package(CUDAToolkit REQUIRED)
 # ==============================================================================
 # Main Extension Module (CPU Backend)
 # ==============================================================================
-add_library(ckks_openfhe_backend MODULE src/ckks_openfhe_backend.cpp)
+add_library(ckks_openfhe_backend MODULE "${CMAKE_SOURCE_DIR}/../../cukks/_native/ckks_openfhe_backend.cpp")
 
 target_compile_options(ckks_openfhe_backend PRIVATE -ftls-model=global-dynamic)
 
@@ -123,7 +123,7 @@ endforeach()
 # ==============================================================================
 # GPU-Accelerated Extension Module
 # ==============================================================================
-add_library(ckks_openfhe_gpu_backend MODULE src/ckks_openfhe_gpu_backend.cpp)
+add_library(ckks_openfhe_gpu_backend MODULE "${CMAKE_SOURCE_DIR}/../../cukks/_native/ckks_openfhe_gpu_backend.cpp")
 
 target_compile_options(ckks_openfhe_gpu_backend PRIVATE -ftls-model=global-dynamic)
 
@@ -201,7 +201,7 @@ install(TARGETS ckks_openfhe_backend ckks_openfhe_gpu_backend
     COMPONENT runtime
 )
 
-install(DIRECTORY src/ckks/
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/ckks/"
     DESTINATION ckks
     COMPONENT python
     FILES_MATCHING PATTERN "*.py"

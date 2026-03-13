@@ -97,11 +97,11 @@ build.verbose = true
 # CMake Configuration Variables
 # ==============================================================================
 # These can be overridden at build time with:
-#   pip install . --config-settings=cmake.define.OPENFHE_ROOT=/path/to/openfhe
+#   pip install . --config-settings=cmake.define.OPENFHE_GPU_ROOT=/path/to/openfhe-gpu-public
 
 [tool.scikit-build.cmake.define]
-# Default path to OpenFHE GPU source (relative to this directory)
-OPENFHE_ROOT = "../../openfhe-gpu-public"
+# Default path to OpenFHE GPU source (relative to bindings/openfhe_backend/)
+OPENFHE_GPU_ROOT = "../../openfhe-gpu-public"
 
 # ==============================================================================
 # Code Quality Tools

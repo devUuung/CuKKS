@@ -450,7 +450,7 @@ jobs:
               --draft \
               --title "$TITLE" \
               --notes-file release-notes.md
-            release_id="$(gh api "repos/$REPO/releases/tags/$TAG" --jq .id)"
+            release_id="$(gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[] | select(.tag_name=="'"$TAG"'") | .id')"
           else
             release_id="$release_ids"
           fi
@@ -465,7 +465,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          release_id="$(gh api "repos/${{ github.repository }}/releases/tags/${{ needs.validate.outputs.tag }}" --jq .id)"
-          gh api "repos/${{ github.repository }}/releases/${release_id}" -X PATCH \
+          TAG="${{ needs.validate.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          release_id="$(gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[] | select(.tag_name=="'"$TAG"'") | .id')"
+          gh api "repos/$REPO/releases/${release_id}" -X PATCH \
             -f draft=false \
             -f make_latest=true

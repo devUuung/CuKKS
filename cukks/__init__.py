@@ -117,16 +117,14 @@ def get_backend_info() -> dict:
         get_installed_backend,
         validate_backend_cuda,
     )
+    from .backend_loader import load_backend
 
     torch_cuda = detect_cuda_version()
     installed = get_installed_backend()
     status, _msg = validate_backend_cuda()
 
     try:
-        from ckks import CKKSConfig as _CKKSConfig  # noqa: F401
-        from ckks import CKKSContext as _CKKSContext  # noqa: F401
-
-        _ = _CKKSConfig, _CKKSContext
+        load_backend()  # uses thread-safe cache; raises RuntimeError if unavailable
         return {
             "backend": "openfhe-gpu",
             "available": True,
@@ -135,7 +133,7 @@ def get_backend_info() -> dict:
             "installed_backend": installed,
             "compat_status": status,
         }
-    except ImportError:
+    except RuntimeError:
         return {
             "backend": None,
             "available": False,

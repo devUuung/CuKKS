@@ -725,12 +725,13 @@ add_subdirectory(src/binfhe)
 ###endif()
 
 ### build the google benchmark handlers (just the parts we need)
+# DISABLED: benchmark directory removed
 # if ( BUILD_BENCHMARKS )
-    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Enable testing of the benchmark library." FORCE)
-    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "Enable installation of benchmark. (Projects embedding benchmark may want to turn this OFF.)" FORCE)
-    set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "Enable building the unit tests which depend on gtest" FORCE)
-    add_subdirectory(third-party/google-benchmark EXCLUDE_FROM_ALL)
-    add_subdirectory(benchmark)
+#     set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Enable testing of the benchmark library." FORCE)
+#     set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "Enable installation of benchmark. (Projects embedding benchmark may want to turn this OFF.)" FORCE)
+#     set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "Enable building the unit tests which depend on gtest" FORCE)
+#     add_subdirectory(third-party/google-benchmark EXCLUDE_FROM_ALL)
+#     add_subdirectory(benchmark)
 # endif()
 
 ## clobber cleans AND deletes the third-party stuff
