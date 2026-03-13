@@ -147,20 +147,22 @@ class EncryptedTensor:
     ) -> List[List[float]]:
         out_features, in_features = block_weight.shape
         diagonals = [[0.0] * slot_count for _ in range(total_in)]
+        weight = block_weight.detach().to(dtype=torch.float64, device="cpu")
+        nonzero_rows, nonzero_cols = torch.nonzero(weight.abs() > 1e-30, as_tuple=True)
+        if nonzero_rows.numel() == 0:
+            return diagonals
 
-        for block_idx in range(num_blocks):
-            base_row = block_idx * out_features
-            base_col = block_idx * in_features
-            for row_idx in range(out_features):
-                global_row = base_row + row_idx
-                for col_idx in range(in_features):
-                    value = float(block_weight[row_idx, col_idx].item())
-                    if abs(value) <= 1e-30:
-                        continue
-                    global_col = base_col + col_idx
-                    diagonal_idx = (global_col - global_row) % total_in
-                    diagonals[diagonal_idx][global_row] = value
-
+        block_offsets = torch.arange(num_blocks, dtype=torch.long)
+        global_rows = block_offsets[:, None] * out_features + nonzero_rows[None, :]
+        global_cols = block_offsets[:, None] * in_features + nonzero_cols[None, :]
+        diagonal_indices = (global_cols - global_rows) % total_in
+        values = weight[nonzero_rows, nonzero_cols].expand(num_blocks, -1)
+        for diagonal_index, global_row, value in zip(
+            diagonal_indices.reshape(-1).tolist(),
+            global_rows.reshape(-1).tolist(),
+            values.reshape(-1).tolist(),
+        ):
+            diagonals[diagonal_index][global_row] = value
         return diagonals
 
     def _matmul_diagonals_bsgs(self, diagonals: Sequence[Sequence[float]], dimension: int) -> Any:
@@ -239,28 +241,24 @@ class EncryptedTensor:
     # Arithmetic Operations
     # -------------------------------------------------------------------------
     
+    def _expand_plain_tensor(self, values: torch.Tensor) -> List[float]:
+        flat = values.reshape(-1)
+        slot_count = self._cipher.size
+        value_count = flat.numel()
+        if value_count == 0:
+            return [0.0] * slot_count
+        if value_count < slot_count:
+            repeats = math.ceil(slot_count / value_count)
+            flat = flat.repeat(repeats)[:slot_count]
+        return flat.tolist()
+
     def _to_plain_list(self, other: Union[torch.Tensor, float, int, List[float]]) -> List[float]:
         if isinstance(other, (int, float)):
             return [float(other)] * self._cipher.size
-        elif isinstance(other, list):
-            if len(other) < self._cipher.size:
-                # Cyclically replicate to fill all slots (preserves BSGS invariant)
-                slot_count = self._cipher.size
-                n = len(other)
-                if n == 0:
-                    return [0.0] * slot_count
-                return [other[i % n] for i in range(slot_count)]
-            return other
-        else:
-            flat = torch.as_tensor(other, dtype=torch.float64).reshape(-1).tolist()
-            slot_count = self._cipher.size
-            n = len(flat)
-            if n < slot_count:
-                # Cyclically replicate to fill all slots (preserves BSGS invariant)
-                if n == 0:
-                    return [0.0] * slot_count
-                return [flat[i % n] for i in range(slot_count)]
-            return flat
+        values = torch.as_tensor(other, dtype=torch.float64)
+        if isinstance(other, list) and len(other) >= self._cipher.size:
+            return values.reshape(-1).tolist()
+        return self._expand_plain_tensor(values)
     
     def add(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
         """Add another tensor or scalar.
