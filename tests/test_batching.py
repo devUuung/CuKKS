@@ -1142,3 +1142,72 @@ class TestPackedBatchNativeExecution:
 
         torch.testing.assert_close(recovered[0], expected[0], rtol=1e-4, atol=1e-4)
         torch.testing.assert_close(recovered[1], expected[1], rtol=1e-4, atol=1e-4)
+
+
+    def test_attention_packed_power_softmax_native_with_backend_attr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: native kernel must fire even when _cipher has _backend attribute.
+        
+        This simulates real CKKSTensor which always has _backend (set in __init__).
+        The original guard `not hasattr(q._cipher, "_backend")` was always False in
+        production, silently bypassing the GPU kernel.
+        """
+        from cukks.nn import EncryptedApproxAttention
+        from cukks.tensor import EncryptedTensor
+        from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig, MockCKKSTensor
+
+        # Simulate real CKKSTensor which always has _backend attribute
+        monkeypatch.setattr(MockCKKSTensor, "_backend", object(), raising=False)
+
+        native_calls = 0
+        original_native = MockCKKSTensor.packed_self_attention_power
+
+        def counting_native(
+            self: MockCKKSTensor,
+            key: MockCKKSTensor,
+            value: MockCKKSTensor,
+            batch_size: int,
+            seq_len: int,
+            embed_dim: int,
+            scale: float,
+            shift: float,
+            reciprocal_coeffs: list[float],
+            renorm_reciprocal_coeffs: list[float],
+        ) -> MockCKKSTensor:
+            nonlocal native_calls
+            native_calls += 1
+            return original_native(
+                self,
+                key,
+                value,
+                batch_size,
+                seq_len,
+                embed_dim,
+                scale,
+                shift,
+                reciprocal_coeffs,
+                renorm_reciprocal_coeffs,
+            )
+
+        monkeypatch.setattr(MockCKKSTensor, "packed_self_attention_power", counting_native)
+
+        # Create mock context and encrypt batch
+        config = MockCKKSConfig()
+        ctx = MockCKKSContext(config, device="cpu")
+        mock_cipher = ctx.encrypt_batch([torch.randn(2, 2) * 0.1, torch.randn(2, 2) * 0.1])
+
+        # Wrap in EncryptedTensor for compatibility with EncryptedApproxAttention
+        enc_batch = EncryptedTensor(mock_cipher, mock_cipher.shape, ctx)
+        enc_batch._packed_batch = True
+        enc_batch._batch_size = mock_cipher._batch_size
+        enc_batch._slots_per_sample = mock_cipher._slots_per_sample
+        enc_batch._packed_sample_shape = mock_cipher._packed_sample_shape
+
+        attn = EncryptedApproxAttention(embed_dim=2, num_heads=1, normalization_mode="power_softmax")
+
+        _ = attn(enc_batch)
+
+        # Native kernel should still fire even with _backend attribute
+        assert native_calls == 1, f"Expected native kernel to be called once, but was called {native_calls} times"

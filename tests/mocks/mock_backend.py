@@ -74,7 +74,6 @@ class MockCKKSContext:
             shape=tuple(tensor.shape),
             device=self.device,
         )
-
     def decrypt(
         self,
         tensor: "MockCKKSTensor",
@@ -95,6 +94,58 @@ class MockCKKSContext:
         result = values.to(device=target_device, dtype=torch.float32)
         if final_shape:
             result = result.view(final_shape)
+        return result
+
+    def encrypt_batch(
+        self,
+        samples: list[torch.Tensor],
+        slots_per_sample: int | None = None,
+    ) -> "MockCKKSTensor":
+        """Pack multiple samples into a single MockCKKSTensor with batch metadata.
+        
+        Slot layout (contiguous block packing)::
+        
+            [s0[0..K-1], s1[0..K-1], ..., s(B-1)[0..K-1], padding...]
+        
+        where B = len(samples) and K = slots_per_sample.
+        
+        Args:
+            samples: List of plaintext tensors (all same numel).
+            slots_per_sample: Slots reserved per sample (default: sample numel).
+        
+        Returns:
+            MockCKKSTensor with packed-batch metadata set.
+        """
+        if not samples:
+            raise ValueError("Cannot encrypt empty list of samples")
+        
+        first_sample_size = samples[0].numel()
+        sample_shape = tuple(samples[0].shape)
+        if slots_per_sample is None:
+            slots_per_sample = first_sample_size
+        
+        # Pack samples contiguously: [s0, s1, ..., s(B-1), padding]
+        batch_size = len(samples)
+        padded = torch.zeros(self._slots, dtype=torch.float64)
+        
+        for i, sample in enumerate(samples):
+            flat = sample.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+            start_idx = i * slots_per_sample
+            end_idx = start_idx + flat.numel()
+            padded[start_idx:end_idx] = flat
+        
+        # Create MockCKKSTensor with batch metadata
+        batch_shape = (batch_size, *sample_shape) if slots_per_sample == first_sample_size else (batch_size, slots_per_sample)
+        result = MockCKKSTensor(
+            context=self,
+            data=padded,
+            shape=batch_shape,
+            device=self.device,
+        )
+        result._packed_batch = True
+        result._batch_size = batch_size
+        result._slots_per_sample = slots_per_sample
+        result._packed_sample_shape = sample_shape
         return result
 
 
