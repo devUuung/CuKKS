@@ -376,7 +376,6 @@ class EncryptedApproxAttention(EncryptedModule):
         if (
             self.normalization_mode == "power_softmax"
             and hasattr(q._cipher, "packed_self_attention_power")
-            and not hasattr(q._cipher, "_backend")
         ):
             combined = q.packed_self_attention_power(
                 k,
