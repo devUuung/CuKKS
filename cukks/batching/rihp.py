@@ -32,6 +32,24 @@ class RIHPacker:
         if not queries:
             return []
 
+        if hasattr(queries[0]._cipher, "halved_ccmm_fused"):
+            raw_queries = [query._cipher for query in queries]
+            raw_keys = [key._cipher for key in keys_hybrid]
+            fused_results = queries[0]._cipher.halved_ccmm_fused(
+                raw_queries,
+                raw_keys,
+                self.half_seq_len,
+            )
+            return [
+                EncryptedTensor(
+                    result,
+                    queries[0]._shape,
+                    queries[0]._context,
+                    queries[0]._depth,
+                )
+                for result in fused_results
+            ]
+
         packed_diagonals: list[EncryptedTensor] = []
         for rotation in range(self.half_seq_len):
             acc = queries[0].mul(keys_hybrid[0].rotate(rotation)).rescale()

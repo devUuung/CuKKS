@@ -1592,6 +1592,59 @@ std::shared_ptr<GPUCiphertextHandle> packed_self_attention_power_cipher(
     return combined;
 }
 
+std::vector<std::shared_ptr<GPUCiphertextHandle>> halved_ccmm_fused(
+    const std::vector<std::shared_ptr<GPUCiphertextHandle>>& queries,
+    const std::vector<std::shared_ptr<GPUCiphertextHandle>>& keys_hybrid,
+    std::uint32_t half_seq_len
+) {
+    if (queries.empty() || keys_hybrid.empty()) {
+        return {};
+    }
+    if (queries.size() != keys_hybrid.size()) {
+        throw std::runtime_error("halved_ccmm_fused requires queries and keys_hybrid to have the same size");
+    }
+
+    auto ctx = queries.front()->context;
+    std::vector<std::shared_ptr<GPUCiphertextHandle>> out;
+    out.reserve(half_seq_len);
+
+    for (std::uint32_t r = 0; r < half_seq_len; ++r) {
+        std::vector<std::shared_ptr<GPUCiphertextHandle>> terms;
+        terms.reserve(queries.size());
+
+        for (std::size_t c = 0; c < queries.size(); ++c) {
+            auto kr_c = rotate_cipher(keys_hybrid[c], static_cast<int>(r));
+            auto term = rescale_cipher(mul_cipher(queries[c], kr_c));
+            terms.push_back(std::move(term));
+        }
+
+        if (terms.size() == 1) {
+            out.push_back(std::move(terms.front()));
+            continue;
+        }
+
+        if (ctx->gpu_initialized && ctx->gpu_context) {
+            std::vector<ckks::CtAccurate> gpu_terms;
+            gpu_terms.reserve(terms.size());
+            for (const auto& term : terms) {
+                term->ensureGPU();
+                gpu_terms.push_back(*term->gpu_ct);
+            }
+            ckks::CtAccurate reduced = reduce_add_gpu(ctx, gpu_terms);
+            out.push_back(make_cipher_from_gpu_lazy(ctx, std::move(reduced), terms.front()->ciphertext));
+            continue;
+        }
+
+        auto acc = std::move(terms.front());
+        for (std::size_t i = 1; i < terms.size(); ++i) {
+            acc = add_cipher(acc, terms[i]);
+        }
+        out.push_back(std::move(acc));
+    }
+
+    return out;
+}
+
 std::shared_ptr<GPUCiphertextHandle> bootstrap_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& tensor
 ) {
@@ -1714,6 +1767,9 @@ PYBIND11_MODULE(ckks_openfhe_gpu_backend, m) {
           py::arg("batch_size"), py::arg("seq_len"), py::arg("embed_dim"),
           py::arg("scale"), py::arg("shift"),
           py::arg("reciprocal_coeffs"), py::arg("renorm_reciprocal_coeffs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("halved_ccmm_fused", &halved_ccmm_fused,
+          py::arg("queries"), py::arg("keys_hybrid"), py::arg("half_seq_len"),
           py::call_guard<py::gil_scoped_release>());
     m.def("poly_eval", &poly_eval_cipher, py::arg("tensor"), py::arg("coeffs"),
           py::call_guard<py::gil_scoped_release>());

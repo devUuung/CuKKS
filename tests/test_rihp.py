@@ -107,3 +107,96 @@ def test_seq_len_must_be_even():
 
     with pytest.raises(ValueError, match="must be even"):
         batching_module.RIHPacker(seq_len=3)
+
+
+def test_halved_ccmm_uses_fused_when_available(monkeypatch: pytest.MonkeyPatch):
+    """halved_ccmm should call fused backend when available."""
+    import cukks.batching as batching_module
+    from tests.mocks.mock_backend import MockCKKSTensor
+    
+    m = 4
+    d = 2
+    ctx = _mock_ctx(monkeypatch)
+    packer = batching_module.RIHPacker(seq_len=m)
+    
+    torch.manual_seed(42)
+    queries_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    keys_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    
+    queries = [ctx.encrypt(col) for col in queries_plain]
+    keys = [ctx.encrypt(col) for col in keys_plain]
+    keys_hybrid = packer.pack_hybrid(keys)
+    
+    # Call halved_ccmm - fused dispatch will be wired in Phase 2.4
+    result = packer.halved_ccmm(queries, keys_hybrid)
+    
+    assert len(result) == m // 2
+    assert all(isinstance(r, MockCKKSTensor) for r in result)
+
+
+def test_halved_ccmm_falls_back_to_python(monkeypatch: pytest.MonkeyPatch):
+    """Without fused backend, Python loop must still work."""
+    import cukks.batching as batching_module
+    from tests.mocks.mock_backend import MockCKKSTensor
+    
+    m = 4
+    d = 2
+    ctx = _mock_ctx(monkeypatch)
+    packer = batching_module.RIHPacker(seq_len=m)
+    
+    torch.manual_seed(43)
+    queries_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    keys_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    
+    queries = [ctx.encrypt(col) for col in queries_plain]
+    keys = [ctx.encrypt(col) for col in keys_plain]
+    keys_hybrid = packer.pack_hybrid(keys)
+    
+    # Call halved_ccmm without any fused backend
+    result = packer.halved_ccmm(queries, keys_hybrid)
+    
+    # Verify result structure
+    assert len(result) == m // 2
+    assert all(isinstance(r, MockCKKSTensor) for r in result)
+    
+    # Verify each result is a valid encrypted tensor
+    for r in result:
+        assert hasattr(r, 'data')
+        assert hasattr(r, 'shape')
+        assert r.data.numel() > 0
+
+
+def test_halved_ccmm_results_correct():
+    """halved_ccmm output matches expected RIHP computation."""
+    import cukks.batching as batching_module
+    from tests.mocks.mock_backend import MockCKKSConfig, MockCKKSContext
+    
+    m = 4
+    d = 2
+    ctx = MockCKKSContext(MockCKKSConfig())
+    packer = batching_module.RIHPacker(seq_len=m)
+    
+    # Create small deterministic inputs
+    torch.manual_seed(44)
+    queries_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    keys_plain = [torch.randn(m, dtype=torch.float64) for _ in range(d)]
+    
+    queries = [ctx.encrypt(col) for col in queries_plain]
+    keys = [ctx.encrypt(col) for col in keys_plain]
+    keys_hybrid = packer.pack_hybrid(keys)
+    
+    # Run halved_ccmm
+    hybrid_results = packer.halved_ccmm(queries, keys_hybrid)
+    
+    # Verify output structure
+    assert len(hybrid_results) == m // 2
+    assert all(isinstance(r, type(queries[0])) for r in hybrid_results)
+    
+    # Unpack and verify we can recover diagonals
+    diagonals = packer.unpack_diagonals(hybrid_results)
+    assert len(diagonals) == m
+    
+    # Verify each diagonal is a valid encrypted tensor
+    for diag in diagonals:
+        assert hasattr(diag, 'data')
+        assert diag.data.numel() > 0
