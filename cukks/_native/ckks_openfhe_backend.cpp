@@ -562,6 +562,30 @@ std::shared_ptr<CiphertextHandle> packed_self_attention_power_cipher(
     return combined;
 }
 
+std::vector<std::shared_ptr<CiphertextHandle>> halved_ccmm_fused(
+    const std::vector<std::shared_ptr<CiphertextHandle>>& queries,
+    const std::vector<std::shared_ptr<CiphertextHandle>>& keys_hybrid,
+    uint32_t half_seq_len
+) {
+    std::vector<std::shared_ptr<CiphertextHandle>> out;
+    out.reserve(half_seq_len);
+
+    for (uint32_t r = 0; r < half_seq_len; ++r) {
+        auto kr = rotate_cipher(keys_hybrid[0], static_cast<int>(r));
+        auto acc = rescale_cipher(mul_cipher(queries[0], kr));
+
+        for (std::size_t c = 1; c < queries.size(); ++c) {
+            auto kr_c = rotate_cipher(keys_hybrid[c], static_cast<int>(r));
+            auto term = rescale_cipher(mul_cipher(queries[c], kr_c));
+            acc = add_cipher(acc, term);
+        }
+
+        out.push_back(std::move(acc));
+    }
+
+    return out;
+}
+
 std::shared_ptr<CiphertextHandle> bootstrap_cipher(const std::shared_ptr<CiphertextHandle>& tensor) {
     auto result = tensor->context->context->EvalBootstrap(tensor->ciphertext);
     return make_cipher(tensor->context, result);
@@ -616,6 +640,9 @@ PYBIND11_MODULE(ckks_openfhe_backend, m) {
           py::arg("batch_size"), py::arg("seq_len"), py::arg("embed_dim"),
           py::arg("scale"), py::arg("shift"),
           py::arg("reciprocal_coeffs"), py::arg("renorm_reciprocal_coeffs"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("halved_ccmm_fused", &halved_ccmm_fused,
+          py::arg("queries"), py::arg("keys_hybrid"), py::arg("half_seq_len"),
           py::call_guard<py::gil_scoped_release>());
     m.def("poly_eval", &poly_eval_cipher, py::arg("tensor"), py::arg("coeffs"),
           py::call_guard<py::gil_scoped_release>());
