@@ -418,11 +418,20 @@ class ModelConverter:
         if not hasattr(self, '_conv_params') or not self._conv_params:
             return None, None
         
-        h, w = 8, 8
-        if self.input_shape is not None:
-            shape = tuple(self.input_shape)
-            if len(shape) >= 2:
-                h, w = int(shape[-2]), int(shape[-1])
+        if self.input_shape is None:
+            import warnings
+            warnings.warn(
+                "_compute_pre_pool_dimensions: input_shape is None, "
+                "cannot compute pre-pool spatial dimensions. Pass input_shape to converter.",
+                UserWarning, stacklevel=2,
+            )
+            return None, None
+
+        shape = tuple(self.input_shape)
+        if len(shape) >= 2:
+            h, w = int(shape[-2]), int(shape[-1])
+        else:
+            return None, None
         
         pool_idx = 0
         num_pools = len(self._pool_params) if hasattr(self, '_pool_params') else 0
@@ -600,12 +609,9 @@ def _fold_bn_recursive(module: nn.Module) -> nn.Module:
         return nn.Sequential(OrderedDict(new_children))
     
     # For other containers, replace children in-place and remove folded BN layers
-    new_names = {name for name, _ in new_children}
-    for name, _ in children:
-        if name not in new_names:
-            delattr(module, name)
-    for name, new_child in new_children:
-        setattr(module, name, new_child)
+    new_children_dict = OrderedDict(new_children)
+    module._modules.clear()
+    module._modules.update(new_children_dict)
     
     return module
 

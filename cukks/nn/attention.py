@@ -786,7 +786,7 @@ class EncryptedApproxAttention(EncryptedModule):
         if seq_len <= 0:
             raise ValueError(f"seq_len must be positive, got {seq_len}")
         if seq_len == 1:
-            return scores.mul(0.0).add(1.0)
+            return scores.mul(0.0).rescale().add(1.0)
         
         exp_scores = self._approx_exp(scores)
         norm_factor = 1.0 / seq_len

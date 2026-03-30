@@ -207,17 +207,19 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
             spatial_h, spatial_w = out_h, out_w
 
         elif isinstance(module, torch.nn.AvgPool2d):
-            # Track spatial reduction through pooling
             if isinstance(module.kernel_size, int):
-                pk = module.kernel_size
+                pk_h = pk_w = module.kernel_size
             else:
-                pk = module.kernel_size[0]
-            if isinstance(module.stride, int):
-                ps = module.stride
+                pk_h, pk_w = module.kernel_size[0], module.kernel_size[1]
+            stride = getattr(module, "stride", None)
+            if isinstance(stride, int):
+                ps_h = ps_w = stride
+            elif stride is None:
+                ps_h, ps_w = pk_h, pk_w
             else:
-                ps = module.stride[0] if module.stride else pk
-            spatial_h = spatial_h // ps
-            spatial_w = spatial_w // ps
+                ps_h, ps_w = stride[0], stride[1]
+            spatial_h = spatial_h // ps_h
+            spatial_w = spatial_w // ps_w
     
     if has_conv and not dims:
         dims.append(4096)
@@ -395,6 +397,7 @@ class CKKSInferenceContext:
         
         self._rotations = rotations
         self._max_rotation_dim = _resolved_max_dim
+        self._ctx: Any = None
         self._initialized = False
         self._init_lock = threading.Lock()
     
@@ -482,8 +485,10 @@ class CKKSInferenceContext:
             )
         
         if self.use_bsgs and original_size < self.num_slots:
+            # Tile data to fill all slots for BSGS giant step access
             indices = torch.arange(self.num_slots) % original_size
             flat = flat[indices]
+            assert len(flat) == self.num_slots
         
         cipher = self._ctx.encrypt(flat)
         enc_tensor = EncryptedTensor(cipher, tuple(tensor.shape), self)
@@ -737,6 +742,7 @@ class CKKSInferenceContext:
         batch_size: int = 1,
         attention_normalization_mode: str = "power_softmax",
         architecture: str = "default",
+        input_shape: Optional[Sequence[int]] = None,
         **kwargs: Any,
     ) -> "CKKSInferenceContext":
         enable_bootstrap = kwargs.pop("enable_bootstrap", False)
@@ -777,7 +783,13 @@ class CKKSInferenceContext:
 
         # Add CNN-specific rotations (pooling offsets, etc.)
         if has_conv:
-            cnn_rots = compute_cnn_rotations(28, 28, 4)  # default MNIST dims
+            input_shape = kwargs.pop("input_shape", input_shape)
+            if input_shape is not None and len(input_shape) >= 2:
+                cnn_h, cnn_w = int(input_shape[-2]), int(input_shape[-1])
+            else:
+                cnn_h, cnn_w = 28, 28
+            cnn_channels = kwargs.pop("cnn_channels", 4)
+            cnn_rots = compute_cnn_rotations(cnn_h, cnn_w, cnn_channels)
             rotations = sorted(set(rotations + cnn_rots + [-r for r in cnn_rots]))
 
         extra_rotations = kwargs.pop("rotations", [])
@@ -891,6 +903,25 @@ class CKKSInferenceContext:
         )
     
     load = load_context
+
+    def close(self):
+        if hasattr(self, '_ctx') and self._ctx is not None:
+            if hasattr(self._ctx, 'cleanup'):
+                self._ctx.cleanup()
+            self._ctx = None
+        self._initialized = False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: Any):
+        self.close()
 
     def encrypt_cnn_input_batch(
         self,

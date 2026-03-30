@@ -43,6 +43,7 @@ class EncryptedLayerNorm(EncryptedModule):
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         eps: float = 1e-5,
+        inv_sqrt_domain: Tuple[float, float] = (0.01, 10.0),
     ) -> None:
         super().__init__()
         
@@ -65,6 +66,8 @@ class EncryptedLayerNorm(EncryptedModule):
             self.bias = bias.detach().to(dtype=torch.float64, device="cpu")
         else:
             self.bias = torch.zeros(self.normalized_shape, dtype=torch.float64)
+
+        self.inv_sqrt_domain = inv_sqrt_domain
         
         self.register_parameter("weight", self.weight)
         self.register_parameter("bias", self.bias)
@@ -109,7 +112,7 @@ class EncryptedLayerNorm(EncryptedModule):
             var_broadcast = sq.matmul(avg_block)
             var_eps = var_broadcast.add(self.eps)
 
-            domain = (0.01, 10.0)
+            domain = self.inv_sqrt_domain
             a, b = domain
             alpha = 2.0 / (b - a)
             beta_map = -(a + b) / (b - a)
@@ -140,7 +143,7 @@ class EncryptedLayerNorm(EncryptedModule):
         
         # Step 5: Compute 1/sqrt(var+eps) using Chebyshev polynomial
         # Map var_eps to Chebyshev domain [-1, 1]
-        domain = (0.01, 10.0)
+        domain = self.inv_sqrt_domain
         a, b = domain
         alpha = 2.0 / (b - a)
         beta_map = -(a + b) / (b - a)

@@ -92,21 +92,19 @@ def encrypted_variance(enc_tensor: EncryptedTensor) -> EncryptedTensor:
 
 def encrypted_std(
     enc_tensor: EncryptedTensor,
-    epsilon: float = 0.1,
+    epsilon: float = 1e-5,
 ) -> EncryptedTensor:
     """Compute encrypted standard deviation: std = sqrt(var + epsilon).
 
     Args:
         enc_tensor: Encrypted input tensor
-        epsilon: Numerical stability constant. Must be >= 0.1 to ensure
-            (var + epsilon) falls within crypto_inv_sqrt domain [0.1, 100.0].
-            Default 0.1.
+        epsilon: Numerical stability constant. Default 1e-5.
 
     Returns:
         EncryptedTensor of shape (1,) containing std in slot[0]
 
     Raises:
-        ValueError: If size > 1024 or epsilon < 0.1
+        ValueError: If size > 1024
 
     Note:
         Uses crypto_inv_sqrt internally, which requires bootstrapping.
@@ -118,10 +116,10 @@ def encrypted_std(
     """
     _check_size_limit(enc_tensor)
 
-    if epsilon < 0.1:
-        raise ValueError(f"epsilon must be >= 0.1, got {epsilon}")
-
     var = encrypted_variance(enc_tensor)
     var_eps = var.add(epsilon)
     inv_sqrt_var = crypto_inv_sqrt(var_eps)
+    level_to_add = getattr(inv_sqrt_var, "_depth", 0)
+    if var_eps.level <= level_to_add + 1:
+        var_eps = var_eps.bootstrap()
     return var_eps.mul(inv_sqrt_var).rescale()

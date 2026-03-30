@@ -9,7 +9,7 @@ various approximation methods.
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Any, List, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from .module import EncryptedModule
 
@@ -164,6 +164,7 @@ class EncryptedSquare(EncryptedModule):
     """
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
+        # square() sets _needs_rescale; rescale() has guard to prevent double-rescaling
         return x.square().rescale()
     
     def mult_depth(self) -> int:
