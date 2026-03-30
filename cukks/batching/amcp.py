@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import torch
-
 from cukks.tensor import EncryptedTensor
 
 if TYPE_CHECKING:
@@ -77,15 +75,15 @@ class AMCPacker:
         ctx: CKKSInferenceContext,
     ) -> list[EncryptedTensor]:
         u_mask, v_mask = self.build_masks()
-        u_enc = ctx.encrypt(torch.tensor(u_mask, dtype=torch.float64))
-        v_enc = ctx.encrypt(torch.tensor(v_mask, dtype=torch.float64))
+        u_mask_list = u_mask
+        v_mask_list = v_mask
 
         aligned = [ciphertext]
         for _ in range(self.k - 1):
             current = aligned[-1]
             left = current.rotate(self.batch_size)
             right = current.rotate(-(self.width - self.batch_size))
-            next_state = left.mul(u_enc).add(right.mul(v_enc))
+            next_state = left.mul(u_mask_list).add(right.mul(v_mask_list))
             aligned.append(next_state)
         return aligned
 

@@ -69,7 +69,7 @@ class RIHPacker:
         real_diagonals: list[EncryptedTensor] = []
         imag_diagonals: list[EncryptedTensor] = []
         for hybrid in hybrid_results:
-            real_diag = hybrid.add(hybrid.conjugate()).mul(0.5)
+            real_diag = hybrid.add(hybrid.conjugate()).mul(0.5).rescale()
             imag_diag = hybrid.extract_imag()
             real_diagonals.append(real_diag)
             imag_diagonals.append(imag_diag)

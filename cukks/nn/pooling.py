@@ -439,7 +439,7 @@ class EncryptedAvgPool2d(EncryptedModule):
             result = result + rotated
         
         # Only rescale if input needed rescaling (e.g., came from a mul without rescale)
-        if x._needs_rescale:
+        if result._needs_rescale:
             result = result.rescale()
         
         # Create mask for valid output positions across ALL images.

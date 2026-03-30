@@ -85,10 +85,14 @@ class EncryptedModule(ABC):
     
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, EncryptedModule):
-            self._modules[name] = value
+            if hasattr(self, '_modules'):
+                self._modules[name] = value
+            object.__setattr__(self, name, value)
         elif hasattr(self, '_modules') and name in self._modules:
             del self._modules[name]
-        object.__setattr__(self, name, value)
+            object.__setattr__(self, name, value)
+        else:
+            object.__setattr__(self, name, value)
     
     def __getattr__(self, name: str) -> Any:
         if '_modules' in self.__dict__:

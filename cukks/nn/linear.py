@@ -21,6 +21,10 @@ def _compute_weight_hash(weight: torch.Tensor) -> int:
 
 
 def _compute_diag_nonzero(weight: torch.Tensor) -> list:
+    """
+    Compute which diagonals of the weight matrix are non-zero.
+    Handles both square and non-square matrices using modular arithmetic.
+    """
     out_f, in_f = weight.shape
     rows = torch.arange(out_f)
     return [bool(weight[rows, (rows + d) % in_f].any()) for d in range(in_f)]

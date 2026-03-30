@@ -67,6 +67,25 @@ class EncryptedInverseFreeLayerNorm(EncryptedModule):
             self.normalized_shape = normalized_shape  # pyright: ignore[reportAssignmentType]
 
         self.eps = eps
+        if lam <= 0:
+            raise ValueError(f"lam must be positive, got {lam}")
+        if lam >= 1.0:
+            raise ValueError(
+                f"lam must be < 1.0 for Taylor sqrt to converge, got {lam}"
+            )
+
+        n = math.prod(self.normalized_shape)
+        if lam * n >= 2.0:
+            import warnings
+
+            warnings.warn(
+                f"lam={lam} with n={n} gives lam*n={lam*n:.2f} >= 2.0. "
+                f"Taylor sqrt requires lam*n*Var(z) < 2. "
+                f"For unit-variance inputs, use lam < {2.0 / n:.6f}.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         self.lam = lam
 
         if weight is not None:

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 import pickle
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -76,7 +75,7 @@ class EncryptedTensor:
         "_needs_rescale",
         "_packing_layout",
         "_stip_layout_fresh",
-        "_sigma_factor",
+        "_sigma_factor_ref",
     )
 
     def __init__(
@@ -107,7 +106,27 @@ class EncryptedTensor:
         self._needs_rescale: bool = False  # Lazy rescale flag
         self._packing_layout: Optional["PackingLayout"] = None
         self._stip_layout_fresh: bool = False
-        self._sigma_factor: Optional["EncryptedTensor"] = None
+        self._sigma_factor_ref = None
+
+    @property
+    def _sigma_factor(self) -> Optional["EncryptedTensor"]:
+        if self._sigma_factor_ref is None:
+            return None
+        return self._sigma_factor_ref()
+
+    @_sigma_factor.setter
+    def _sigma_factor(self, value: Optional["EncryptedTensor"]) -> None:
+        import weakref
+        self._sigma_factor_ref = weakref.ref(value) if value else None
+
+    def __del__(self):
+        try:
+            self._sigma_factor = None
+            cipher = getattr(self, '_cipher', None)
+            if cipher and hasattr(cipher, 'cleanup'):
+                cipher.cleanup()
+        except Exception:
+            pass
 
     @staticmethod
     def _copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -934,7 +953,9 @@ class EncryptedTensor:
             tensor._propagate_batch_meta(result)
         
         result = result.rescale()
-        result._copy_runtime_metadata_from(tensor)
+        result._cnn_layout = EncryptedTensor._copy_cnn_layout(tensor._cnn_layout)
+        result._packing_layout = tensor._packing_layout
+        result._sigma_factor = tensor._sigma_factor
 
         if bias is not None:
             if bias_list is not None:
@@ -969,11 +990,15 @@ class EncryptedTensor:
             and not is_sparse_degree4
         )
         if use_gpu_horner:
+            # Horner's method: p(x) = a_0 + x*(a_1 + x*(... + x*a_n))
+            # Each cipher-cipher mul is immediately rescaled to maintain scale invariant.
             result = tensor.mul(coeff_list[-1]).rescale()
             for i in range(len(coeff_list) - 2, -1, -1):
                 result = result.add(coeff_list[i])
                 if i > 0:
                     result = result.mul(tensor).rescale()
+            # Postcondition: result._needs_rescale is False
+            assert not result._needs_rescale, "GPU Horner: rescale invariant violated"
             result._copy_runtime_metadata_from(tensor)
             return result
 
@@ -1322,6 +1347,13 @@ class EncryptedTensor:
         Returns:
             The loaded EncryptedTensor.
         """
+        import warnings
+        warnings.warn(
+            "EncryptedTensor.load() uses pickle, which can execute arbitrary code. "
+            "Only load files from trusted sources.",
+            UserWarning, stacklevel=2,
+        )
+
         with open(path, "rb") as f:
             tensor_data = pickle.load(f)
 

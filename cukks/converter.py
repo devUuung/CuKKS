@@ -420,11 +420,20 @@ class ModelConverter:
         if not hasattr(self, '_conv_params') or not self._conv_params:
             return None, None
         
-        h, w = 8, 8
-        if self.input_shape is not None:
-            shape = tuple(self.input_shape)
-            if len(shape) >= 2:
-                h, w = int(shape[-2]), int(shape[-1])
+        if self.input_shape is None:
+            import warnings
+            warnings.warn(
+                "_compute_pre_pool_dimensions: input_shape is None, "
+                "cannot compute pre-pool spatial dimensions. Pass input_shape to converter.",
+                UserWarning, stacklevel=2,
+            )
+            return None, None
+
+        shape = tuple(self.input_shape)
+        if len(shape) >= 2:
+            h, w = int(shape[-2]), int(shape[-1])
+        else:
+            return None, None
         
         pool_idx = 0
         num_pools = len(self._pool_params) if hasattr(self, '_pool_params') else 0
