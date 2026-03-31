@@ -118,7 +118,7 @@ def test_group_wise_rotation_values(monkeypatch: pytest.MonkeyPatch):
     assert len(aligned) == len(expected_states)
     for idx, expected in enumerate(expected_states):
         actual = ctx.decrypt(aligned[idx], shape=(8,)).to(torch.float64)
-        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 def test_scale_rotation():

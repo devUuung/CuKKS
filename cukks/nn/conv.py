@@ -411,10 +411,10 @@ class EncryptedConv2d(EncryptedModule):
                 if not has_nonzero:
                     continue
 
-                # Counter-rotate plaintext by -giant_step so that after the
+                # Counter-rotate plaintext by +giant_step so that after the
                 # giant-step ciphertext rotation the indices align correctly.
                 if giant_step != 0:
-                    diag_vals = torch.roll(diag_vals, -giant_step)
+                    diag_vals = torch.roll(diag_vals, giant_step)
 
                 term = baby_ciphers[j].mul(diag_vals.tolist())
                 term = term.rescale()
