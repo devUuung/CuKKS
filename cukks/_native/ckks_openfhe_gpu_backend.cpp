@@ -622,7 +622,7 @@ std::shared_ptr<GPUKeySetHandle> keygen(
     if (ctx->bootstrap_enabled) {
         std::uint32_t num_slots = ctx->bootstrap_num_slots;
         if (num_slots == 0) {
-            num_slots = context->GetRingDimension() / 4;
+            num_slots = context->GetRingDimension() / 2;
         }
         context->EvalBootstrapKeyGen(key_pair.secretKey, num_slots);
     }
@@ -808,7 +808,8 @@ std::shared_ptr<GPUCiphertextHandle> mul_plain(
         return make_cipher_from_gpu_lazy(ctx, std::move(result), lhs->ciphertext);
     }
     
-    auto plaintext = make_plaintext(ctx, plain);
+    const uint32_t ct_level = lhs->ciphertext->GetLevel();
+    auto plaintext = make_plaintext(ctx, plain, ct_level);
     auto result = ctx->context->EvalMult(lhs->ciphertext, plaintext);
     return make_cipher(ctx, result);
 }
@@ -1009,10 +1010,11 @@ std::shared_ptr<GPUCiphertextHandle> matvec_diag_cipher(
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
     auto cc = ctx->context;
-    auto accumulator = cc->EvalMult(tensor->ciphertext, make_plaintext(ctx, diagonals.front()));
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
+    auto accumulator = cc->EvalMult(tensor->ciphertext, make_plaintext(ctx, diagonals.front(), ct_level));
     for (std::size_t idx = 1; idx < diagonals.size(); ++idx) {
         auto rotated = cc->EvalAtIndex(tensor->ciphertext, static_cast<int>(idx));
-        auto term = cc->EvalMult(rotated, make_plaintext(ctx, diagonals[idx]));
+        auto term = cc->EvalMult(rotated, make_plaintext(ctx, diagonals[idx], ct_level));
         accumulator = cc->EvalAdd(accumulator, term);
     }
     return make_cipher(ctx, accumulator);
@@ -1205,6 +1207,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
 
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
     Ciphertext<DCRTPoly> accumulator;
     for (std::size_t k = 0; k < n; ++k) {
         if (!diag_nonzero[k]) continue;  // skip zero diagonal
@@ -1213,7 +1216,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
             diag[i] = matrix[i][(i + k) % n];
         }
         auto rotated = (k == 0) ? tensor->ciphertext : cc->EvalAtIndex(tensor->ciphertext, static_cast<int>(k));
-        auto term = cc->EvalMult(rotated, make_plaintext(ctx, diag));
+        auto term = cc->EvalMult(rotated, make_plaintext(ctx, diag, ct_level));
         if (!accumulator) {
             accumulator = term;
         } else {
@@ -1452,6 +1455,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         const_cast<GPUCiphertextHandle*>(tensor.get())->syncFromGPU();
     }
 
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
     std::vector<Ciphertext<DCRTPoly>> baby_ciphers;
     baby_ciphers.reserve(bsgs_n1);
 
@@ -1485,7 +1489,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
                 diag[i] = matrix[row][col];
             }
 
-            auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(ctx, diag));
+            auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(ctx, diag, ct_level));
 
             if (!block) {
                 block = term;

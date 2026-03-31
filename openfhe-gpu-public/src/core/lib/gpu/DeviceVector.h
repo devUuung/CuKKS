@@ -47,6 +47,7 @@ class DeviceVector : public rmm::device_uvector<word64> {
     HostVector host(size());
     cudaMemcpyAsync(host.data(), data(), size() * sizeof(Dtype),
                     cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     return host;
   }
 

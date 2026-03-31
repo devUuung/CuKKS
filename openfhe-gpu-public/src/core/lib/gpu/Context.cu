@@ -12,6 +12,8 @@
 #include <tuple>
 #include <memory>
 #include <iostream>
+#include <mutex>
+#include <string>
 
 #include "Basic.h"
 #include "Ciphertext.h"
@@ -24,6 +26,16 @@
 using namespace ckks;
 
 #define DEFAULT_BLOCK_DIM 2048
+#define CUDA_KERNEL_CHECK() \
+    do { \
+        cudaError_t _ck_err = cudaGetLastError(); \
+        if (_ck_err != cudaSuccess) { \
+            throw std::runtime_error( \
+                std::string("CUDA kernel error at " __FILE__ ":") + \
+                std::to_string(__LINE__) + ": " + \
+                cudaGetErrorString(_ck_err)); \
+        } \
+    } while(0)
 
 namespace {
 
@@ -830,6 +842,7 @@ DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const uint32
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   automorph_<<<grid_dim, block_dim>>>(out.data(), in.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
+  CUDA_KERNEL_CHECK();
 
   return out;
 }
@@ -851,6 +864,7 @@ DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const std::v
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   permute_<<<grid_dim, block_dim>>>(out.data(), in.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
+  CUDA_KERNEL_CHECK();
 
   return out;
 }
@@ -872,6 +886,7 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const std::vector<uin
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   permute_two_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
+  CUDA_KERNEL_CHECK();
 
   in.ax__ = DeviceVector(out_a);
   in.bx__ = DeviceVector(out_b);
@@ -889,6 +904,7 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const uint32_t auto_i
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   automorph_pair_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
+  CUDA_KERNEL_CHECK();
 
   in.ax__ = DeviceVector(out_a);
   in.bx__ = DeviceVector(out_b);
@@ -978,19 +994,19 @@ void Context::AddScaledMessageTerm(DeviceVector& inner_prod_b, const DeviceVecto
     primes__.data(), 
     barret_ratio__.data(), barret_k__.data(),
     message_limbs, degree__);
+  CUDA_KERNEL_CHECK();
 }
 
 // NTT is made up of two NTT stages. Here the 'first' means the first NTT
 // stage in NTT (so it becomes second in view of iNTT).
 DeviceVector Context::FromNTT(const DeviceVector &in) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_from_ntt_flag;
+  std::call_once(s_from_ntt_flag, [&]() {
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
                            cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   DeviceVector out;
   out.resize(in.size());
   const int batch = in.size() / degree__;
@@ -1010,6 +1026,7 @@ DeviceVector Context::FromNTT(const DeviceVector &in) const {
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(),
       out.data());
+  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoP<<<grid, (first_stage_radix_size / 8) * pad,
                                  (first_stage_radix_size + pad + 1) * pad *
                                      sizeof(uint64_t)>>>(
@@ -1022,14 +1039,13 @@ DeviceVector Context::FromNTT(const DeviceVector &in) const {
 }
 
 void Context::FromNTTInplace(word64 *op1, int start_prime_idx, int batch, const bool verbose) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_from_ntt_inplace_flag;
+  std::call_once(s_from_ntt_inplace_flag, [&]() {
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
                            cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   const int total_ntt_work = (degree__ / 8) * batch;
   const int grid_dim_val = (total_ntt_work + 255) / 256;
   dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
@@ -1047,6 +1063,7 @@ void Context::FromNTTInplace(word64 *op1, int start_prime_idx, int batch, const 
       second_radix_size / per_thread_ntt_size,
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(), op1);
+  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoP<<<gridDim, (first_stage_radix_size / 8) * pad,
                                  (first_stage_radix_size + pad + 1) * pad *
                                      sizeof(uint64_t)>>>(
@@ -1078,6 +1095,7 @@ DeviceVector Context::FromNTT(const DeviceVector &in,
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(),
       out.data());
+  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoPWithEpilogue<<<
       grid, (first_stage_radix_size / 8) * pad,
       (first_stage_radix_size + pad + 1) * pad * sizeof(uint64_t)>>>(
@@ -1197,6 +1215,7 @@ void Context::ConstMultBatch(const word64 *op1, const DeviceVector &op2,
   constMultBatch_<<<grid_dim, block_dim>>>(degree__, primes__.data(), op1,
                                            op2.data(), op2_psinv.data(),
                                            start_prime_idx, batch, res);
+  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -1226,6 +1245,7 @@ void Context::ConstMultBatchModDown(const word64 *op1, const int start_limb_idx,
   constMultBatchModDown_<<<grid_dim, block_dim>>>(
     degree__, primes__.data(), op1, start_limb_idx, op2.data(), op2_psinv.data(), 
     start_prime_idx, batch, res);
+  CUDA_KERNEL_CHECK();
 }
 
 __device__ uint128_t4 AccumulateInModUp(const word64 *ptr, const int degree,
@@ -1386,6 +1406,7 @@ void Context::NegateInplace(word64 *op1, const int batch) const {
   const int grid_dim = degree__ * batch / block_dim;
   negateInplace_<<<grid_dim, block_dim>>>(degree__, log2(degree__), batch,
                                           primes__.data(), op1);
+  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -1409,17 +1430,17 @@ void Context::SubInplace(word64 *op1, const word64 *op2,
   const int grid_dim = degree__ * batch / block_dim;
   subInplace_<<<grid_dim, block_dim>>>(degree__, log2(degree__), batch,
                                        primes__.data(), op1, op2);
+  CUDA_KERNEL_CHECK();
 }
 
 // Input should be base limbs + extension limbs
 // output should just be base limbs
 // void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v, long target_chain_idx) const {
 void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_mod_down_flag;
+  std::call_once(s_mod_down_flag, [&]() {
     cudaFuncSetCacheConfig(ModDownKernel, cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   // if (target_chain_idx > param__.chain_length_)
     // throw std::logic_error("Target chain index is too big.");
   
@@ -1462,6 +1483,7 @@ void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
     ModDownKernel<<<grid_dim, block_dim, prod_q_i_mod_q_j.size() * sizeof(word64)>>>(
         GetKernelParams(), ptr, prod_q_i_mod_q_j.data(),
         start_length * end_length, start_length, end_length, to_v.data());
+  CUDA_KERNEL_CHECK();
   // }
   const auto &prod_inv = prod_inv_moddown__.at(gap);
   const auto &prod_inv_psinv = prod_inv_shoup_moddown__.at(gap);
@@ -1604,6 +1626,7 @@ void Context::Rescale(const DeviceVector &from_v, DeviceVector &to_v) const {
   // }
 
   switchModulusFused_<<<degree__ * end_length / 256, 256>>>(to_v.data(), last_from_limb.data(), degree__, oldModulus, primes__.data(), barret_ratio__.data(), barret_k__.data());
+  CUDA_KERNEL_CHECK();
 
   // fuse four functions: NTT, sub, negate, and const-mult.
   if (is_rescale_fused)
@@ -1646,8 +1669,8 @@ Ciphertext Context::DropLimbs(const Ciphertext& ct, const uint32_t numDropLimbs)
   out.ax__.resize(degree__*outputLimbs);
   out.bx__.resize(degree__*outputLimbs);
 
-  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
-  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
+  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
 
   return out;
 }
@@ -1659,8 +1682,8 @@ CtAccurate Context::DropLimbs(const CtAccurate& ct, const uint32_t numDropLimbs)
   out.ax__.resize(degree__*outputLimbs);
   out.bx__.resize(degree__*outputLimbs);
 
-  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
-  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
+  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
 
   out.level = ct.level + numDropLimbs;
   out.scalingFactor = ct.scalingFactor;
@@ -1676,14 +1699,13 @@ DeviceVector Context::ToNTT(const DeviceVector& in) const {
 }
 
 void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_to_ntt_inplace_flag;
+  std::call_once(s_to_ntt_inplace_flag, [&]() {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2,
                            cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   const int total_ntt_work = (degree__ / 8) * batch;
   const int grid_dim_val = (total_ntt_work + 255) / 256;
   dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
@@ -1700,6 +1722,7 @@ void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
       op, 1, batch, degree__, start_prime_idx, pad,
       first_stage_radix_size / per_thread_ntt_size, power_of_roots__.data(),
       power_of_roots_shoup__.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2<<<gridDim, blockDim.x, per_thread_storage>>>(
       op, first_stage_radix_size, batch, degree__, start_prime_idx,
       second_radix_size / per_thread_ntt_size, power_of_roots__.data(),
@@ -1719,11 +1742,10 @@ DeviceVector Context::copyLimbData(const DeviceVector& from, const int num_orig_
 }
 
 void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int num_orig_limbs) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_mod_up_mat_mul_flag;
+  std::call_once(s_mod_up_mat_mul_flag, [&]() {
     cudaFuncSetCacheConfig(modUpStepTwoKernel, cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   // std::cout << "In ModUpMatMul\n";
   const int num_moduli_after_modup = num_orig_limbs + alpha__;
   const int unroll_factor = 4;
@@ -1757,6 +1779,7 @@ void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int
       curr_primes.data(), curr_barret_ratio.data(), curr_barret_k.data(),
       prod_q_i_mod_q_j.data(), prod_q_i_mod_q_j.size(),
       start_length, end_length, to);
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::ModUpBatchImpl(const DeviceVector &from, DeviceVector &to, int beta) const {
@@ -1829,6 +1852,7 @@ void Context::ModUpLengthIsOne(const word64 *ptr_after_intt,
   modUpStepTwoSimple<<<grid_dim, block_dim>>>(
       ptr_after_intt, ptr_before_intt, begin_idx, degree__, primes__.data(),
       barret_ratio__.data(), barret_k__.data(), end_length, to);
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::ToNTTInplaceExceptSomeRange(
@@ -1836,14 +1860,13 @@ void Context::ToNTTInplaceExceptSomeRange(
   int excluded_range_start, int excluded_range_size,
   const DeviceVector& prime_inds) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_to_ntt_except_some_range_flag;
+  std::call_once(s_to_ntt_except_some_range_flag, [&]() {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1ExcludeSomeRange,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2ExcludeSomeRange,
                            cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
 
   const int excluded_range_end = excluded_range_start + excluded_range_size;
   if (excluded_range_start < start_prime_idx ||
@@ -1866,6 +1889,7 @@ void Context::ToNTTInplaceExceptSomeRange(
       excluded_range_end, pad, first_stage_radix_size / per_thread_ntt_size,
       prime_inds.data(),
       power_of_roots__.data(), power_of_roots_shoup__.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2ExcludeSomeRange<<<grid, block.x,
                                              per_thread_storage>>>(
       op, first_stage_radix_size, batch, degree__, start_prime_idx,
@@ -1879,14 +1903,13 @@ void Context::ToNTTInplaceExceptSomeRange(
 void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
                                 const DeviceVector &epilogue,
                                 const DeviceVector &epilogue_) const {
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_to_ntt_fused_flag;
+  std::call_once(s_to_ntt_fused_flag, [&]() {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult,
                            cudaFuncCachePreferShared);
-    configured = true;
-  }
+  });
   // dim3 gridDim(8192);
   // dim3 gridDim(32768);
   const int batch = op1.size() / degree__;
@@ -1909,6 +1932,7 @@ void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
       op1.data(), 1, batch, degree__, start_prime_idx, pad,
       first_stage_radix_size / per_thread_ntt_size, power_of_roots__.data(),
       power_of_roots_shoup__.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult<<<gridDim, blockDim.x,
                                                         per_thread_storage>>>(
       op1.data(), first_stage_radix_size, batch, degree__, start_prime_idx,
@@ -1998,11 +2022,10 @@ void Reduce(
 
 void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk, DeviceVector &sum_ax, DeviceVector &sum_bx) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_key_switch_flag;
+  std::call_once(s_key_switch_flag, [&]() {
     cudaFuncSetCacheConfig(sumAndReduceFused, cudaFuncCachePreferL1);
-    configured = true;
-  }
+  });
 
   assert(modup_out.size() > 0 && modup_out.size() % degree__ == 0);
   const int total_length = modup_out.size() / degree__;
@@ -2052,6 +2075,7 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
         modup_out.data(), degree__, length, beta, param__.max_num_moduli_, eval_ax.data(), eval_bx.data(), 
         prime_inds_device.data(),
         primes__.data(), barret_k__.data(), barret_ratio__.data(), sum_ax.data(), sum_bx.data());
+  CUDA_KERNEL_CHECK();
   } else {
     const int quad_word_size_byte = sizeof(uint128_t);
     const size_t scratch_size = modup_out.size() * quad_word_size_byte;
@@ -2064,16 +2088,20 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
     mult_<false><<<gridDim, blockDim>>>(modup_out.data(), eval_ax.data(),
                                         eval_bx.data(), degree__, length,
                                         accum_ax_ptr, accum_bx_ptr);
+  CUDA_KERNEL_CHECK();
     for (int i = 1; i < beta; i++) {
       const auto d2_ptr = modup_out.data() + i * degree__ * length;
       const auto ax_ptr = eval_ax.data() + i * degree__ * param__.max_num_moduli_;
       const auto bx_ptr = eval_bx.data() + i * degree__ * param__.max_num_moduli_;
       mult_<true><<<gridDim, blockDim>>>(d2_ptr, ax_ptr, bx_ptr, degree__, length, accum_ax_ptr, accum_bx_ptr);
+  CUDA_KERNEL_CHECK();
     }
     Reduce<<<gridDim, blockDim>>>(accum_ax_ptr, degree__, length, primes__.data(), 
                                   barret_k__.data(), barret_ratio__.data(), sum_ax.data());
+  CUDA_KERNEL_CHECK();
     Reduce<<<gridDim, blockDim>>>(accum_bx_ptr, degree__, length, primes__.data(), 
                                   barret_k__.data(), barret_ratio__.data(), sum_bx.data());
+  CUDA_KERNEL_CHECK();
   }
 }
 
@@ -2127,6 +2155,7 @@ void Context::hadamardMultAndAddBatch(const std::vector<const word64 *> ax_addr,
       (const word64 **)d_bx_addr.data(), (const word64 **)d_mx_addr.data(),
       fold_size, each_operand_size, param__.log_degree_, out_ax.data(),
       out_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -2244,11 +2273,10 @@ void Context::EvalMult(
   const Ciphertext& ct1, const Ciphertext& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_eval_mult_ciphertext_flag;
+  std::call_once(s_eval_mult_ciphertext_flag, [&]() {
     cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
-    configured = true;
-  }
+  });
 
   const auto &op1_0 = ct1.getBxDevice();
   const auto &op1_1 = ct1.getAxDevice();
@@ -2313,6 +2341,7 @@ CtAccurate Context::EvalMultPlainExt(const CtAccurate& ct, const PtAccurate& pt)
   evalMultPlainFused_<<<regular_grid_dim, block_dim>>>(
     param__.log_degree_, primes__.data(), barret_ratio__.data(), barret_k__.data(), 
     ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data());
+  CUDA_KERNEL_CHECK();
 
   const auto data_shift = numRegularLimbs*degree__;
   const int ext_grid_dim = degree__ * param__.alpha_ / block_dim;
@@ -2321,6 +2350,7 @@ CtAccurate Context::EvalMultPlainExt(const CtAccurate& ct, const PtAccurate& pt)
     primes__.data() + param__.chain_length_, barret_ratio__.data() + param__.chain_length_, barret_k__.data() + param__.chain_length_, 
     ct.ax__.data() + data_shift, ct.bx__.data() + data_shift, pt.mx__.data() + data_shift, 
     out.ax__.data() + data_shift, out.bx__.data() + data_shift);
+  CUDA_KERNEL_CHECK();
 
   out.level = ct.level;
   out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
@@ -2342,6 +2372,7 @@ CtAccurate Context::EvalMultPlain(const CtAccurate& ct, const PtAccurate& pt) co
   evalMultPlainFused_<<<grid_dim, block_dim>>>(
       param__.log_degree_, primes__.data(), barret_ratio__.data(), barret_k__.data(),
       ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data());
+  CUDA_KERNEL_CHECK();
 
   out.level = ct.level;
   out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
@@ -2375,11 +2406,10 @@ void Context::EvalMult(
   const CtAccurate& ct1, const CtAccurate& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_eval_mult_ctaccurate_flag;
+  std::call_once(s_eval_mult_ctaccurate_flag, [&]() {
     cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
-    configured = true;
-  }
+  });
 
   // assert(ct1.level == 1);
   // assert(ct2.level == 1);
@@ -2410,6 +2440,7 @@ void Context::EvalMult(
       barret_ratio__.data(), barret_k__.data(), 
       op1_0.data(), op1_1.data(), op2_0.data(), op2_1.data(), 
       res0.data(), res1.data(), res2.data());
+  CUDA_KERNEL_CHECK();
   // CudaCheckError();
 }
 
@@ -2417,11 +2448,10 @@ void Context::EvalSquare(
   const Ciphertext& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_eval_square_ciphertext_flag;
+  std::call_once(s_eval_square_ciphertext_flag, [&]() {
     cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
-    configured = true;
-  }
+  });
 
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
@@ -2437,6 +2467,7 @@ void Context::EvalSquare(
       barret_ratio__.data(), barret_k__.data(), 
       op_0.data(), op_1.data(),
       res0.data(), res1.data(), res2.data());
+  CUDA_KERNEL_CHECK();
 }
 
 // duplicate function from above...
@@ -2444,11 +2475,10 @@ void Context::EvalSquare(
   const CtAccurate& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static bool configured = false;
-  if (!configured) {
+  static std::once_flag s_eval_square_ctaccurate_flag;
+  std::call_once(s_eval_square_ctaccurate_flag, [&]() {
     cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
-    configured = true;
-  }
+  });
 
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
@@ -2464,6 +2494,7 @@ void Context::EvalSquare(
       barret_ratio__.data(), barret_k__.data(), 
       op_0.data(), op_1.data(),
       res0.data(), res1.data(), res2.data());
+  CUDA_KERNEL_CHECK();
 }
 
 
@@ -2491,8 +2522,10 @@ void Context::MultByMonomialInPlace(CtAccurate& ct1, const uint32_t power) const
     // for (uint32_t i = 0; i < numLimbs; i++)
     //   coeffs.data()[i*degree__ + index] = param__.primes_[i] - 1;
     setMonomialLargePower_<<<1, numLimbs>>>(coeffs.data(), index, degree__, primes__.data());
+  CUDA_KERNEL_CHECK();
   } else {
     setMonomialSmallPower_<<<1, numLimbs>>>(coeffs.data(), index, degree__);
+  CUDA_KERNEL_CHECK();
     // for (uint32_t i = 0; i < numLimbs; i++)
     //   coeffs.data()[i*degree__ + index] = 1;
   }
@@ -2501,6 +2534,7 @@ void Context::MultByMonomialInPlace(CtAccurate& ct1, const uint32_t power) const
 
   hadamardMultFused_<<<degree__ * numLimbs / 256, 256>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio__.data(), barret_k__.data(), 
     ct1.ax__.data(), ct1.bx__.data(), coeffs.data(), ct1.ax__.data(), ct1.bx__.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::PMult(const Ciphertext &ct, const Plaintext &pt, Ciphertext &out) const {
@@ -2516,6 +2550,7 @@ void Context::PMult(const Ciphertext &ct, const Plaintext &pt, Ciphertext &out) 
       degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
       barret_k__.data(), op1.data(), op2.data(), mx.data(), op1_out.data(),
       op2_out.data());
+  CUDA_KERNEL_CHECK();
 }
 
 Ciphertext Context::EvalMultConst(const Ciphertext& ct, const DeviceVector& op) const {
@@ -2538,6 +2573,7 @@ void Context::EvalMultConstInPlace(Ciphertext& ct, const DeviceVector& op) const
   constantMultFusedInPlace_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
       barret_k__.data(), op1.data(), op2.data(), op.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::EvalMultConstInPlace(CtAccurate& ct, const DeviceVector& op) const {
@@ -2547,6 +2583,7 @@ void Context::EvalMultConstInPlace(CtAccurate& ct, const DeviceVector& op) const
   constantMultFusedInPlace_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
       barret_k__.data(), op1.data(), op2.data(), op.data());
+  CUDA_KERNEL_CHECK();
 
   // ciphertext->SetNoiseScaleDeg(ciphertext->GetNoiseScaleDeg() + 1);
   ct.noiseScaleDeg += 1;
@@ -2563,6 +2600,7 @@ void Context::EvalMultIntegerInPlace(CtAccurate& ct, const uint64_t c) const {
   const uint32_t gridDim = ct.ax__.size() / blockDim;
   const uint32_t numLimbs = ct.ax__.size() / degree__;
   integerMultFusedInPlace_<<<gridDim, blockDim>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio__.data(), barret_k__.data(), ct.ax__.data(), ct.bx__.data(), c);
+  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -2665,7 +2703,9 @@ void Context::AddCore(
   int blockDim_ = 256;
   int gridDim_ = op1_ax.size()/blockDim_;
   add_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(), op2_ax.data(), out_ax.data());
+  CUDA_KERNEL_CHECK();
   add_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(), op2_bx.data(), out_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::AddCoreInPlace(DeviceVector& x1, const DeviceVector& x2) const {
@@ -2673,6 +2713,7 @@ void Context::AddCoreInPlace(DeviceVector& x1, const DeviceVector& x2) const {
   int blockDim_ = 256;
   int gridDim_ = x1.size()/blockDim_;
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), numLimbs, x1.data(), x2.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
 }
 
 
@@ -2749,7 +2790,9 @@ void Context::EvalAddInPlace(CtAccurate &ct1, const CtAccurate &ct2) const {
   int gridDim_ = 2048;
   int blockDim_ = 256;
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(), op2_ax.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(), op2_bx.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   // ct1.level = min(ct1.level, ct2.level);
 }
 
@@ -2764,14 +2807,18 @@ void Context::EvalAddInPlaceExt(CtAccurate& ct1, const CtAccurate& ct2) const {
   const auto kernelParams = GetKernelParams();
 
   addInPlace_<<<regular_grid_dim, block_dim>>>(kernelParams, numRegularLimbs, ct1.ax__.data(), ct2.ax__.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
   addInPlace_<<<regular_grid_dim, block_dim>>>(kernelParams, numRegularLimbs, ct1.bx__.data(), ct2.bx__.data(), primes__.data());
+  CUDA_KERNEL_CHECK();
 
   const auto data_shift = numRegularLimbs*degree__;
   const int ext_grid_dim = degree__ * param__.alpha_ / block_dim;
   addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.alpha_, 
     ct1.ax__.data() + data_shift, ct2.ax__.data() + data_shift, primes__.data() + param__.chain_length_);
+  CUDA_KERNEL_CHECK();
   addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.alpha_, 
     ct1.bx__.data() + data_shift, ct2.bx__.data() + data_shift, primes__.data() + param__.chain_length_);
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::Sub(const Ciphertext &ct1, const Ciphertext &ct2, Ciphertext &out) const {
@@ -2792,8 +2839,10 @@ void Context::Sub(const Ciphertext &ct1, const Ciphertext &ct2, Ciphertext &out)
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), out_ax.data());
+  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), out_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 CtAccurate Context::Sub(const CtAccurate &ct1, const CtAccurate &ct2) const {
@@ -2819,8 +2868,10 @@ CtAccurate Context::Sub(const CtAccurate &ct1, const CtAccurate &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), out_ax.data());
+  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), out_bx.data());
+  CUDA_KERNEL_CHECK();
 
   return out;
 }
@@ -2835,8 +2886,10 @@ void Context::SubInPlace(Ciphertext &ct1, const Ciphertext &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), op1_ax.data());
+  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), op1_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 // duplicate as above
@@ -2850,8 +2903,10 @@ void Context::SubInPlace(CtAccurate &ct1, const CtAccurate &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), op1_ax.data());
+  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), op1_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(512)
@@ -2897,6 +2952,7 @@ void Context::AddScalarInPlace(Ciphertext &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::AddScalarInPlace(CtAccurate &ct, const word64* op) const {
@@ -2906,6 +2962,7 @@ void Context::AddScalarInPlace(CtAccurate &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
@@ -2915,6 +2972,7 @@ void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 // assume scaling and loading has already happened
@@ -2926,6 +2984,7 @@ void Context::SubScalarInPlace(CtAccurate &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::SubScalarInPlace(const word64* op, CtAccurate &ct) const {
@@ -2936,6 +2995,7 @@ void Context::SubScalarInPlace(const word64* op, CtAccurate &ct) const {
   int gridDim_ = CeilDiv(total_size, blockDim_);
   // sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
   sub_from_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op, ct_bx.data(), ct_bx.data());
+  CUDA_KERNEL_CHECK();
 }
 
 void Context::EnableMemoryPool() {

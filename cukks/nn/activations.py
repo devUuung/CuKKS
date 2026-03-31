@@ -101,7 +101,8 @@ def _sigmoid_poly_coeffs(degree: int = 4) -> tuple[float, ...]:
         def sigmoid(x: Any) -> Any:
             return 1.0 / (1.0 + np.exp(-x))
         
-        x = np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
+        DOMAIN = 4.0
+        x = DOMAIN * np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
         y = sigmoid(x)
         cheb_coeffs = chebfit(x, y, degree)
         power_coeffs = cheb2poly(cheb_coeffs)
@@ -120,7 +121,8 @@ def _tanh_poly_coeffs(degree: int = 5) -> tuple[float, ...]:
         import numpy as np
         from numpy.polynomial.chebyshev import chebfit, cheb2poly
         
-        x = np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
+        DOMAIN = 4.0
+        x = DOMAIN * np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
         y = np.tanh(x)
         cheb_coeffs = chebfit(x, y, degree)
         # Convert from Chebyshev basis to power basis for poly_eval
@@ -143,7 +145,8 @@ def _silu_poly_coeffs(degree: int = 4) -> tuple[float, ...]:
         def silu(x: Any) -> Any:
             return x / (1.0 + np.exp(-x))
         
-        x = np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
+        DOMAIN = 4.0
+        x = DOMAIN * np.cos(np.pi * (np.arange(degree + 1) + 0.5) / (degree + 1))
         y = silu(x)
         cheb_coeffs = chebfit(x, y, degree)
         power_coeffs = cheb2poly(cheb_coeffs)

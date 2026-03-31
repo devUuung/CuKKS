@@ -63,6 +63,7 @@ class EncryptedTensor:
     
     __slots__ = (
         "_cipher",
+        "_owns_cipher",
         "_shape",
         "_context",
         "_depth",
@@ -94,6 +95,7 @@ class EncryptedTensor:
             depth: The current multiplicative depth (default 0).
         """
         self._cipher = cipher
+        self._owns_cipher = True
         self._shape = tuple(shape)
         self._context = context
         self._depth = depth
@@ -122,9 +124,10 @@ class EncryptedTensor:
     def __del__(self):
         try:
             self._sigma_factor = None
-            cipher = getattr(self, '_cipher', None)
-            if cipher and hasattr(cipher, 'cleanup'):
-                cipher.cleanup()
+            if getattr(self, '_owns_cipher', True):
+                cipher = getattr(self, '_cipher', None)
+                if cipher and hasattr(cipher, 'cleanup'):
+                    cipher.cleanup()
         except Exception:
             pass
 
@@ -1245,6 +1248,7 @@ class EncryptedTensor:
                 f"Cannot reshape tensor of size {self.size} to shape {shape}"
             )
         result = EncryptedTensor(self._cipher, tuple(shape), self._context, self._depth)
+        result._owns_cipher = False
         result._needs_rescale = self._needs_rescale
         result._copy_runtime_metadata_from(self)
         result._update_packed_shape_metadata()
@@ -1291,6 +1295,7 @@ class EncryptedTensor:
         ciphertext may be shared (copy-on-write semantics).
         """
         result = EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
+        result._owns_cipher = False
         result._needs_rescale = self._needs_rescale
         result._copy_runtime_metadata_from(self)
         result._stip_layout_fresh = self._stip_layout_fresh
@@ -1370,6 +1375,7 @@ class EncryptedTensor:
         
         if cipher_data is not None:
             dummy_tensor = torch.zeros(math.prod(shape) if shape else 1)
+            context._ensure_initialized()
             cipher = context._ctx.encrypt(dummy_tensor)
             setattr(cipher, 'data', cipher_data)
             setattr(cipher, 'shape', shape)

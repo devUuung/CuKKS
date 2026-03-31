@@ -153,12 +153,17 @@ def get_installed_backend() -> Optional[str]:
     ``cukks-cu\\d+``.
     """
     try:
+        candidates = []
         for dist in importlib.metadata.distributions():
             name = dist.metadata["Name"]
-            if name and _BACKEND_NAME_RE.match(name):
-                return name
+            if name and _BACKEND_NAME_RE.match(name) and name in PACKAGE_TO_CUDA:
+                cuda_ver = PACKAGE_TO_CUDA[name]
+                candidates.append((tuple(int(x) for x in cuda_ver.split(".")), name))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
     except Exception:
-        pass
+        return None
     return None
 
 
@@ -309,20 +314,25 @@ def auto_install_backend(
     if current == package:
         return True, package, None  # Already installed, no error
 
+    if package is None:
+        return False, None, "No compatible CuKKS GPU backend could be resolved."
+
+    resolved_package = package
+
     # ── Perform installation ────────────────────────────────────────────
     if not quiet:
-        print(f"CuKKS: Auto-installing GPU backend ({package})...", file=sys.stderr)
+        print(f"CuKKS: Auto-installing GPU backend ({resolved_package})...", file=sys.stderr)
 
-    cmd = [sys.executable, "-m", "pip", "install", package]
+    cmd = [sys.executable, "-m", "pip", "install", resolved_package]
 
     try:
         subprocess.check_call(cmd)
     except subprocess.CalledProcessError as e:
-        return False, package, f"pip install failed with exit code {e.returncode}"
+        return False, resolved_package, f"pip install failed with exit code {e.returncode}"
     except Exception as e:
-        return False, package, f"pip install failed: {e}"
+        return False, resolved_package, f"pip install failed: {e}"
 
     if not quiet:
-        print(f"CuKKS: Successfully installed {package}", file=sys.stderr)
+        print(f"CuKKS: Successfully installed {resolved_package}", file=sys.stderr)
 
-    return True, package, None
+    return True, resolved_package, None
