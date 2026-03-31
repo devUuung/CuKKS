@@ -299,10 +299,11 @@ std::shared_ptr<CiphertextHandle> sum_slots_cipher(const std::shared_ptr<Ciphert
 std::shared_ptr<CiphertextHandle> matvec_diag_cipher(const std::shared_ptr<CiphertextHandle>& tensor,
                                                      const std::vector<std::vector<double>>& diagonals) {
     auto cc = tensor->context->context;
-    auto accumulator = cc->EvalMult(tensor->ciphertext, make_plaintext(tensor->context, diagonals.front()));
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
+    auto accumulator = cc->EvalMult(tensor->ciphertext, make_plaintext(tensor->context, diagonals.front(), ct_level));
     for (std::size_t idx = 1; idx < diagonals.size(); ++idx) {
         auto rotated = cc->EvalAtIndex(tensor->ciphertext, static_cast<int>(idx));
-        auto term = cc->EvalMult(rotated, make_plaintext(tensor->context, diagonals[idx]));
+        auto term = cc->EvalMult(rotated, make_plaintext(tensor->context, diagonals[idx], ct_level));
         accumulator = cc->EvalAdd(accumulator, term);
     }
     return make_cipher(tensor->context, accumulator);
@@ -328,6 +329,7 @@ std::shared_ptr<CiphertextHandle> poly_eval_cipher(const std::shared_ptr<Ciphert
 std::shared_ptr<CiphertextHandle> matmul_dense_cipher(const std::shared_ptr<CiphertextHandle>& tensor,
                                                       const std::vector<std::vector<double>>& matrix) {
     auto cc = tensor->context->context;
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
     const std::size_t m = matrix.size();
     if (m == 0) {
         throw std::invalid_argument("matrix must not be empty");
@@ -368,7 +370,7 @@ std::shared_ptr<CiphertextHandle> matmul_dense_cipher(const std::shared_ptr<Ciph
         }
         auto rotated = (k == 0) ? tensor->ciphertext
                                 : cc->EvalAtIndex(tensor->ciphertext, static_cast<int>(k));
-        auto term = cc->EvalMult(rotated, make_plaintext(tensor->context, diag));
+        auto term = cc->EvalMult(rotated, make_plaintext(tensor->context, diag, ct_level));
         if (!accumulator) {
             accumulator = term;
         } else {
@@ -390,10 +392,11 @@ std::shared_ptr<CiphertextHandle> conjugate_cipher(const std::shared_ptr<Ciphert
 }
 
 std::shared_ptr<CiphertextHandle> matmul_bsgs_cipher(const std::shared_ptr<CiphertextHandle>& tensor,
-                                                      const std::vector<std::vector<double>>& matrix,
-                                                      std::uint32_t bsgs_n1,
-                                                      std::uint32_t bsgs_n2) {
+                                                       const std::vector<std::vector<double>>& matrix,
+                                                       std::uint32_t bsgs_n1,
+                                                       std::uint32_t bsgs_n2) {
     auto cc = tensor->context->context;
+    const uint32_t ct_level = tensor->ciphertext->GetLevel();
     const std::size_t out_features = matrix.size();
     if (out_features == 0) {
         throw std::invalid_argument("matrix must not be empty");
@@ -456,7 +459,7 @@ std::shared_ptr<CiphertextHandle> matmul_bsgs_cipher(const std::shared_ptr<Ciphe
                 diag[i] = matrix[row][col];
             }
             
-            auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(tensor->context, diag));
+            auto term = cc->EvalMult(baby_ciphers[j], make_plaintext(tensor->context, diag, ct_level));
             
             if (!block) {
                 block = term;

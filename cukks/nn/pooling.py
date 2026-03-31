@@ -247,8 +247,9 @@ class EncryptedAvgPool2d(EncryptedModule):
         H, W = self._infer_spatial_dims(num_patches)
         kH, kW = self.kernel_size
         sH, sW = self.stride
-        out_H = H // sH
-        out_W = W // sW
+        pH, pW = self.padding
+        out_H = (H + 2 * pH - kH) // sH + 1
+        out_W = (W + 2 * pW - kW) // sW + 1
         out_patches = out_H * out_W
         total_in = num_patches * channels
         total_out = out_patches * channels
@@ -630,7 +631,11 @@ class EncryptedMaxPool2d(EncryptedModule):
         elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             return self._forward_he_cnn(x)
         else:
-            return x
+            raise RuntimeError(
+                f"EncryptedMaxPool2d: unsupported input. "
+                f"Expected 2D tensor with _cnn_layout metadata or packed batch, "
+                f"got shape={x.shape}, _cnn_layout={getattr(x, '_cnn_layout', None)}."
+            )
 
     def _rotate_packed_within_sample(self, x: "EncryptedTensor", offset: int) -> "EncryptedTensor":
         batch_size = getattr(x, '_batch_size', None)

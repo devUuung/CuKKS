@@ -233,6 +233,7 @@ class CKKSTensor:
         self.device = torch.device(device) if device is not None else context.device
         self.size = int(math.prod(self.shape)) if len(self.shape) > 0 else 1
         self._backend = context._active_backend
+        self._needs_rescale = False
 
     @property
     def metadata(self):
@@ -286,7 +287,33 @@ class CKKSTensor:
 
     def sum_slots(self) -> "CKKSTensor":
         summed = self._backend.sum_slots(self._cipher)
-        return CKKSTensor(self.context, summed, (1,), self.device)
+        result = CKKSTensor(self.context, summed, (1,), self.device)
+        result._needs_rescale = self._needs_rescale
+        return result
+
+    def sum_and_broadcast(self, slot_count: int) -> "CKKSTensor":
+        summed = self._backend.sum_and_broadcast(self._cipher, int(slot_count))
+        result = CKKSTensor(self.context, summed, self.shape, self.device)
+        result._needs_rescale = self._needs_rescale
+        return result
+
+    def mul_by_i(self) -> "CKKSTensor":
+        multiplied = self._backend.mul_by_i(self._cipher)
+        result = CKKSTensor(self.context, multiplied, self.shape, self.device)
+        result._needs_rescale = self._needs_rescale
+        return result
+
+    def extract_real(self) -> "CKKSTensor":
+        extracted = self._backend.extract_real(self._cipher)
+        result = CKKSTensor(self.context, extracted, self.shape, self.device)
+        result._needs_rescale = self._needs_rescale
+        return result
+
+    def extract_imag(self) -> "CKKSTensor":
+        extracted = self._backend.extract_imag(self._cipher)
+        result = CKKSTensor(self.context, extracted, self.shape, self.device)
+        result._needs_rescale = self._needs_rescale
+        return result
 
     def matmul_diagonal(self, diagonals: Sequence[Sequence[float]]) -> "CKKSTensor":
         diag_plain = [ _tensor_to_list(diag, expected=self.size) for diag in diagonals ]

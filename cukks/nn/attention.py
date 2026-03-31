@@ -783,15 +783,17 @@ class EncryptedApproxAttention(EncryptedModule):
         seq_len: int,
     ) -> "EncryptedTensor":
         """Approximate softmax over the last dimension."""
+        from cukks.stats.crypto_reciprocal import crypto_reciprocal_shallow
+
         if seq_len <= 0:
             raise ValueError(f"seq_len must be positive, got {seq_len}")
         if seq_len == 1:
             return scores.mul(0.0).rescale().add(1.0)
         
         exp_scores = self._approx_exp(scores)
-        norm_factor = 1.0 / seq_len
-        
-        return exp_scores.mul(norm_factor).rescale()
+        exp_sum = exp_scores.sum_and_broadcast(seq_len)
+        inv_sum = crypto_reciprocal_shallow(exp_sum, domain=(0.01, 20.0), degree=15)
+        return exp_scores.mul(inv_sum).rescale()
     
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         """Self-attention forward pass.

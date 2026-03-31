@@ -540,7 +540,10 @@ class EncryptedConv2d(EncryptedModule):
         
         if isinstance(conv.padding, str):
             if conv.padding == 'same':
-                padding: Tuple[int, int] = (kernel_size[0] // 2, kernel_size[1] // 2)
+                padding: Tuple[int, int] = (
+                    ((kernel_size[0] - 1) * dilation[0]) // 2,
+                    ((kernel_size[1] - 1) * dilation[1]) // 2,
+                )
             else:
                 padding = (0, 0)
         else:
