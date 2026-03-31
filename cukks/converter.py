@@ -20,8 +20,11 @@ from .nn import (
     EncryptedModule,
     EncryptedLinear,
     EncryptedConv2d,
+    EncryptedConv1d,
+    EncryptedConvTranspose2d,
     EncryptedAvgPool2d,
     EncryptedMaxPool2d,
+    EncryptedAdaptiveAvgPool2d,
     EncryptedFlatten,
     EncryptedSequential,
     EncryptedSquare,
@@ -34,8 +37,19 @@ from .nn import (
     EncryptedBatchNorm2d,
     EncryptedLayerNorm,
     EncryptedInverseFreeLayerNorm,
+    EncryptedGroupNorm,
+    EncryptedInstanceNorm1d,
+    EncryptedInstanceNorm2d,
     EncryptedDropout,
     EncryptedApproxAttention,
+    EncryptedUpsample,
+    EncryptedEmbedding,
+    EncryptedPixelShuffle,
+    EncryptedPixelUnshuffle,
+    EncryptedZeroPad2d,
+    EncryptedConstantPad2d,
+    EncryptedReflectionPad2d,
+    EncryptedReplicationPad2d,
 )
 from .analysis import detect_inverse_free_layernorms
 from .nn.batchnorm import fold_batchnorm_into_linear, fold_batchnorm_into_conv
@@ -140,17 +154,33 @@ class ModelConverter:
             nn.Linear: self._convert_linear,
             BlockDiagonalLinear: self._convert_block_diagonal,
             BlockDiagLowRankLinear: self._convert_block_diag_low_rank,
+            nn.Conv1d: self._convert_conv1d,
             nn.Conv2d: self._convert_conv2d,
+            nn.ConvTranspose2d: self._convert_conv_transpose2d,
             nn.AvgPool2d: self._convert_avgpool2d,
+            nn.AdaptiveAvgPool2d: self._convert_adaptive_avgpool2d,
             nn.Flatten: self._convert_flatten,
             nn.Sequential: self._convert_sequential,
             nn.BatchNorm1d: self._convert_batchnorm1d,
             nn.BatchNorm2d: self._convert_batchnorm2d,
+            nn.GroupNorm: self._convert_groupnorm,
+            nn.InstanceNorm1d: self._convert_instancenorm1d,
+            nn.InstanceNorm2d: self._convert_instancenorm2d,
             nn.Dropout: self._convert_dropout,
             nn.Dropout2d: self._convert_dropout,
             nn.MaxPool2d: self._convert_maxpool2d,
             nn.LayerNorm: self._convert_layernorm,
             nn.MultiheadAttention: self._convert_attention,
+            nn.Upsample: self._convert_upsample,
+            nn.UpsamplingNearest2d: self._convert_upsample,
+            nn.UpsamplingBilinear2d: self._convert_upsample,
+            nn.Embedding: self._convert_embedding,
+            nn.PixelShuffle: self._convert_pixel_shuffle,
+            nn.PixelUnshuffle: self._convert_pixel_unshuffle,
+            nn.ZeroPad2d: self._convert_zeropad2d,
+            nn.ConstantPad2d: self._convert_constantpad2d,
+            nn.ReflectionPad2d: self._convert_reflectionpad2d,
+            nn.ReplicationPad2d: self._convert_replicationpad2d,
         }
         
         # Add activation converters
@@ -345,10 +375,22 @@ class ModelConverter:
     def _convert_conv2d(self, module: nn.Conv2d) -> EncryptedConv2d:
         """Convert a Conv2d layer."""
         return EncryptedConv2d.from_torch(module)
+
+    def _convert_conv1d(self, module: nn.Conv1d) -> EncryptedConv1d:
+        """Convert a Conv1d layer."""
+        return EncryptedConv1d.from_torch(module)
+
+    def _convert_conv_transpose2d(self, module: nn.ConvTranspose2d) -> EncryptedConvTranspose2d:
+        """Convert a ConvTranspose2d layer."""
+        return EncryptedConvTranspose2d.from_torch(module)
     
     def _convert_avgpool2d(self, module: nn.AvgPool2d) -> EncryptedAvgPool2d:
         """Convert an AvgPool2d layer."""
         return EncryptedAvgPool2d.from_torch(module)
+
+    def _convert_adaptive_avgpool2d(self, module: nn.AdaptiveAvgPool2d) -> EncryptedAdaptiveAvgPool2d:
+        """Convert an AdaptiveAvgPool2d layer."""
+        return EncryptedAdaptiveAvgPool2d.from_torch(module)
     
     def _convert_flatten(self, module: nn.Flatten) -> EncryptedFlatten:
         """Convert a Flatten layer."""
@@ -563,6 +605,39 @@ class ModelConverter:
     def _convert_maxpool2d(self, module: nn.MaxPool2d) -> EncryptedMaxPool2d:
         """Convert a MaxPool2d layer."""
         return EncryptedMaxPool2d.from_torch(module)
+
+    def _convert_groupnorm(self, module: nn.GroupNorm) -> EncryptedGroupNorm:
+        return EncryptedGroupNorm.from_torch(module)
+
+    def _convert_instancenorm1d(self, module: nn.InstanceNorm1d) -> EncryptedInstanceNorm1d:
+        return EncryptedInstanceNorm1d.from_torch(module)
+
+    def _convert_instancenorm2d(self, module: nn.InstanceNorm2d) -> EncryptedInstanceNorm2d:
+        return EncryptedInstanceNorm2d.from_torch(module)
+
+    def _convert_upsample(self, module: nn.Upsample) -> EncryptedUpsample:
+        return EncryptedUpsample.from_torch(module)
+
+    def _convert_embedding(self, module: nn.Embedding) -> EncryptedEmbedding:
+        return EncryptedEmbedding.from_torch(module)
+
+    def _convert_pixel_shuffle(self, module: nn.PixelShuffle) -> EncryptedPixelShuffle:
+        return EncryptedPixelShuffle.from_torch(module)
+
+    def _convert_pixel_unshuffle(self, module: nn.PixelUnshuffle) -> EncryptedPixelUnshuffle:
+        return EncryptedPixelUnshuffle.from_torch(module)
+
+    def _convert_zeropad2d(self, module: nn.ZeroPad2d) -> EncryptedZeroPad2d:
+        return EncryptedZeroPad2d.from_torch(module)
+
+    def _convert_constantpad2d(self, module: nn.ConstantPad2d) -> EncryptedConstantPad2d:
+        return EncryptedConstantPad2d.from_torch(module)
+
+    def _convert_reflectionpad2d(self, module: nn.ReflectionPad2d) -> EncryptedReflectionPad2d:
+        return EncryptedReflectionPad2d.from_torch(module)
+
+    def _convert_replicationpad2d(self, module: nn.ReplicationPad2d) -> EncryptedReplicationPad2d:
+        return EncryptedReplicationPad2d.from_torch(module)
     
     def _fold_batchnorms(self, model: nn.Module) -> nn.Module:
         """Fold BatchNorm layers into preceding Linear/Conv layers."""
