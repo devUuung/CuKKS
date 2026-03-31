@@ -7,6 +7,7 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
+import copy
 import math
 import pickle
 from pathlib import Path
@@ -135,7 +136,7 @@ class EncryptedTensor:
     def _copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if layout is None:
             return None
-        return dict(layout)
+        return copy.deepcopy(layout)
 
     def _copy_runtime_metadata_from(self, other: "EncryptedTensor") -> None:
         self._original_size = other._original_size
