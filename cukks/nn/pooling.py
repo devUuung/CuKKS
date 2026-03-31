@@ -771,6 +771,8 @@ class EncryptedMaxPool2d(EncryptedModule):
             'original_shape': layout.get('original_shape'),
         }
         result._shape = (out_patches, channels)
+        result._needs_rescale = False
+        result._packed_batch = False
         return result
     
     def mult_depth(self) -> int:

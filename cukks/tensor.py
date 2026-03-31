@@ -428,7 +428,7 @@ class EncryptedTensor:
         else:
             neg_plain = [-1.0] * self._cipher.size
             new_cipher = self._cipher.mul(neg_plain)
-            needs_rescale = True
+            needs_rescale = self._needs_rescale
         
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._needs_rescale = needs_rescale
@@ -1096,7 +1096,7 @@ class EncryptedTensor:
             Choi, H. (2025). PP-STAT. CIKM'25.
         """
         inv_sqrt_x = self.inv_sqrt(domain=domain)
-        return self.mul(inv_sqrt_x)
+        return self.mul(inv_sqrt_x).rescale()
     
     # -------------------------------------------------------------------------
     # CNN Operations
