@@ -188,7 +188,7 @@ def _get_model_dimensions(model: torch.nn.Module, input_shape: Optional[Tuple[in
             # Kernel-level dimensions (original behavior)
             patch_features = in_c * kh * kw
             dims.append(patch_features)
-            dims.append(out_c * kh * kw)
+            dims.append(out_c)
 
             # im2col expansion: compute num_patches from spatial dims
             padded_h = spatial_h + 2 * int(ph)

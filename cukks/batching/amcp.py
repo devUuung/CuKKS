@@ -32,6 +32,13 @@ class AMCPacker:
         self.stride = total_slots // seq_len
         self.width = self.k * batch_size
 
+        if self.stride * seq_len != total_slots:
+            raise ValueError(
+                f"AMCP packing requires total_slots to be divisible by seq_len: "
+                f"total_slots={total_slots}, seq_len={seq_len}, stride={self.stride}, "
+                f"stride * seq_len={self.stride * seq_len} != {total_slots}"
+            )
+
     @staticmethod
     def compute_packing_factor(num_heads: int, seq_len: int, batch_size: int, total_slots: int) -> int:
         divisors: list[int] = []
