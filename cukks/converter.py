@@ -90,6 +90,9 @@ class ConversionOptions:
         attention_normalization_mode: Multi-token attention normalization kernel.
         attention_gaussian_gamma: Scale factor for gaussian attention mode.
         architecture: Conversion architecture profile.
+        inverse_free_layernorm: If True (default), automatically detect and use
+            inverse-free LayerNorm where safe (requires downstream cancelling LN).
+            Set to False to force all LayerNorms to standard conversion (depth 18).
     """
     
     def __init__(
@@ -103,6 +106,7 @@ class ConversionOptions:
         attention_normalization_mode: str = "power_softmax",
         attention_gaussian_gamma: float = 0.25,
         architecture: str = "default",
+        inverse_free_layernorm: bool = True,
     ):
         if architecture not in {"default", "stip"}:
             raise ValueError(
@@ -118,6 +122,7 @@ class ConversionOptions:
         self.attention_normalization_mode = attention_normalization_mode
         self.attention_gaussian_gamma = attention_gaussian_gamma
         self.architecture = architecture
+        self.inverse_free_layernorm = inverse_free_layernorm
 
 
 # =============================================================================
@@ -229,7 +234,7 @@ class ModelConverter:
                 self._analyze_cnn_structure(model)
 
         # Detect LayerNorms eligible for inverse-free conversion
-        if self.options.architecture == "stip":
+        if self.options.inverse_free_layernorm:
             self._inverse_free_ln_names = detect_inverse_free_layernorms(model)
         
         # Convert the model
@@ -864,6 +869,7 @@ def convert(
     attention_normalization_mode: str = "power_softmax",
     attention_gaussian_gamma: float = 0.25,
     architecture: str = "default",
+    inverse_free_layernorm: bool = True,
 ) -> Tuple[EncryptedModule, CKKSInferenceContext]:
     """Convert a PyTorch model to an encrypted version.
     
@@ -892,6 +898,9 @@ def convert(
         attention_normalization_mode: Multi-token attention normalization kernel.
         attention_gaussian_gamma: Scale factor for gaussian attention mode.
         architecture: Conversion architecture profile.
+        inverse_free_layernorm: If True (default), automatically detect and use
+            inverse-free LayerNorm where safe (requires downstream cancelling LN).
+            Set to False to force all LayerNorms to standard conversion (depth 18).
         
     Returns:
         Tuple of (encrypted_model, context).
@@ -927,6 +936,7 @@ def convert(
         attention_normalization_mode=attention_normalization_mode,
         attention_gaussian_gamma=attention_gaussian_gamma,
         architecture=architecture,
+        inverse_free_layernorm=inverse_free_layernorm,
     )
     
     converter = ModelConverter(options, input_shape=input_shape)
@@ -947,6 +957,7 @@ def convert(
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
             attention_normalization_mode=attention_normalization_mode,
+            inverse_free_ln_names=converter._inverse_free_ln_names,
         )
         enable_bootstrap = est_depth > _AUTO_BOOTSTRAP_DEPTH_THRESHOLD
     if auto_bootstrap is None:
