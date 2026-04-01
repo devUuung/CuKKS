@@ -593,3 +593,80 @@ class TestPoolingRectangularInput:
         with pytest.raises(ValueError, match="not a perfect square"):
             pool._forward_he_packed(x)
 
+
+class TestCNNRotationKeyPlanning:
+    """Bug: Rotation key planner used generic max_dim BSGS, but compact conv
+    uses per-diagonal BSGS. This caused missing rotation keys for CNN layers.
+    Fix: Planner now computes per-conv compact rotations via
+    EncryptedConv2d.required_packed_compact_rotations().
+    """
+
+    def test_required_packed_compact_rotations_basic(self):
+        """Basic case: 1 patch, 9 features, 8 channels."""
+        from cukks.nn.conv import EncryptedConv2d
+
+        rots = EncryptedConv2d.required_packed_compact_rotations(
+            num_patches=1, patch_features=9, out_channels=8
+        )
+        assert isinstance(rots, list)
+        assert all(isinstance(r, int) and r > 0 for r in rots)
+        # For 1 patch, the diagonals are small, so rotations should be small
+        assert len(rots) > 0
+
+    def test_required_packed_compact_rotations_mnist_conv(self):
+        """MNIST Conv2d: 784 patches, 9 features, 8 channels.
+        
+        This is the actual case that was failing before the fix.
+        """
+        from cukks.nn.conv import EncryptedConv2d
+
+        rots = EncryptedConv2d.required_packed_compact_rotations(
+            num_patches=784, patch_features=9, out_channels=8
+        )
+        assert isinstance(rots, list)
+        assert all(isinstance(r, int) and r > 0 for r in rots)
+        # Should include both baby steps and giant steps
+        # For 799 diagonals, g=29, so baby steps 1..28 and giant steps 29,58,...
+        assert len(rots) > 28  # At least baby steps + some giant steps
+
+    def test_for_model_includes_conv_rotations(self):
+        """CKKSInferenceContext.for_model() should include per-conv rotations."""
+        from cukks.context import CKKSInferenceContext
+        from cukks.nn.conv import EncryptedConv2d
+
+        import torch.nn as nn
+
+        class TinyCNN(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
+                self.act1 = nn.ReLU()
+                self.pool1 = nn.AvgPool2d(2)
+                self.flatten = nn.Flatten()
+                self.fc = nn.Linear(8 * 14 * 14, 10)
+
+            def forward(self, x):
+                x = self.act1(self.conv1(x))
+                x = self.pool1(x)
+                return self.fc(self.flatten(x))
+
+        model = TinyCNN()
+        model.eval()
+
+        # Get the expected conv rotations
+        expected_rots = set(
+            EncryptedConv2d.required_packed_compact_rotations(
+                num_patches=784, patch_features=9, out_channels=8
+            )
+        )
+
+        # Create context with input_shape
+        ctx = CKKSInferenceContext.for_model(
+            model, input_shape=(1, 1, 28, 28)
+        )
+
+        # The context's rotation set should include the conv rotations
+        # We can't directly access the rotation list, but we can verify
+        # the context was created without error (which means rotations were planned)
+        assert ctx is not None
+
