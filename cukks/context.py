@@ -127,6 +127,7 @@ def _estimate_model_depth(
     use_square_activation: bool = False,
     enable_gpu: bool = False,
     attention_normalization_mode: str = "power_softmax",
+    inverse_free_ln_names: "frozenset[str]" = frozenset(),
 ) -> int:
     depth = 0
     if use_square_activation:
@@ -138,6 +139,8 @@ def _estimate_model_depth(
 
     from .nn.block_diagonal import BlockDiagonalLinear
     from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+
+    _module_to_name = {id(m): name for name, m in model.named_modules()}
 
     for module in model.modules():
         if isinstance(module, BlockDiagLowRankLinear):
@@ -151,6 +154,12 @@ def _estimate_model_depth(
             depth += poly_depth
         elif isinstance(module, torch.nn.MultiheadAttention):
             depth += 9 if attention_normalization_mode == "gaussian" else 10
+        elif isinstance(module, torch.nn.LayerNorm):
+            module_name = _module_to_name.get(id(module), "")
+            if module_name in inverse_free_ln_names:
+                depth += 5
+            else:
+                depth += 18
     return max(1, depth)
 
 
