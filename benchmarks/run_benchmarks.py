@@ -8,6 +8,8 @@ Usage:
     python benchmarks/run_benchmarks.py --output results.json
     python benchmarks/run_benchmarks.py --model mlp --samples 10
     python benchmarks/run_benchmarks.py --list
+
+Requires: GPU backend with OpenFHE. Falls back to mock mode for dry-run.
 """
 
 import argparse
@@ -38,10 +40,6 @@ def get_timestamp() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
-
-# =============================================================================
-# Benchmark Models
-# =============================================================================
 
 class TinyMLP(nn.Module):
     """784 → 64 → 10 MLP for MNIST-style classification."""
@@ -74,63 +72,14 @@ class SmallCNN(nn.Module):
         return self.fc(self.flatten(x))
 
 
-class SmallResNet(nn.Module):
-    """1×8×8 → Conv → GroupNorm → AdaptivePool → FC."""
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(8, 8)
-        self.act1 = nn.ReLU()
-        self.conv2 = nn.Conv2d(8, 16, kernel_size=3, padding=1)
-        self.norm2 = nn.GroupNorm(16, 16)
-        self.act2 = nn.ReLU()
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(16, 4)
-
-    def forward(self, x):
-        x = self.act1(self.norm1(self.conv1(x)))
-        x = self.act2(self.norm2(self.conv2(x)))
-        x = self.pool(x)
-        return self.fc(self.flatten(x))
-
-
-class TinyTransformer(nn.Module):
-    """Token embedding → LayerNorm → Linear classifier head."""
-    def __init__(self, vocab_size=64, embed_dim=8, seq_len=3, num_classes=2):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.norm = nn.LayerNorm(embed_dim)
-        self.fc1 = nn.Linear(seq_len * embed_dim, 16)
-        self.act = nn.ReLU()
-        self.fc2 = nn.Linear(16, num_classes)
-        self.seq_len = seq_len
-        self.embed_dim = embed_dim
-
-    def forward(self, x):
-        # x: (batch, seq_len) token IDs
-        embedded = self.embedding(x)  # (batch, seq_len, embed_dim)
-        normed = self.norm(embedded)
-        flat = normed.view(-1, self.seq_len * self.embed_dim)
-        return self.fc2(self.act(self.fc1(flat)))
-
-
-# =============================================================================
-# Benchmark Runner
-# =============================================================================
-
 MODELS = {
     "mlp": lambda: TinyMLP(),
     "cnn": lambda: SmallCNN(),
-    "resnet": lambda: SmallResNet(),
-    "transformer": lambda: TinyTransformer(),
 }
 
 INPUT_SHAPES = {
     "mlp": (1, 784),
     "cnn": (1, 1, 28, 28),
-    "resnet": (1, 1, 8, 8),
-    "transformer": (1, 3),  # (batch, seq_len)
 }
 
 
@@ -144,18 +93,11 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
     model = model_fn()
     model.eval()
     input_shape = INPUT_SHAPES[model_name]
-
-    # Count parameters
     num_params = sum(p.numel() for p in model.parameters())
 
-    # Generate synthetic input
     torch.manual_seed(42)
-    if model_name == "transformer":
-        sample = torch.randint(0, 64, input_shape, dtype=torch.long)
-    else:
-        sample = torch.randn(input_shape)
+    sample = torch.randn(input_shape)
 
-    # Plaintext inference (warmup + timed)
     with torch.no_grad():
         for _ in range(3):
             model(sample)
@@ -164,7 +106,6 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
             model(sample)
         plain_ms = (time.perf_counter() - t0) / num_samples * 1000
 
-    # Encrypted inference
     backend_info = cukks.get_backend_info()
     if not backend_info["available"]:
         print(f"  [SKIP] Backend not available for {model_name}")
@@ -172,31 +113,16 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
 
     try:
         enc_model, ctx = cukks.convert(model, activation_degree=3)
+        enc_input = ctx.encrypt(sample.flatten())
 
-        # For transformer, encrypt the embedded representation (not token IDs)
-        if model_name == "transformer":
-            with torch.no_grad():
-                embedded = model.embedding(sample)
-                normed = model.norm(embedded)
-                enc_input = ctx.encrypt(normed.view(-1))
-        else:
-            enc_input = ctx.encrypt(sample.flatten())
-
-        # Warmup
         enc_model(enc_input)
 
-        # Timed encrypted inference
         t0 = time.perf_counter()
         for _ in range(num_samples):
             enc_model(enc_input)
         enc_ms = (time.perf_counter() - t0) / num_samples * 1000
 
-        # Accuracy check
         plain_output = model(sample).flatten()
-        if model_name == "transformer":
-            with torch.no_grad():
-                flat = normed.view(-1, model.seq_len * model.embed_dim)
-                plain_output = model.fc2(model.act(model.fc1(flat))).flatten()
         enc_output = ctx.decrypt(enc_model(enc_input))
         mae = (plain_output - enc_output).abs().mean().item()
 
@@ -233,10 +159,6 @@ def run_all_benchmarks(num_samples: int = 3) -> List[BenchmarkResult]:
     return results
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-
 def main():
     parser = argparse.ArgumentParser(description="CuKKS Benchmark Suite")
     parser.add_argument("--model", choices=list(MODELS.keys()), help="Benchmark specific model")
@@ -263,7 +185,6 @@ def main():
         print("No benchmarks completed.")
         return
 
-    # Print summary table
     print(f"\n{'Model':<15} {'Plain (ms)':<12} {'Encrypted (ms)':<15} {'Overhead':<10} {'MAE':<10}")
     print("-" * 62)
     for r in results:

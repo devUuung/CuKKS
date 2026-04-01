@@ -185,6 +185,30 @@ python examples/transformer_encrypted.py --samples 2
 
 See [examples/](examples/) for full scripts.
 
+## Benchmarking
+
+CuKKS includes a benchmark suite for measuring encrypted inference performance:
+
+```bash
+# Run all benchmarks
+python benchmarks/run_benchmarks.py
+
+# Benchmark a specific model
+python benchmarks/run_benchmarks.py --model mlp
+
+# Save results to JSON
+python benchmarks/run_benchmarks.py --output results.json
+```
+
+Supported models:
+
+| Model | Params | Input | Architecture |
+|-------|--------|-------|--------------|
+| MLP | 50,890 | (1, 784) | Linear(784→64) → ReLU → Linear(64→10) |
+| CNN | 15,770 | (1, 1, 28, 28) | Conv2d(1→8, 3×3) → ReLU → AvgPool2d(2) → Linear |
+
+> **Note:** Benchmarks require a GPU backend with OpenFHE. Run on a machine with CUDA support for accurate timing.
+
 ## Supported Layers
 
 | PyTorch Layer | Encrypted Version | Notes |

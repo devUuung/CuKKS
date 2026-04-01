@@ -185,6 +185,30 @@ python examples/transformer_encrypted.py --samples 2
 
 전체 스크립트는 [examples/](examples/)에서 확인하세요.
 
+## 벤치마크
+
+CuKKS는 암호화 추론 성능 측정을 위한 벤치마크 스위트가 포함되어 있습니다:
+
+```bash
+# 전체 벤치마크 실행
+python benchmarks/run_benchmarks.py
+
+# 특정 모델 벤치마크
+python benchmarks/run_benchmarks.py --model mlp
+
+# 결과를 JSON으로 저장
+python benchmarks/run_benchmarks.py --output results.json
+```
+
+지원 모델:
+
+| 모델 | 파라미터 | 입력 | 아키텍처 |
+|------|----------|------|----------|
+| MLP | 50,890 | (1, 784) | Linear(784→64) → ReLU → Linear(64→10) |
+| CNN | 15,770 | (1, 1, 28, 28) | Conv2d(1→8, 3×3) → ReLU → AvgPool2d(2) → Linear |
+
+> **참고:** 벤치마크는 OpenFHE GPU 백엔드가 필요합니다. CUDA 지원 머신에서 실행하세요.
+
 ## 지원 레이어
 
 | PyTorch 레이어 | 암호화 버전 | 비고 |
