@@ -60,12 +60,12 @@ output = ctx.decrypt(enc_output)  # 같은 결과, 서버에서는 절대 복호
 pip install cukks[cu121]  # PyTorch CUDA 버전에 맞춰 선택: cu118, cu121, cu124, cu128
 ```
 
-| 명령어 | CUDA | 지원 GPU |
-|--------|------|----------|
-| `pip install cukks[cu118]` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu121]` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu124]` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu128]` | 12.8 | 위 모두 + **RTX 50xx** |
+| 명령어 | CUDA | Compute Capability |
+|--------|------|--------------------|
+| `pip install cukks[cu118]` | 11.8 | sm_50 – sm_90 (Maxwell ~ Hopper) |
+| `pip install cukks[cu121]` | 12.1 | sm_50 – sm_90 (Maxwell ~ Hopper) |
+| `pip install cukks[cu124]` | 12.4 | sm_50 – sm_90a (Maxwell ~ Hopper) |
+| `pip install cukks[cu128]` | 12.8 | sm_50 – sm_100 (Maxwell ~ Blackwell) |
 
 CUDA 버신이 헷갈리나요? `python -c "import torch; print(torch.version.cuda)"`를 실행하세요.
 
