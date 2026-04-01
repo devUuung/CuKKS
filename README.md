@@ -60,12 +60,12 @@ output = ctx.decrypt(enc_output)  # Same result, never decrypted on server
 pip install cukks[cu121]  # Match your PyTorch CUDA version: cu118, cu121, cu124, cu128
 ```
 
-| Command | CUDA | GPUs |
-|---------|------|------|
-| `pip install cukks[cu118]` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu121]` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu124]` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
-| `pip install cukks[cu128]` | 12.8 | All above + **RTX 50xx** |
+| Command | CUDA | Compute Capability |
+|---------|------|--------------------|
+| `pip install cukks[cu118]` | 11.8 | sm_50 – sm_90 (Maxwell ~ Hopper) |
+| `pip install cukks[cu121]` | 12.1 | sm_50 – sm_90 (Maxwell ~ Hopper) |
+| `pip install cukks[cu124]` | 12.4 | sm_50 – sm_90a (Maxwell ~ Hopper) |
+| `pip install cukks[cu128]` | 12.8 | sm_50 – sm_100 (Maxwell ~ Blackwell) |
 
 Not sure which CUDA version? Run `python -c "import torch; print(torch.version.cuda)"`.
 
