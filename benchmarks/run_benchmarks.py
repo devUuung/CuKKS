@@ -56,30 +56,12 @@ class TinyMLP(nn.Module):
         return self.fc2(x)
 
 
-class SmallCNN(nn.Module):
-    """1×28×28 → Conv → Pool → FC for MNIST."""
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-        self.pool1 = nn.AvgPool2d(2)
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(8 * 14 * 14, 10)
-
-    def forward(self, x):
-        x = self.act1(self.conv1(x))
-        x = self.pool1(x)
-        return self.fc(self.flatten(x))
-
-
 MODELS = {
     "mlp": lambda: TinyMLP(),
-    "cnn": lambda: SmallCNN(),
 }
 
 INPUT_SHAPES = {
     "mlp": (1, 784),
-    "cnn": (1, 1, 28, 28),
 }
 
 
@@ -112,7 +94,7 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
         return None
 
     try:
-        enc_model, ctx = cukks.convert(model, activation_degree=3)
+        enc_model, ctx = cukks.convert(model, activation_degree=3, input_shape=input_shape)
         enc_input = ctx.encrypt(sample.flatten())
 
         enc_model(enc_input)
@@ -123,7 +105,7 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
         enc_ms = (time.perf_counter() - t0) / num_samples * 1000
 
         plain_output = model(sample).flatten()
-        enc_output = ctx.decrypt(enc_model(enc_input))
+        enc_output = ctx.decrypt(enc_model(enc_input)).cpu()
         mae = (plain_output - enc_output).abs().mean().item()
 
         overhead = enc_ms / plain_ms if plain_ms > 0 else float("inf")

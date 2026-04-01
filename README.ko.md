@@ -205,7 +205,14 @@ python benchmarks/run_benchmarks.py --output results.json
 | 모델 | 파라미터 | 입력 | 아키텍처 |
 |------|----------|------|----------|
 | MLP | 50,890 | (1, 784) | Linear(784→64) → ReLU → Linear(64→10) |
-| CNN | 15,770 | (1, 1, 28, 28) | Conv2d(1→8, 3×3) → ReLU → AvgPool2d(2) → Linear |
+
+실행 예시:
+
+```
+Model           Plain (ms)   Encrypted (ms)  Overhead   MAE       
+--------------------------------------------------------------
+mlp             0.01         82.12           6795      x 0.131713
+```
 
 > **참고:** 벤치마크는 OpenFHE GPU 백엔드가 필요합니다. CUDA 지원 머신에서 실행하세요.
 

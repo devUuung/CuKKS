@@ -205,7 +205,14 @@ Supported models:
 | Model | Params | Input | Architecture |
 |-------|--------|-------|--------------|
 | MLP | 50,890 | (1, 784) | Linear(784→64) → ReLU → Linear(64→10) |
-| CNN | 15,770 | (1, 1, 28, 28) | Conv2d(1→8, 3×3) → ReLU → AvgPool2d(2) → Linear |
+
+Example output:
+
+```
+Model           Plain (ms)   Encrypted (ms)  Overhead   MAE       
+--------------------------------------------------------------
+mlp             0.01         82.12           6795      x 0.131713
+```
 
 > **Note:** Benchmarks require a GPU backend with OpenFHE. Run on a machine with CUDA support for accurate timing.
 
