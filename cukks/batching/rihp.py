@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from cukks.tensor import EncryptedTensor
 
 
@@ -19,11 +21,15 @@ class RIHPacker:
             packed.append(key_col.add(rotated.mul_by_i()))
         return packed
 
+    @staticmethod
+    def _unwrap_cipher(tensor: Any) -> Any:
+        return getattr(tensor, "_cipher", tensor)
+
     def halved_ccmm(
         self,
-        queries: list[EncryptedTensor],
-        keys_hybrid: list[EncryptedTensor],
-    ) -> list[EncryptedTensor]:
+        queries: list[Any],
+        keys_hybrid: list[Any],
+    ) -> list[Any]:
         if len(queries) != len(keys_hybrid):
             raise ValueError(
                 "queries and keys_hybrid must have same length, "
@@ -32,31 +38,26 @@ class RIHPacker:
         if not queries:
             return []
 
-        if hasattr(queries[0]._cipher, "halved_ccmm_fused"):
-            raw_queries = [query._cipher for query in queries]
-            raw_keys = [key._cipher for key in keys_hybrid]
-            fused_results = queries[0]._cipher.halved_ccmm_fused(
+        first_query = queries[0]
+        first_cipher = self._unwrap_cipher(first_query)
+
+        if hasattr(first_cipher, "halved_ccmm_fused"):
+            raw_queries = [self._unwrap_cipher(query) for query in queries]
+            raw_keys = [self._unwrap_cipher(key) for key in keys_hybrid]
+            fused_results = first_cipher.halved_ccmm_fused(
                 raw_queries,
                 raw_keys,
                 self.half_seq_len,
             )
-            return [
-                EncryptedTensor(
-                    result,
-                    queries[0]._shape,
-                    queries[0]._context,
-                    queries[0]._depth,
-                )
-                for result in fused_results
-            ]
+            return list(fused_results)
 
-        packed_diagonals: list[EncryptedTensor] = []
+        packed_diagonals: list[Any] = []
         for rotation in range(self.half_seq_len):
             acc = queries[0].mul(keys_hybrid[0].rotate(rotation)).rescale()
             for col in range(1, len(queries)):
                 term = queries[col].mul(keys_hybrid[col].rotate(rotation)).rescale()
                 acc = acc.add(term)
-            packed_diagonals.append(acc)
+            packed_diagonals.append(self._unwrap_cipher(acc))
         return packed_diagonals
 
     def unpack_diagonals(self, hybrid_results: list[EncryptedTensor]) -> list[EncryptedTensor]:

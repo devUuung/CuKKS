@@ -174,6 +174,10 @@ class MockCKKSTensor:
         self.size = int(math.prod(self.shape)) if len(self.shape) > 0 else 1
         self._level = 10
         self._depth = depth
+        self._packed_batch: bool = False
+        self._batch_size: int | None = None
+        self._slots_per_sample: int | None = None
+        self._packed_sample_shape: tuple[int, ...] | None = None
 
     @property
     def metadata(self) -> dict:
@@ -448,6 +452,11 @@ class MockCKKSTensor:
 
     def _to_tensor(self, other: torch.Tensor | float | int | Iterable) -> torch.Tensor:
         """Convert plaintext to padded tensor matching slot size."""
+        if hasattr(other, "_cipher"):
+            other = getattr(other, "_cipher")
+        if isinstance(other, MockCKKSTensor):
+            return other.data.to(dtype=self.data.dtype)
+
         tensor = torch.as_tensor(other, dtype=torch.float64).reshape(-1)
         if tensor.numel() == 1:
             return tensor.expand(self.data.numel())

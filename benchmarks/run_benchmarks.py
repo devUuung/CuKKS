@@ -14,12 +14,18 @@ Requires: GPU backend with OpenFHE. Falls back to mock mode for dry-run.
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
 from typing import List, Optional
 
 import torch
 import torch.nn as nn
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import cukks
 
@@ -50,18 +56,36 @@ class TinyMLP(nn.Module):
         self.act1 = nn.ReLU()
         self.fc2 = nn.Linear(64, 10)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.flatten(x)
         x = self.act1(self.fc1(x))
         return self.fc2(x)
 
 
+class SmallCNN(nn.Module):
+    """1×28×28 → Conv → Pool → FC for MNIST."""
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
+        self.act1 = nn.ReLU()
+        self.pool1 = nn.AvgPool2d(2)
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(8 * 14 * 14, 10)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.act1(self.conv1(x))
+        x = self.pool1(x)
+        return self.fc(self.flatten(x))
+
+
 MODELS = {
     "mlp": lambda: TinyMLP(),
+    "cnn": lambda: SmallCNN(),
 }
 
 INPUT_SHAPES = {
     "mlp": (1, 784),
+    "cnn": (1, 1, 28, 28),
 }
 
 
@@ -95,7 +119,17 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
 
     try:
         enc_model, ctx = cukks.convert(model, activation_degree=3, input_shape=input_shape)
-        enc_input = ctx.encrypt(sample.flatten())
+
+        if model_name == "cnn":
+            conv_params = [{
+                'in_channels': 1,
+                'out_channels': 8,
+                'kernel_size': 3,
+                'padding': (1, 1),
+            }]
+            enc_input = ctx.encrypt_cnn_input(sample.to(torch.float64), conv_params)
+        else:
+            enc_input = ctx.encrypt(sample.flatten())
 
         enc_model(enc_input)
 

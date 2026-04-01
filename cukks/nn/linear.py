@@ -109,6 +109,32 @@ class EncryptedLinear(EncryptedModule):
             result._sigma_factor = sigma
             return result
 
+        if getattr(x, '_packed_batch', False):
+            result = x.matmul(
+                self.weight,
+                None,
+                weight_list=self._weight_list,
+                bias_list=None,
+                weight_hash=self._weight_hash,
+                diag_nonzero=self._diag_nonzero,
+            )
+            if self.bias is not None:
+                batch_size = getattr(result, '_batch_size', None)
+                slots_per_sample = getattr(result, '_slots_per_sample', None)
+                if batch_size is None or slots_per_sample is None:
+                    raise RuntimeError("Packed linear result is missing batch metadata")
+
+                bias_plain = [0.0] * result._cipher.size
+                bias_vals = self._bias_list if self._bias_list is not None else self.bias.reshape(-1).tolist()
+                for block in range(batch_size):
+                    block_start = block * slots_per_sample
+                    for row_idx, value in enumerate(bias_vals):
+                        idx = block_start + row_idx
+                        if idx < len(bias_plain):
+                            bias_plain[idx] = float(value)
+                result = result.add(bias_plain)
+            return result
+
         return x.matmul(self.weight, self.bias,
                         weight_list=self._weight_list,
                         bias_list=self._bias_list,
@@ -123,13 +149,34 @@ class EncryptedLinear(EncryptedModule):
         
         Uses O(out_features * log(in_features)) operations.
         """
+        compact_weight = getattr(self, '_compact_sparse_weight', None)
+        compact_in_features = getattr(self, '_compact_sparse_in_features', None)
+        if compact_weight is not None and compact_in_features is not None and x.size == compact_in_features:
+            return x.matmul(
+                compact_weight,
+                self.bias,
+                weight_list=getattr(self, '_compact_sparse_weight_list', None),
+                bias_list=self._bias_list,
+                weight_hash=getattr(self, '_compact_sparse_weight_hash', 0),
+                diag_nonzero=getattr(self, '_compact_sparse_diag_nonzero', None),
+            )
+
         out_features = self.out_features
         in_features = self.in_features
+
+        if x.size != in_features:
+            raise ValueError(
+                "Sparse linear input size mismatch. "
+                f"Expected {in_features} slots, got {x.size}."
+            )
         
         outputs = []
+        slot_count = x._cipher.size
         for row in range(out_features):
             row_weights = self.weight[row].tolist()
-            masked = x.mul(row_weights)
+            plain_row = [0.0] * slot_count
+            plain_row[:in_features] = [float(value) for value in row_weights[:in_features]]
+            masked = x.mul(plain_row)
             masked = masked.rescale()
             dot_product = self._reduce_sum(masked, in_features)
             outputs.append(dot_product)
@@ -146,14 +193,7 @@ class EncryptedLinear(EncryptedModule):
         return result
     
     def _reduce_sum(self, x: "EncryptedTensor", length: int) -> "EncryptedTensor":
-        """Sum elements using rotation-based reduction. O(log n) rotations."""
-        result = x
-        step = 1
-        while step < length:
-            rotated = result.rotate(step)
-            result = result + rotated
-            step *= 2
-        return result
+        return x._reduce_slots(length)
     
     def _pack_outputs(self, outputs: list, context: object) -> "EncryptedTensor":
         """Pack scalar outputs (sum in slot 0) into single ciphertext."""
@@ -161,7 +201,7 @@ class EncryptedLinear(EncryptedModule):
         if out_features == 0:
             raise ValueError("Cannot pack empty outputs list")
         
-        slot_count = outputs[0]._cipher.size
+        slot_count = outputs[0]._cipher_slot_count()
         
         result = None
         for i, out in enumerate(outputs):
@@ -271,6 +311,7 @@ class EncryptedLinear(EncryptedModule):
             
             # W_final = W @ P @ G
             W_original = linear.weight.data.to(torch.float64)
+            W_compact = W_original @ perm_matrix
             W_permuted = W_original @ perm_matrix @ gather_matrix
             
             enc_linear = cls(
@@ -280,6 +321,11 @@ class EncryptedLinear(EncryptedModule):
                 bias=linear.bias.data if linear.bias is not None else None,  # pyright: ignore[reportUnnecessaryComparison]
             )
             enc_linear._sparse_input = True
+            enc_linear._compact_sparse_in_features = total_size
+            enc_linear._compact_sparse_weight = W_compact
+            enc_linear._compact_sparse_weight_list = W_compact.tolist()
+            enc_linear._compact_sparse_weight_hash = _compute_weight_hash(W_compact)
+            enc_linear._compact_sparse_diag_nonzero = _compute_diag_nonzero(W_compact)
             return enc_linear
         else:
             # Dense format: standard permutation only

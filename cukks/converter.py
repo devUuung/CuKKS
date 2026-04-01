@@ -328,6 +328,11 @@ class ModelConverter:
         if cnn_layout is None:
             return False
 
+        for module in reversed(list(converted.values())):
+            if isinstance(module, EncryptedAvgPool2d):
+                module._use_sparse_output = True
+                break
+
         converted[name] = EncryptedFlatten._with_absorbed_permutation(
             flatten.start_dim,
             flatten.end_dim,
@@ -439,7 +444,7 @@ class ModelConverter:
                 if pre_pool_h is not None and pre_pool_w is not None:
                     out_h = pre_pool_h // 2
                     out_w = pre_pool_w // 2
-                    
+
                     sparse_positions = []
                     for out_y in range(out_h):
                         for out_x in range(out_w):
@@ -448,7 +453,7 @@ class ModelConverter:
                             in_patch_idx = in_y * pre_pool_w + in_x
                             for c in range(channels):
                                 sparse_positions.append(in_patch_idx * channels + c)
-                    
+
                     layout['sparse'] = True
                     layout['sparse_positions'] = sparse_positions
                     layout['total_slots'] = pre_pool_h * pre_pool_w * channels
@@ -960,6 +965,7 @@ def convert(
             batch_size=batch_size,
             architecture=architecture,
             input_shape=input_shape,
+            optimize_cnn=optimize_cnn,
         )
     
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:

@@ -174,6 +174,7 @@ class EncryptedAvgPool2d(EncryptedModule):
         # Pre-compute the averaging factor
         self.pool_area = self.kernel_size[0] * self.kernel_size[1]
         self.avg_factor = 1.0 / self.pool_area
+        self._use_sparse_output = False
     
     def __call__(self, x: Union["EncryptedTensor", List["EncryptedTensor"]]) -> Union["EncryptedTensor", List["EncryptedTensor"]]:
         """Bypass the base-class packed-batch fallback.
@@ -204,6 +205,13 @@ class EncryptedAvgPool2d(EncryptedModule):
         if getattr(x, '_packed_batch', False):
             sample_shape = getattr(x, '_packed_sample_shape', None) or x.shape[1:]
             if len(sample_shape) == 2:
+                kH, kW = self.kernel_size
+                sH, sW = self.stride
+                if (
+                    getattr(x, '_cnn_layout', None) is not None
+                    and kH == 2 and kW == 2 and sH == 2 and sW == 2
+                ):
+                    return self._forward_he_rotation(x)
                 return self._forward_he_packed_batch(x, sample_shape)
 
         input_ndim = len(x.shape)
@@ -217,7 +225,10 @@ class EncryptedAvgPool2d(EncryptedModule):
         elif input_ndim == 2 and hasattr(x, '_cnn_layout') and x._cnn_layout is not None:
             kH, kW = self.kernel_size
             sH, sW = self.stride
-            if kH == 2 and kW == 2 and sH == 2 and sW == 2:
+            if (
+                kH == 2 and kW == 2 and sH == 2 and sW == 2
+                and (self._use_sparse_output or getattr(x, '_packed_batch', False))
+            ):
                 return self._forward_he_rotation(x)
             return self._forward_he_packed(x)
         else:
@@ -422,10 +433,7 @@ class EncryptedAvgPool2d(EncryptedModule):
         kH, kW = self.kernel_size
         sH, sW = self.stride
         
-        # Only optimize for 2x2 pool with stride 2 for now
-        # For large spatial dimensions, the rotation-based path can fail on GPU
-        # due to automorphism key loading issues. Fall back to matmul.
-        if kH != 2 or kW != 2 or sH != 2 or sW != 2 or npp > 256:
+        if kH != 2 or kW != 2 or sH != 2 or sW != 2:
             return self._forward_he_packed(x)
         
         out_H = H // sH

@@ -63,6 +63,8 @@ class EncryptedTensor:
     """
     
     __slots__ = (
+        "__dict__",
+        "__weakref__",
         "_cipher",
         "_owns_cipher",
         "_shape",
@@ -113,14 +115,11 @@ class EncryptedTensor:
 
     @property
     def _sigma_factor(self) -> Optional["EncryptedTensor"]:
-        if self._sigma_factor_ref is None:
-            return None
-        return self._sigma_factor_ref()
+        return self._sigma_factor_ref
 
     @_sigma_factor.setter
     def _sigma_factor(self, value: Optional["EncryptedTensor"]) -> None:
-        import weakref
-        self._sigma_factor_ref = weakref.ref(value) if value else None
+        self._sigma_factor_ref = value
 
     def __del__(self):
         try:
@@ -154,6 +153,19 @@ class EncryptedTensor:
         if self._packed_batch and self._batch_size is not None and self._slots_per_sample is not None:
             return int(self._batch_size) * int(self._slots_per_sample)
         return self.size
+
+    def _cipher_slot_count(self) -> int:
+        data = getattr(self._cipher, "data", None)
+        if data is not None and hasattr(data, "numel"):
+            return int(data.numel())
+
+        cipher_context = getattr(self._cipher, "context", None)
+        config = getattr(cipher_context, "config", None)
+        num_slots = getattr(config, "num_slots", None)
+        if num_slots is not None:
+            return int(num_slots)
+
+        return int(self._cipher.size)
 
     def _packed_sample_dims(self) -> Optional[Tuple[int, ...]]:
         if not self._packed_batch:
@@ -224,6 +236,76 @@ class EncryptedTensor:
         if accumulator is None:
             raise RuntimeError("matmul_diagonal_bsgs produced no accumulator")
         return accumulator
+
+    def _reduce_slots(self, length: int) -> "EncryptedTensor":
+        if length <= 0:
+            raise ValueError(f"length must be positive, got {length}")
+
+        tensor = self
+        if length != self.size:
+            prefix_mask = [1.0] * length + [0.0] * (self.size - length)
+            tensor = self.mul(prefix_mask).rescale()
+
+        reduced_cipher = tensor._cipher.sum_slots()
+        slot_count = tensor._cipher_slot_count()
+        if hasattr(reduced_cipher, "shape"):
+            reduced_cipher.shape = (slot_count,)
+        if hasattr(reduced_cipher, "size"):
+            reduced_cipher.size = slot_count
+
+        result = EncryptedTensor(reduced_cipher, tensor._shape, tensor._context, tensor._depth)
+        result._needs_rescale = tensor._needs_rescale
+        result._copy_runtime_metadata_from(tensor)
+        return result
+
+    def _pack_scalar_outputs(self, outputs: Sequence["EncryptedTensor"]) -> "EncryptedTensor":
+        if not outputs:
+            raise ValueError("outputs must not be empty")
+
+        slot_count = self._cipher_slot_count()
+        result: Optional[EncryptedTensor] = None
+        for idx, output in enumerate(outputs):
+            shifted = output if idx == 0 else output.rotate(-idx)
+            mask = [0.0] * slot_count
+            mask[idx] = 1.0
+            packed = shifted.mul(mask).rescale()
+            result = packed if result is None else result.add(packed)
+
+        assert result is not None
+        result._shape = (len(outputs),)
+        result._copy_runtime_metadata_from(self)
+        return result
+
+    def _matmul_small_output(
+        self,
+        weight_2d: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        *,
+        weight_list: list | None = None,
+        bias_list: list | None = None,
+    ) -> "EncryptedTensor":
+        out_features, in_features = weight_2d.shape
+        slot_count = self._cipher.size
+        weight_rows = weight_list if weight_list is not None else weight_2d.tolist()
+
+        outputs: List[EncryptedTensor] = []
+        for row_idx in range(out_features):
+            row_weights = weight_rows[row_idx]
+            plain_row = [0.0] * slot_count
+            plain_row[:in_features] = [float(value) for value in row_weights[:in_features]]
+            masked = self.mul(plain_row).rescale()
+            outputs.append(masked._reduce_slots(in_features))
+
+        result = self._pack_scalar_outputs(outputs)
+
+        if bias is not None:
+            if bias_list is not None:
+                result = result.add(bias_list)
+            else:
+                bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+                result = result.add(bias_flat.tolist())
+
+        return result
     
     def _propagate_batch_meta(self, result: "EncryptedTensor") -> "EncryptedTensor":
         """Copy packed-batch metadata from *self* to *result*.
@@ -876,6 +958,7 @@ class EncryptedTensor:
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
         *,
+        use_bsgs: Optional[bool] = None,
         weight_list: list | None = None,
         bias_list: list | None = None,
         weight_hash: int = 0,
@@ -890,7 +973,7 @@ class EncryptedTensor:
         if weight_2d.ndim == 1:
             weight_2d = weight_2d.unsqueeze(0)
 
-        use_bsgs = getattr(tensor._context, 'use_bsgs', False)
+        resolved_use_bsgs = getattr(tensor._context, 'use_bsgs', False) if use_bsgs is None else use_bsgs
 
         if tensor._packed_batch and tensor._batch_size is not None and tensor._slots_per_sample is not None:
             batch_size = tensor._batch_size
@@ -935,16 +1018,27 @@ class EncryptedTensor:
 
             return result
         
-        if use_bsgs:
+        out_features = weight_2d.shape[0]
+        in_features = weight_2d.shape[1]
+        use_small_output = out_features <= 16 and out_features < in_features
+
+        if use_small_output:
+            result = tensor._matmul_small_output(
+                weight_2d,
+                bias,
+                weight_list=weight_list,
+                bias_list=bias_list,
+            )
+        elif resolved_use_bsgs:
             weight_list = weight_list if weight_list is not None else weight_2d.tolist()
             max_dim = getattr(tensor._context, '_max_rotation_dim', None)
-            in_features = weight_2d.shape[1]
             # IMPORTANT: bsgs_n1 must match the n1 used when generating rotation keys
             # to ensure the required rotations (baby steps 0..n1-1, giant steps n1, 2*n1, ...)
             # are available. Use max_dim for n1 calculation, not actual in_features.
             bsgs_dim = max_dim if max_dim else in_features
             bsgs_n1 = max(1, int(math.ceil(math.sqrt(bsgs_dim))))
             bsgs_n2 = (in_features + bsgs_n1 - 1) // bsgs_n1
+
             new_cipher = tensor._cipher.matmul_bsgs(weight_list, bsgs_n1, bsgs_n2,
                                                     weight_hash=weight_hash,
                                                     diag_nonzero=diag_nonzero)
@@ -955,18 +1049,19 @@ class EncryptedTensor:
             new_cipher = tensor._cipher.matmul_dense(w_list)
             result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)
             tensor._propagate_batch_meta(result)
-        
-        result = result.rescale()
-        result._cnn_layout = EncryptedTensor._copy_cnn_layout(tensor._cnn_layout)
-        result._packing_layout = tensor._packing_layout
-        result._sigma_factor = tensor._sigma_factor
 
-        if bias is not None:
-            if bias_list is not None:
-                result = result.add(bias_list)
-            else:
-                bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
-                result = result.add(bias_flat.tolist())
+        if not use_small_output:
+            result = result.rescale()
+            result._cnn_layout = EncryptedTensor._copy_cnn_layout(tensor._cnn_layout)
+            result._packing_layout = tensor._packing_layout
+            result._sigma_factor = tensor._sigma_factor
+
+            if bias is not None:
+                if bias_list is not None:
+                    result = result.add(bias_list)
+                else:
+                    bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+                    result = result.add(bias_flat.tolist())
         
         return result
     
@@ -1376,8 +1471,10 @@ class EncryptedTensor:
         
         if cipher_data is not None:
             dummy_tensor = torch.zeros(math.prod(shape) if shape else 1)
-            context._ensure_initialized()
-            cipher = context._ctx.encrypt(dummy_tensor)
+            if hasattr(context, '_ensure_initialized'):
+                context._ensure_initialized()
+            backend_context = getattr(context, '_ctx', context)
+            cipher = backend_context.encrypt(dummy_tensor)
             setattr(cipher, 'data', cipher_data)
             setattr(cipher, 'shape', shape)
             setattr(cipher, 'size', int(math.prod(shape)) if shape else 1)

@@ -115,6 +115,8 @@ def encrypted_std(
         Statistical Analysis Framework. CIKM'25.
     """
     _check_size_limit(enc_tensor)
+    if epsilon < 0.1:
+        raise ValueError(f"epsilon must be >= 0.1, got {epsilon}")
 
     var = encrypted_variance(enc_tensor)
     var_eps = var.add(epsilon)
