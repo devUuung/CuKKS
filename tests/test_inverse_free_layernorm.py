@@ -263,19 +263,18 @@ class TestConverterInverseFreeIntegration:
         model = TwoLNLinearReLU(16).eval()
         options = ConversionOptions(architecture="stip")
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         # norm1 is eligible → should be inverse-free
         assert isinstance(enc_model["norm1"], EncryptedInverseFreeLayerNorm)
         # norm2 is NOT eligible (no LN after it) → standard
         assert isinstance(enc_model["norm2"], EncryptedLayerNorm)
 
-    def test_default_architecture_never_uses_inverse_free(self):
-        """Default architecture should never produce inverse-free LNs."""
+    def test_inverse_free_disabled_never_uses_inverse_free(self):
         model = TwoLNLinearReLU(16).eval()
-        options = ConversionOptions(architecture="default")
+        options = ConversionOptions(inverse_free_layernorm=False)
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         assert isinstance(enc_model["norm1"], EncryptedLayerNorm)
         assert isinstance(enc_model["norm2"], EncryptedLayerNorm)
@@ -285,7 +284,7 @@ class TestConverterInverseFreeIntegration:
         model = TwoLNWithGELU(16).eval()
         options = ConversionOptions(architecture="stip")
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         assert isinstance(enc_model["norm1"], EncryptedLayerNorm)
         assert isinstance(enc_model["norm2"], EncryptedLayerNorm)
@@ -295,7 +294,7 @@ class TestConverterInverseFreeIntegration:
         model = ThreeLNChain(16).eval()
         options = ConversionOptions(architecture="stip")
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         assert isinstance(enc_model["norm1"], EncryptedInverseFreeLayerNorm)
         assert isinstance(enc_model["norm2"], EncryptedInverseFreeLayerNorm)
@@ -306,7 +305,7 @@ class TestConverterInverseFreeIntegration:
         model = TwoLNWithDropout(16).eval()
         options = ConversionOptions(architecture="stip")
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         assert isinstance(enc_model["norm1"], EncryptedInverseFreeLayerNorm)
 
@@ -328,6 +327,33 @@ class TestConverterInverseFreeIntegration:
 
         # Should complete without error
         assert enc_model is not None
+
+    def test_default_architecture_uses_inverse_free_when_eligible(self):
+        model = TwoLNLinearReLU(16).eval()
+        options = ConversionOptions(architecture="default")
+        converter = ModelConverter(options)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
+
+        assert isinstance(enc_model["norm1"], EncryptedInverseFreeLayerNorm)
+        assert isinstance(enc_model["norm2"], EncryptedLayerNorm)
+
+    def test_default_architecture_three_ln_chain(self):
+        model = ThreeLNChain(16).eval()
+        options = ConversionOptions(architecture="default")
+        converter = ModelConverter(options)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
+
+        assert isinstance(enc_model["norm1"], EncryptedInverseFreeLayerNorm)
+        assert isinstance(enc_model["norm2"], EncryptedInverseFreeLayerNorm)
+        assert isinstance(enc_model["norm3"], EncryptedLayerNorm)
+
+    def test_single_ln_stays_standard_default_arch(self):
+        model = SingleLN(16).eval()
+        options = ConversionOptions(architecture="default")
+        converter = ModelConverter(options)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
+
+        assert isinstance(enc_model["norm"], EncryptedLayerNorm)
 
 
 # ============================================================================
@@ -365,7 +391,7 @@ class TestNestedPathTracking:
         model = NestedTransformerBlock(16).eval()
         options = ConversionOptions(architecture="stip")
         converter = ModelConverter(options)
-        enc_model = converter.convert(model)
+        enc_model = __import__("typing").cast(__import__("typing").Any, converter.convert(model))
 
         # The model converts to EncryptedSequential with a nested EncryptedSequential
         # for self.block. Access the inner block's first element (LN).
@@ -378,7 +404,7 @@ class TestNestedPathTracking:
 # Bias scaling (σ propagation) tests
 # ============================================================================
 
-def _patch_mock_backend(monkeypatch):
+def _patch_mock_backend(monkeypatch: pytest.MonkeyPatch):
     from tests.mocks.mock_backend import MockCKKSConfig, MockCKKSContext
     import cukks.context as ctx_module
 
@@ -389,7 +415,7 @@ def _patch_mock_backend(monkeypatch):
 
 class TestSigmaFactorPropagation:
 
-    def test_inverse_free_ln_stores_sigma_on_output(self, monkeypatch):
+    def test_inverse_free_ln_stores_sigma_on_output(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -401,7 +427,7 @@ class TestSigmaFactorPropagation:
 
         assert result._sigma_factor is not None
 
-    def test_standard_ln_clears_sigma(self, monkeypatch):
+    def test_standard_ln_clears_sigma(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -416,7 +442,7 @@ class TestSigmaFactorPropagation:
         out = enc_std_ln(mid)
         assert out._sigma_factor is None
 
-    def test_sigma_propagates_through_operations(self, monkeypatch):
+    def test_sigma_propagates_through_operations(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -432,7 +458,7 @@ class TestSigmaFactorPropagation:
         cloned = mid.clone()
         assert cloned._sigma_factor is not None
 
-    def test_linear_uses_sigma_for_bias_scaling(self, monkeypatch):
+    def test_linear_uses_sigma_for_bias_scaling(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -449,7 +475,7 @@ class TestSigmaFactorPropagation:
 
         assert out._sigma_factor is not None
 
-    def test_linear_without_sigma_uses_normal_path(self, monkeypatch):
+    def test_linear_without_sigma_uses_normal_path(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -462,7 +488,7 @@ class TestSigmaFactorPropagation:
 
         assert out._sigma_factor is None
 
-    def test_linear_no_bias_ignores_sigma(self, monkeypatch):
+    def test_linear_no_bias_ignores_sigma(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         _patch_mock_backend(monkeypatch)
 
@@ -478,7 +504,7 @@ class TestSigmaFactorPropagation:
 
         assert out._sigma_factor is not None
 
-    def test_full_chain_inv_ln_linear_relu_std_ln(self, monkeypatch):
+    def test_full_chain_inv_ln_linear_relu_std_ln(self, monkeypatch: pytest.MonkeyPatch):
         from cukks import CKKSInferenceContext
         from cukks.nn import EncryptedReLU
         _patch_mock_backend(monkeypatch)
@@ -499,3 +525,47 @@ class TestSigmaFactorPropagation:
         assert h._sigma_factor is not None
         h = std_ln(h)
         assert h._sigma_factor is None
+
+
+class TestLayerNormDepthEstimation:
+
+    def test_estimate_depth_counts_standard_layernorm(self):
+        from cukks.context import _estimate_model_depth
+
+        model = SingleLN(16).eval()
+        depth = _estimate_model_depth(model)
+        assert depth == 19
+
+    def test_estimate_depth_counts_inverse_free_layernorm(self):
+        from cukks.context import _estimate_model_depth
+
+        model = TwoLNLinearReLU(16).eval()
+        # norm1(5) + Linear(1) + ReLU(3) + norm2(18) = 27
+        depth_mixed = _estimate_model_depth(
+            model, inverse_free_ln_names=frozenset({"norm1"})
+        )
+        assert depth_mixed == 27
+
+    def test_estimate_depth_all_standard_when_no_inverse_free(self):
+        from cukks.context import _estimate_model_depth
+
+        model = TwoLNLinearReLU(16).eval()
+        # norm1(18) + Linear(1) + ReLU(3) + norm2(18) = 40
+        depth = _estimate_model_depth(model)
+        assert depth == 40
+
+    def test_estimate_depth_savings_with_inverse_free(self):
+        from cukks.context import _estimate_model_depth
+
+        model = ThreeLNChain(16).eval()
+        # All standard: norm1(18) + Linear(1) + ReLU(3) + norm2(18) + Linear(1) + ReLU(3) + norm3(18) = 62
+        depth_standard = _estimate_model_depth(model)
+        assert depth_standard == 62
+
+        # norm1, norm2 inverse-free: 5 + 1 + 3 + 5 + 1 + 3 + 18 = 36
+        depth_mixed = _estimate_model_depth(
+            model, inverse_free_ln_names=frozenset({"norm1", "norm2"})
+        )
+        assert depth_mixed == 36
+        # 26 levels saved (62 - 36)
+        assert depth_standard - depth_mixed == 26

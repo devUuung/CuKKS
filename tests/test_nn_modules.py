@@ -817,12 +817,15 @@ class TestConverterNewModules:
         from cukks import CKKSInferenceContext
         from tests.mocks.mock_backend import MockCKKSContext, MockCKKSConfig
         import cukks.backend_loader as bl_module
+        import cukks.context as ctx_module
 
         def mock_load_backend():
             return MockCKKSConfig, MockCKKSContext
 
         monkeypatch.setattr(bl_module, "load_backend", mock_load_backend)
         monkeypatch.setattr(bl_module, "_cache", None, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSConfig", None, raising=False)
+        monkeypatch.setattr(ctx_module, "CKKSContext", None, raising=False)
 
         torch.manual_seed(0)
         torch_attn = nn.MultiheadAttention(embed_dim=4, num_heads=2, batch_first=True)
