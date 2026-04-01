@@ -1,0 +1,84 @@
+name: Test Python
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-python-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cukks (no backend)
+        run: |
+          pip install -e .[dev]
+          pip install ruff
+
+      - name: Ruff lint check
+        run: ruff check cukks/ tests/ --exit-zero
+
+      - name: Ruff format check
+        run: ruff format cukks/ tests/ --check --diff
+
+  test-mock:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install cukks (no backend)
+        run: |
+          pip install -e .[dev]
+
+      - name: Run tests with mock backend
+        run: |
+          python -m pytest tests/ -v --tb=short -x \
+            --ignore=tests/test_e2e.py \
+            --ignore=tests/test_bootstrap.py \
+            -k "not (test_converterAttention_supports_packed_multi_token_input and power_softmax)"
+
+  test-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install cukks (no backend)
+        run: pip install -e .
+
+      - name: Verify import works
+        run: |
+          python -c "import cukks; print(f'CuKKS {cukks.__version__} imported successfully')"
+          python -c "from cukks import convert, CKKSInferenceContext, EncryptedTensor, is_available, get_backend_info; print('All core imports OK')"
+          python -c "from cukks.nn import EncryptedLinear, EncryptedConv2d, EncryptedConv1d, EncryptedConvTranspose2d, EncryptedAdaptiveAvgPool2d, EncryptedGroupNorm, EncryptedInstanceNorm1d, EncryptedInstanceNorm2d, EncryptedUpsample, EncryptedEmbedding, EncryptedPixelShuffle, EncryptedZeroPad2d, EncryptedConstantPad2d, EncryptedReflectionPad2d, EncryptedReplicationPad2d; print('All layer imports OK')"

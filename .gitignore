@@ -57,6 +57,8 @@ data/
 # Paper-specific benchmarks and scripts
 bench_*.py
 run_*.py
+!benchmarks/
+!benchmarks/*.py
 generate_*.py
 REFERENCES.md
 
