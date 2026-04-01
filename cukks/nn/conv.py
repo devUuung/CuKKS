@@ -464,6 +464,43 @@ class EncryptedConv2d(EncryptedModule):
             accumulator._slots_per_sample = (num_patches // batch_size) * self.out_channels
         return accumulator
 
+    @staticmethod
+    def required_packed_compact_rotations(
+        num_patches: int,
+        patch_features: int,
+        out_channels: int,
+    ) -> list[int]:
+        """Compute the set of rotation indices needed by the compact BSGS path.
+
+        Returns a sorted list of non-zero rotation indices that must be
+        pre-generated as rotation keys before running encrypted inference.
+        """
+        import math as _math
+
+        total_in = num_patches * patch_features
+        C = out_channels
+        K = patch_features
+
+        nonzero_diags: set = set()
+        for p in range(num_patches):
+            for delta in range(-(C - 1), K):
+                nonzero_diags.add((p * (K - C) + delta) % total_in)
+
+        num_diags = len(nonzero_diags)
+        if num_diags == 0:
+            return []
+
+        g = max(1, _math.ceil(_math.sqrt(num_diags)))
+        rotations: set = set()
+        for d in nonzero_diags:
+            baby = d % g
+            giant = (d // g) * g
+            if baby != 0:
+                rotations.add(baby)
+            if giant != 0:
+                rotations.add(giant)
+        return sorted(rotations)
+
     def _get_packed_compact_offsets(
         self,
         num_patches: int,

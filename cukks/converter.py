@@ -959,6 +959,7 @@ def convert(
             enable_bootstrap=enable_bootstrap,
             batch_size=batch_size,
             architecture=architecture,
+            input_shape=input_shape,
         )
     
     if cnn_config is not None and hasattr(converter, '_last_cnn_layout') and converter._last_cnn_layout:

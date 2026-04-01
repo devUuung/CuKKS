@@ -423,7 +423,9 @@ class EncryptedAvgPool2d(EncryptedModule):
         sH, sW = self.stride
         
         # Only optimize for 2x2 pool with stride 2 for now
-        if kH != 2 or kW != 2 or sH != 2 or sW != 2:
+        # For large spatial dimensions, the rotation-based path can fail on GPU
+        # due to automorphism key loading issues. Fall back to matmul.
+        if kH != 2 or kW != 2 or sH != 2 or sW != 2 or npp > 256:
             return self._forward_he_packed(x)
         
         out_H = H // sH

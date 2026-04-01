@@ -781,9 +781,41 @@ class CKKSInferenceContext:
         neg_rotations = [-r for r in rotations if r > 0]
         rotations = sorted(set(rotations + neg_rotations))
 
-        # Add CNN-specific rotations (pooling offsets, etc.)
+        # Add CNN-specific rotations for each Conv2d layer's compact BSGS path.
+        # The compact conv uses its own BSGS decomposition based on the actual
+        # diagonal count, which can differ from the generic max_dim-based planning.
         if has_conv:
             input_shape = kwargs.pop("input_shape", input_shape)
+            spatial_h, spatial_w = 28, 28
+            if input_shape is not None:
+                if len(input_shape) == 4:
+                    spatial_h, spatial_w = int(input_shape[2]), int(input_shape[3])
+                elif len(input_shape) >= 2:
+                    spatial_h, spatial_w = int(input_shape[-2]), int(input_shape[-1])
+
+            from .nn.conv import EncryptedConv2d as _EC
+
+            cur_h, cur_w = spatial_h, spatial_w
+            for module in model.modules():
+                if isinstance(module, torch.nn.Conv2d):
+                    kh, kw = (module.kernel_size, module.kernel_size) if isinstance(module.kernel_size, int) else module.kernel_size
+                    sh, sw = (module.stride, module.stride) if isinstance(module.stride, int) else module.stride
+                    ph, pw = (module.padding, module.padding) if isinstance(module.padding, int) else module.padding
+
+                    out_h = (cur_h + 2 * ph - kh) // sh + 1
+                    out_w = (cur_w + 2 * pw - kw) // sw + 1
+                    num_patches = out_h * out_w
+                    patch_features = module.in_channels * kh * kw
+
+                    conv_rots = _EC.required_packed_compact_rotations(
+                        num_patches, patch_features, module.out_channels,
+                    )
+                    rotations.extend(conv_rots)
+                    rotations.extend([-r for r in conv_rots])
+
+                    cur_h, cur_w = out_h, out_w
+
+            # Also add pooling rotations
             if input_shape is not None and len(input_shape) >= 2:
                 cnn_h, cnn_w = int(input_shape[-2]), int(input_shape[-1])
             else:
