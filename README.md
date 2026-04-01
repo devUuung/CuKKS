@@ -16,11 +16,25 @@
 </p>
 
 <p align="center">
-  Run trained PyTorch models on <strong>encrypted data</strong> — preserving privacy while maintaining accuracy.<br>
+  Run trained PyTorch models on <strong>encrypted data</strong> — no decryption needed, no privacy compromised.<br>
   Built on OpenFHE with CUDA acceleration.
 </p>
 
 ---
+
+## Why CuKKS?
+
+Traditional machine learning requires access to raw input data — a privacy risk for sensitive domains like healthcare, finance, and biometrics. CuKKS lets you **deploy models that never see plaintext**:
+
+```
+User: encrypt(input) → [ciphertext] → Server: model([ciphertext]) → [encrypted output] → User: decrypt
+```
+
+The server performs full inference without ever decrypting the data. CuKKS makes this practical with:
+
+- **One-line conversion** — `cukks.convert(model)` transforms any trained PyTorch model
+- **GPU acceleration** — CUDA-accelerated HE operations via OpenFHE
+- **37 layer types** — from Linear and Conv2d to Attention, GroupNorm, and ConvTranspose2d
 
 ## Quick Start
 
@@ -28,94 +42,51 @@
 import torch.nn as nn
 import cukks
 
-# 1. Define and train your model (standard PyTorch)
+# 1. Train your model normally
 model = nn.Sequential(nn.Linear(784, 128), nn.ReLU(), nn.Linear(128, 10))
 
-# 2. Convert to encrypted model (polynomial ReLU approximation)
+# 2. Convert to encrypted model
 enc_model, ctx = cukks.convert(model)
 
 # 3. Run encrypted inference
 enc_input = ctx.encrypt(test_input)
 enc_output = enc_model(enc_input)
-output = ctx.decrypt(enc_output)
+output = ctx.decrypt(enc_output)  # Same result, never decrypted on server
 ```
 
 ## Installation
 
-### Option 1: Install with extras (Recommended)
-
-Install cukks and the GPU backend matching your PyTorch CUDA version in one command:
-
 ```bash
-# CUDA 12.1 (choose the one matching your PyTorch CUDA version)
-pip install cukks[cu121]
+pip install cukks[cu121]  # Match your PyTorch CUDA version: cu118, cu121, cu124, cu128
 ```
 
-| Command | CUDA | Supported GPUs |
-|---------|------|----------------|
+| Command | CUDA | GPUs |
+|---------|------|------|
 | `pip install cukks[cu118]` | 11.8 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `pip install cukks[cu121]` | 12.1 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `pip install cukks[cu124]` | 12.4 | V100, T4, RTX 20/30/40xx, A100, H100 |
 | `pip install cukks[cu128]` | 12.8 | All above + **RTX 50xx** |
 
-### Option 2: Check CUDA version first
-
-```python
-import torch
-print(torch.version.cuda)  # prints e.g., '12.1'
-```
-
-Then install with the matching extras command above.
-
-### Option 3: Install backend separately
-
-```bash
-# Install the backend first, then cukks
-pip install cukks-cu121
-pip install cukks
-```
-
-Or use the CLI for auto-detection:
-
-```bash
-pip install cukks
-cukks-install-backend  # Auto-detects PyTorch CUDA and installs the matching backend
-```
+Not sure which CUDA version? Run `python -c "import torch; print(torch.version.cuda)"`.
 
 <details>
-<summary><strong>Post-install CLI & environment variables</strong></summary>
+<summary><strong>Docker, CLI tools, and building from source</strong></summary>
 
-```bash
-cukks-install-backend             # Auto-detect & install
-cukks-install-backend cu128       # Install specific backend
-cukks-install-backend --status    # Show CUDA compatibility status
-```
-
-| Variable | Effect |
-|----------|--------|
-| `CUKKS_BACKEND=cukks-cu128` | Force a specific backend |
-
-</details>
-
-<details>
-<summary><strong>Docker images</strong></summary>
-
-| CUDA | Compatible Docker Images |
-|------|-------------------------|
-| 11.8 | `pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime` |
-| 12.1 | `pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime` |
-| 12.4 | `pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime` |
-| 12.8 | `nvidia/cuda:12.8.0-cudnn9-runtime-ubuntu22.04` |
+### Docker
 
 ```bash
 docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
-pip install cukks[cu121]  # Install for CUDA 12.1
+pip install cukks[cu121]
 ```
 
-</details>
+### Auto-install CLI
 
-<details>
-<summary><strong>Build from source</strong></summary>
+```bash
+pip install cukks
+cukks-install-backend  # Auto-detects PyTorch CUDA and installs matching backend
+```
+
+### Build from source
 
 ```bash
 git clone https://github.com/devUuung/CuKKS.git && cd CuKKS
@@ -131,111 +102,74 @@ pip install -e .
 
 </details>
 
-## Features
+## Key Features
 
-| Feature | Description |
-|---------|-------------|
-| **PyTorch API** | Familiar interface — just call `cukks.convert(model)` |
-| **GPU Acceleration** | CUDA-accelerated HE operations via OpenFHE |
-| **Auto Optimization** | BatchNorm folding, BSGS matrix multiplication |
-| **37 Layer Types** | Conv1d/2d, ConvTranspose2d, Pool, Norm, Attention, Embedding, Upsample, Padding |
+### Drop-in Model Conversion
 
-## Supported Layers
-
-| Layer | Encrypted Version | Notes |
-|-------|------------------|-------|
-| `nn.Linear` | `EncryptedLinear` | BSGS optimization |
-| `nn.Conv1d` | `EncryptedConv1d` | 1D im2col method |
-| `nn.Conv2d` | `EncryptedConv2d` | im2col method |
-| `nn.ConvTranspose2d` | `EncryptedConvTranspose2d` | Transposed convolution |
-| `nn.ReLU/GELU/SiLU` | Polynomial approx | Configurable degree |
-| `nn.Sigmoid/Tanh` | Polynomial approx | Chebyshev fitting |
-| `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
-| `nn.MaxPool2d` | `EncryptedMaxPool2d` | Polynomial approx |
-| `nn.AdaptiveAvgPool2d` | `EncryptedAdaptiveAvgPool2d` | Global-pool fast path |
-| `nn.BatchNorm` | Folded | Merged into prev layer |
-| `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial approx |
-| `nn.GroupNorm` | `EncryptedGroupNorm` | Per-group polynomial |
-| `nn.InstanceNorm` | `EncryptedInstanceNorm1d/2d` | Per-channel polynomial |
-| `nn.Attention` | `EncryptedApproxAttention` | seq_len ≤ 8 packed |
-| `nn.Embedding` | `EncryptedEmbedding` | One-hot matmul |
-| `nn.Upsample` | `EncryptedUpsample` | Nearest/bilinear |
-| `nn.PixelShuffle` | `EncryptedPixelShuffle` | Channel-to-spatial |
-| `nn.ZeroPad2d` | `EncryptedZeroPad2d` | Scatter matrix |
-| `nn.ConstantPad2d` | `EncryptedConstantPad2d` | Scatter + constant |
-| `nn.ReflectionPad2d` | `EncryptedReflectionPad2d` | Reflection mapping |
-| `nn.ReplicationPad2d` | `EncryptedReplicationPad2d` | Replication mapping |
-
-<details>
-<summary><strong>Full layer support table</strong></summary>
-
-| PyTorch Layer | Encrypted Version | Notes |
-|--------------|-------------------|-------|
-| `nn.Linear` | `EncryptedLinear` | Full support with BSGS optimization |
-| `nn.Conv1d` | `EncryptedConv1d` | 1D im2col method |
-| `nn.Conv2d` | `EncryptedConv2d` | Via im2col method |
-| `nn.ConvTranspose2d` | `EncryptedConvTranspose2d` | Transposed convolution (deconvolution) |
-| `nn.ReLU` | `EncryptedReLU` | Polynomial approximation |
-| `nn.GELU` | `EncryptedGELU` | Polynomial approximation |
-| `nn.SiLU` | `EncryptedSiLU` | Polynomial approximation |
-| `nn.Sigmoid` | `EncryptedSigmoid` | Polynomial approximation |
-| `nn.Tanh` | `EncryptedTanh` | Polynomial approximation |
-| `nn.AvgPool2d` | `EncryptedAvgPool2d` | Full support |
-| `nn.MaxPool2d` | `EncryptedMaxPool2d` | Approximate via polynomial |
-| `nn.AdaptiveAvgPool2d` | `EncryptedAdaptiveAvgPool2d` | Dynamic kernel/stride, global-pool fast path |
-| `nn.Flatten` | `EncryptedFlatten` | Logical reshape |
-| `nn.BatchNorm1d/2d` | Folded | Merged into preceding layer |
-| `nn.GroupNorm` | `EncryptedGroupNorm` | Per-group polynomial inv-sqrt |
-| `nn.InstanceNorm1d/2d` | `EncryptedInstanceNorm1d/2d` | Per-channel polynomial |
-| `nn.Sequential` | `EncryptedSequential` | Full support |
-| `nn.Dropout` | `EncryptedDropout` | No-op during inference |
-| `nn.LayerNorm` | `EncryptedLayerNorm` | Pure HE polynomial approximation |
-| `nn.MultiheadAttention` | `EncryptedApproxAttention` | Taylor softmax (seq_len=1) or Power-Softmax (packed/list seq_len <= 8) |
-| `nn.Embedding` | `EncryptedEmbedding` | One-hot matmul with embedding table |
-| `nn.Upsample` | `EncryptedUpsample` | Nearest neighbor / bilinear interpolation |
-| `nn.PixelShuffle` | `EncryptedPixelShuffle` | Channel-to-spatial permutation |
-| `nn.PixelUnshuffle` | `EncryptedPixelUnshuffle` | Spatial-to-channel permutation |
-| `nn.ZeroPad2d` | `EncryptedZeroPad2d` | Zero-padding via scatter matrix |
-| `nn.ConstantPad2d` | `EncryptedConstantPad2d` | Constant padding |
-| `nn.ReflectionPad2d` | `EncryptedReflectionPad2d` | Reflection padding |
-| `nn.ReplicationPad2d` | `EncryptedReplicationPad2d` | Replication padding |
-
-</details>
-
-## Activation Functions
-
-CKKS only supports polynomial operations. CuKKS approximates activations (ReLU, GELU, SiLU, etc.) using polynomial fitting:
+No model rewriting. No custom HE code. Just call `cukks.convert(model)`:
 
 ```python
-# Default: degree-4 polynomial approximation (recommended)
+# Any PyTorch model — MLP, CNN, Transformer — converts automatically
+enc_model, ctx = cukks.convert(model, activation_degree=4)
+```
+
+BatchNorm folding, BSGS matrix multiplication, and CNN optimizations are applied automatically.
+
+### 37 Supported Layer Types
+
+| Category | Layers |
+|----------|--------|
+| **Linear** | Linear, BlockDiagonalLinear, BlockDiagLowRankLinear |
+| **Convolution** | Conv1d, Conv2d, ConvTranspose2d |
+| **Pooling** | AvgPool2d, MaxPool2d, AdaptiveAvgPool2d |
+| **Normalization** | LayerNorm, GroupNorm, InstanceNorm1d/2d, BatchNorm (folded) |
+| **Activation** | ReLU, GELU, SiLU, Sigmoid, Tanh, Square |
+| **Attention** | MultiheadAttention (seq_len ≤ 8) |
+| **Embedding** | Embedding |
+| **Spatial** | Upsample, PixelShuffle, PixelUnshuffle |
+| **Padding** | ZeroPad2d, ConstantPad2d, ReflectionPad2d, ReplicationPad2d |
+| **Other** | Flatten, Dropout, Sequential, ResidualBlock |
+
+[Full layer table →](#supported-layers)
+
+### GPU-Accelerated HE Operations
+
+All core HE operations run on GPU:
+
+| Operation | GPU |
+|-----------|-----|
+| Add / Sub / Mul / Square | ✅ |
+| Rotate / Rescale | ✅ |
+| Bootstrap | ✅ |
+| Plaintext cache | ✅ |
+
+### Polynomial Activation Approximation
+
+CKKS only supports polynomial operations. CuKKS approximates non-polynomial activations (ReLU, GELU, SiLU, etc.) using Chebyshev polynomial fitting:
+
+```python
+# Default: degree-4 (good accuracy / depth balance)
 enc_model, ctx = cukks.convert(model)
 
-# Higher degree for better accuracy (costs more multiplicative depth)
+# Higher degree for better accuracy (costs more depth)
 enc_model, ctx = cukks.convert(model, activation_degree=8)
 ```
 
-The default `activation_degree=4` provides a good balance between accuracy and depth consumption. Higher degrees approximate the original activation more closely but require deeper circuits.
+### Packed Batch Inference
 
-## GPU Acceleration
-
-| Operation | Accelerated |
-|-----------|-------------|
-| Add/Sub/Mul/Square | ✅ GPU |
-| Rotate/Rescale | ✅ GPU |
-| Bootstrap | ✅ GPU |
-| Encrypt/Decrypt | CPU |
+Process multiple samples in a single ciphertext:
 
 ```python
-from ckks.torch_api import CKKSContext, CKKSConfig
-
-config = CKKSConfig(poly_mod_degree=8192, scale_bits=40)
-ctx = CKKSContext(config, enable_gpu=True)  # GPU enabled by default
+samples = [torch.randn(784) for _ in range(8)]
+enc_batch = ctx.encrypt_batch(samples)
+enc_output = enc_model(enc_batch)
+outputs = ctx.decrypt_batch(enc_output, sample_shape=(8,))
 ```
 
 ## Examples
 
 ```bash
-# MNIST encrypted inference
+# MNIST classification (MLP)
 python examples/mnist_encrypted.py --hidden 64 --samples 5
 
 # UNet-style segmentation (ConvTranspose2d, AdaptiveAvgPool2d, Upsample)
@@ -248,75 +182,50 @@ python examples/resnet_encrypted.py --samples 1
 python examples/transformer_encrypted.py --samples 2
 ```
 
-## Contributing
+See [examples/](examples/) for full scripts.
 
-External contributions are welcome.
+## Supported Layers
 
-If you want to contribute to CuKKS, start here first:
-
-- [Contributor workflow](CONTRIBUTING.md)
-- [CI/CD overview](docs/ci-cd.md)
-
-- start with an issue using the templates in `.github/ISSUE_TEMPLATE/`
-- open a PR using `.github/pull_request_template.md`
-- maintainers assign milestones and cut releases from closed milestones
-
-Read:
-
-- [Contributor workflow](CONTRIBUTING.md)
-- [CI/CD overview](docs/ci-cd.md)
-- [Milestone release operations](RELEASING.md)
-
-<details>
-<summary><strong>CNN example</strong></summary>
-
-```python
-import torch.nn as nn
-import cukks
-
-class MNISTCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
-        self.act1 = nn.ReLU()
-        self.pool1 = nn.AvgPool2d(2)
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(8 * 14 * 14, 10)
-    
-    def forward(self, x):
-        return self.fc(self.flatten(self.pool1(self.act1(self.conv1(x)))))
-
-model = MNISTCNN()
-enc_model, ctx = cukks.convert(model)
-
-enc_input = ctx.encrypt(image)
-prediction = ctx.decrypt(enc_model(enc_input)).argmax()
-```
-
-> **Note**: All operations in `forward()` must be layer attributes (e.g., `self.act1`), not inline operations like `x ** 2`.
-
-</details>
-
-<details>
-<summary><strong>Batch processing</strong></summary>
-
-```python
-# Pack multiple samples into a single ciphertext (SIMD)
-samples = [torch.randn(784) for _ in range(8)]
-enc_batch = ctx.encrypt_batch(samples)
-enc_output = enc_model(enc_batch)
-outputs = ctx.decrypt_batch(enc_output, num_samples=8)
-```
-
-</details>
+| PyTorch Layer | Encrypted Version | Notes |
+|---------------|-------------------|-------|
+| `nn.Linear` | `EncryptedLinear` | BSGS optimization |
+| `nn.Conv1d` | `EncryptedConv1d` | 1D im2col |
+| `nn.Conv2d` | `EncryptedConv2d` | im2col, BSGS |
+| `nn.ConvTranspose2d` | `EncryptedConvTranspose2d` | Transposed convolution |
+| `nn.ReLU` | `EncryptedReLU` | Polynomial approx |
+| `nn.GELU` | `EncryptedGELU` | Polynomial approx |
+| `nn.SiLU` | `EncryptedSiLU` | Polynomial approx |
+| `nn.Sigmoid` | `EncryptedSigmoid` | Polynomial approx |
+| `nn.Tanh` | `EncryptedTanh` | Polynomial approx |
+| `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
+| `nn.MaxPool2d` | `EncryptedMaxPool2d` | Polynomial approx |
+| `nn.AdaptiveAvgPool2d` | `EncryptedAdaptiveAvgPool2d` | Global-pool fast path |
+| `nn.Flatten` | `EncryptedFlatten` | Logical reshape |
+| `nn.BatchNorm1d/2d` | Folded | Merged into preceding layer |
+| `nn.GroupNorm` | `EncryptedGroupNorm` | Per-group polynomial |
+| `nn.InstanceNorm1d/2d` | `EncryptedInstanceNorm1d/2d` | Per-channel polynomial |
+| `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial 1/sqrt |
+| `nn.MultiheadAttention` | `EncryptedApproxAttention` | seq_len ≤ 8 |
+| `nn.Embedding` | `EncryptedEmbedding` | One-hot matmul |
+| `nn.Upsample` | `EncryptedUpsample` | Nearest / bilinear |
+| `nn.PixelShuffle` | `EncryptedPixelShuffle` | Channel-to-spatial |
+| `nn.PixelUnshuffle` | `EncryptedPixelUnshuffle` | Spatial-to-channel |
+| `nn.ZeroPad2d` | `EncryptedZeroPad2d` | Scatter matrix |
+| `nn.ConstantPad2d` | `EncryptedConstantPad2d` | Scatter + constant |
+| `nn.ReflectionPad2d` | `EncryptedReflectionPad2d` | Reflection mapping |
+| `nn.ReplicationPad2d` | `EncryptedReplicationPad2d` | Replication mapping |
+| `nn.Sequential` | `EncryptedSequential` | Full support |
+| `nn.Dropout` | `EncryptedDropout` | No-op during inference |
+| `nn.ResidualBlock` | `EncryptedResidualBlock` | Skip connection |
 
 ## Documentation
 
-- [Documentation Index](docs/README.md)
 - [API Reference](docs/api.md)
-- [GPU Acceleration Guide](docs/gpu-acceleration.md)
 - [CKKS Concepts](docs/concepts.md)
+- [GPU Acceleration Guide](docs/gpu-acceleration.md)
+- [STIP Packed Attention](docs/stip-attention.md)
 - [Examples Overview](docs/examples/README.md)
+- [한국어 문서](docs/ko/README.md)
 
 ## License
 
