@@ -14,6 +14,17 @@ pip install -e .
 
 ## Examples Overview
 
+### End-to-End Model Examples
+
+| Example | Description | Layers Demonstrated | Difficulty |
+|---------|-------------|--------------------|------------|
+| [mnist_encrypted.py](../../examples/mnist_encrypted.py) | MLP encrypted inference on MNIST | Linear, ReLU, Flatten | Beginner |
+| [unet_encrypted.py](../../examples/unet_encrypted.py) | UNet-style segmentation | Conv2d, ConvTranspose2d, AdaptiveAvgPool2d, Upsample, ZeroPad2d | Intermediate |
+| [resnet_encrypted.py](../../examples/resnet_encrypted.py) | ResNet-style classification | Conv2d, GroupNorm, AdaptiveAvgPool2d, ReLU, Linear | Intermediate |
+| [transformer_encrypted.py](../../examples/transformer_encrypted.py) | Tiny transformer NLP classifier | Embedding, LayerNorm, Linear, ReLU | Intermediate |
+
+### Core Feature Examples
+
 | Example | Description | Difficulty |
 |---------|-------------|------------|
 | [01_basic_encryption.py](01_basic_encryption.py) | Basic encryption/decryption | Beginner |
@@ -174,6 +185,58 @@ enc_result = enc_result.bootstrap()
 ```
 
 **Note:** Bootstrapping is computationally intensive. Prefer `crypto_inv_sqrt_shallow` when bootstrap-free alternatives are available.
+
+---
+
+## End-to-End Model Examples
+
+### UNet-Style Segmentation
+
+**File:** `examples/unet_encrypted.py`
+
+Demonstrates encrypted segmentation with a small UNet architecture:
+
+```bash
+python examples/unet_encrypted.py --samples 2
+```
+
+**Layers demonstrated:**
+- `Conv2d` → encoder feature extraction
+- `AdaptiveAvgPool2d` → bottleneck downsampling
+- `ConvTranspose2d` → decoder upsampling
+- `Upsample` → additional spatial expansion
+- `ZeroPad2d` → padding before convolution
+
+### ResNet-Style Classification
+
+**File:** `examples/resnet_encrypted.py`
+
+Demonstrates encrypted classification with GroupNorm and global average pooling:
+
+```bash
+python examples/resnet_encrypted.py --samples 1
+```
+
+**Layers demonstrated:**
+- `Conv2d` → feature extraction
+- `GroupNorm` → per-group normalization (replaces BatchNorm)
+- `AdaptiveAvgPool2d(1)` → global average pooling
+- `Linear` → classification head
+
+### Transformer-Style NLP
+
+**File:** `examples/transformer_encrypted.py`
+
+Demonstrates encrypted token classification with embedding:
+
+```bash
+python examples/transformer_encrypted.py --samples 2
+```
+
+**Layers demonstrated:**
+- `Embedding` (plaintext) → token to vector lookup
+- `LayerNorm` → normalization
+- `Linear` + `ReLU` → encrypted classifier head
 
 ---
 

@@ -19,15 +19,24 @@ This document provides complete API documentation for CuKKS.
   - [EncryptedConv2d](#encryptedconv2d)
   - [Activation Functions](#activation-functions)
   - [EncryptedSequential](#encryptedsequential)
-  - [Other Layers](#other-layers)
-    - [EncryptedFlatten](#encryptedflatten)
-    - [EncryptedAvgPool2d](#encryptedavgpool2d)
-    - [EncryptedMaxPool2d](#encryptedmaxpool2d)
-    - [EncryptedBatchNorm1d / EncryptedBatchNorm2d](#encryptedbatchnorm1d--encryptedbatchnorm2d)
-    - [EncryptedLayerNorm](#encryptedlayernorm)
-    - [EncryptedDropout](#encrypteddropout)
-    - [EncryptedResidualBlock](#encryptedresidualblock)
-    - [EncryptedApproxAttention](#encryptedapproxattention)
+    - [Other Layers](#other-layers)
+      - [EncryptedFlatten](#encryptedflatten)
+      - [EncryptedAvgPool2d](#encryptedavgpool2d)
+      - [EncryptedMaxPool2d](#encryptedmaxpool2d)
+      - [EncryptedAdaptiveAvgPool2d](#encryptedadaptiveavgpool2d)
+      - [EncryptedConv1d](#encryptedconv1d)
+      - [EncryptedConvTranspose2d](#encryptedconvtranspose2d)
+      - [EncryptedGroupNorm](#encryptedgroupnorm)
+      - [EncryptedInstanceNorm1d/2d](#encryptedinstancenorm1d2d)
+      - [EncryptedUpsample](#encryptedupsample)
+      - [EncryptedEmbedding](#encryptedembedding)
+      - [EncryptedPixelShuffle/Unshuffle](#encryptedpixelshuffleunshuffle)
+      - [Padding Layers](#padding-layers)
+      - [EncryptedBatchNorm1d / EncryptedBatchNorm2d](#encryptedbatchnorm1d--encryptedbatchnorm2d)
+      - [EncryptedLayerNorm](#encryptedlayernorm)
+      - [EncryptedDropout](#encrypteddropout)
+      - [EncryptedResidualBlock](#encryptedresidualblock)
+      - [EncryptedApproxAttention](#encryptedapproxattention)
 - [Utilities](#utilities)
   - [SlotPacker](#slotpacker)
 
@@ -779,7 +788,7 @@ flatten = EncryptedFlatten(
 - `start_dim`: First dimension to flatten (default: 0).
 - `end_dim`: Last dimension to flatten (default: -1).
 
-**Note:** For CNN models, the converter automatically optimizes Flatten by absorbing the permutation into the following Linear layer's weights. This is handled internally.
+**Note:** For CNN models, the converter automatically optimizes Flatten by absorbing the permutation into the following Linear layer's weights.
 
 #### EncryptedAvgPool2d
 
@@ -792,20 +801,14 @@ pool = EncryptedAvgPool2d(
     padding: Union[int, Tuple[int, int]] = 0
 )
 
-# Create from PyTorch layer
 pool = EncryptedAvgPool2d.from_torch(avg_pool: torch.nn.AvgPool2d)
 ```
 
-**Parameters:**
-- `kernel_size`: Size of the pooling window.
-- `stride`: Stride of the pooling (default: same as kernel_size).
-- `padding`: Padding to add (default: 0).
-
-**Note:** 4D input is no longer supported; use `encrypt_cnn_input()` to preprocess CNN inputs. For 2x2 pooling, rotation-based optimization is automatically applied for better performance.
+**Note:** 2x2 pooling uses rotation-based optimization automatically.
 
 #### EncryptedMaxPool2d
 
-Approximate max pooling using polynomial approximation.
+Approximate max pooling using polynomial approximation: `max(a,b) ≈ (a+b+|a-b|)/2`.
 
 ```python
 from cukks.nn import EncryptedMaxPool2d
@@ -817,20 +820,182 @@ pool = EncryptedMaxPool2d(
     degree: int = 4,
 )
 
-# Create from PyTorch layer
 pool = EncryptedMaxPool2d.from_torch(max_pool: torch.nn.MaxPool2d)
 ```
 
+#### EncryptedAdaptiveAvgPool2d
+
+Adaptive average pooling with dynamic kernel/stride computation.
+
+```python
+from cukks.nn import EncryptedAdaptiveAvgPool2d
+
+pool = EncryptedAdaptiveAvgPool2d(
+    output_size: Union[int, Tuple[int, int]]
+)
+
+pool = EncryptedAdaptiveAvgPool2d.from_torch(module: torch.nn.AdaptiveAvgPool2d)
+```
+
 **Parameters:**
+- `output_size`: Target output spatial dimensions. `(1,1)` triggers global average pooling fast path.
 
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `kernel_size` | `int` or `Tuple[int, int]` | Required | Size of the pooling window |
-| `stride` | `int` or `Tuple[int, int]` | `None` | Stride of the pooling. Defaults to `kernel_size`. |
-| `padding` | `int` or `Tuple[int, int]` | `0` | Padding to add |
-| `degree` | `int` | `4` | Polynomial degree for |x| approximation. Higher = more accurate but deeper circuit. |
+**Note:** Global average pooling `(1,1)` uses `sum_and_broadcast` + scalar multiply — significantly cheaper than building a full pooling matrix.
 
-**Note:** Max pooling is approximated using `max(a, b) ≈ (a + b + |a - b|) / 2`, where |x| is fitted via polynomial approximation. 4D input is no longer supported; use `encrypt_cnn_input()` to preprocess CNN inputs. The polynomial path is used for HE CNN layouts. Accuracy depends on input normalization; best for values in [-1, 1].
+#### EncryptedConv1d
+
+1D convolution with 1D im2col method.
+
+```python
+from cukks.nn import EncryptedConv1d
+
+conv = EncryptedConv1d(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: int,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    stride: int = 1,
+    padding: int = 0,
+    groups: int = 1,
+    dilation: int = 1,
+)
+
+conv = EncryptedConv1d.from_torch(module: torch.nn.Conv1d)
+```
+
+#### EncryptedConvTranspose2d
+
+Transposed convolution (deconvolution) for upsampling.
+
+```python
+from cukks.nn import EncryptedConvTranspose2d
+
+conv = EncryptedConvTranspose2d(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: Union[int, Tuple[int, int]],
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    stride: Union[int, Tuple[int, int]] = 1,
+    padding: Union[int, Tuple[int, int]] = 0,
+    output_padding: Union[int, Tuple[int, int]] = 0,
+    groups: int = 1,
+    dilation: Union[int, Tuple[int, int]] = 1,
+)
+
+conv = EncryptedConvTranspose2d.from_torch(module: torch.nn.ConvTranspose2d)
+```
+
+**Output size formula:** `out = (in - 1) * stride - 2*padding + dilation*(kernel-1) + output_padding + 1`
+
+#### EncryptedGroupNorm
+
+Group normalization with polynomial inverse square root approximation.
+
+```python
+from cukks.nn import EncryptedGroupNorm
+
+gn = EncryptedGroupNorm(
+    num_groups: int,
+    num_channels: int,
+    weight: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    eps: float = 1e-5,
+)
+
+gn = EncryptedGroupNorm.from_torch(module: torch.nn.GroupNorm)
+```
+
+**Parameters:**
+- `num_groups`: Number of groups (must divide `num_channels`).
+- `num_channels`: Total number of channels.
+- `mult_depth()`: Returns 18 (includes degree-15 Chebyshev polynomial for 1/sqrt).
+
+#### EncryptedInstanceNorm1d/2d
+
+Instance normalization (GroupNorm with `num_groups = num_channels`).
+
+```python
+from cukks.nn import EncryptedInstanceNorm1d, EncryptedInstanceNorm2d
+
+inorm = EncryptedInstanceNorm2d(
+    num_features: int,
+    eps: float = 1e-5,
+    affine: bool = False,
+)
+
+inorm = EncryptedInstanceNorm2d.from_torch(module: torch.nn.InstanceNorm2d)
+```
+
+#### EncryptedUpsample
+
+Upsampling with nearest neighbor or bilinear interpolation.
+
+```python
+from cukks.nn import EncryptedUpsample
+
+upsample = EncryptedUpsample(
+    size: Optional[Tuple[int, int]] = None,
+    scale_factor: Optional[int] = None,
+    mode: str = 'nearest',  # 'nearest' or 'bilinear'
+    align_corners: Optional[bool] = None,
+)
+
+upsample = EncryptedUpsample.from_torch(module: torch.nn.Upsample)
+```
+
+#### EncryptedEmbedding
+
+Embedding layer using one-hot matrix multiplication.
+
+```python
+from cukks.nn import EncryptedEmbedding
+
+emb = EncryptedEmbedding(
+    num_embeddings: int,
+    embedding_dim: int,
+    weight: torch.Tensor,
+)
+
+emb = EncryptedEmbedding.from_torch(module: torch.nn.Embedding)
+```
+
+**Note:** In typical HE inference, token indices are plaintext (part of model architecture). The embedding lookup happens before encryption, and the embedded representation is what gets encrypted.
+
+#### EncryptedPixelShuffle/Unshuffle
+
+Channel-to-spatial and spatial-to-channel rearrangement (pure permutation).
+
+```python
+from cukks.nn import EncryptedPixelShuffle, EncryptedPixelUnshuffle
+
+shuffle = EncryptedPixelShuffle(upscale_factor: int)
+unshuffle = EncryptedPixelUnshuffle(upscale_factor: int)
+
+shuffle = EncryptedPixelShuffle.from_torch(module: torch.nn.PixelShuffle)
+```
+
+**PixelShuffle:** `(C*r², H, W) → (C, H*r, W*r)`
+**PixelUnshuffle:** `(C, H*r, W*r) → (C*r², H, W)`
+
+#### Padding Layers
+
+```python
+from cukks.nn import (
+    EncryptedZeroPad2d,
+    EncryptedConstantPad2d,
+    EncryptedReflectionPad2d,
+    EncryptedReplicationPad2d,
+)
+
+pad = EncryptedZeroPad2d(padding: Union[int, Tuple[int,int,int,int]])
+pad = EncryptedConstantPad2d(padding, value: float)
+pad = EncryptedReflectionPad2d(padding: Union[int, Tuple[int,int,int,int]])
+pad = EncryptedReplicationPad2d(padding: Union[int, Tuple[int,int,int,int]])
+```
+
+**Padding format:** `(left, right, top, bottom)` or single int for symmetric padding.
 
 #### EncryptedBatchNorm1d / EncryptedBatchNorm2d
 

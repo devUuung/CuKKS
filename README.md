@@ -138,19 +138,33 @@ pip install -e .
 | **PyTorch API** | Familiar interface — just call `cukks.convert(model)` |
 | **GPU Acceleration** | CUDA-accelerated HE operations via OpenFHE |
 | **Auto Optimization** | BatchNorm folding, BSGS matrix multiplication |
-| **Wide Layer Support** | Linear, Conv2d, ReLU/GELU/SiLU, Pool, LayerNorm, Attention |
+| **37 Layer Types** | Conv1d/2d, ConvTranspose2d, Pool, Norm, Attention, Embedding, Upsample, Padding |
 
 ## Supported Layers
 
 | Layer | Encrypted Version | Notes |
 |-------|------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | BSGS optimization |
+| `nn.Conv1d` | `EncryptedConv1d` | 1D im2col method |
 | `nn.Conv2d` | `EncryptedConv2d` | im2col method |
+| `nn.ConvTranspose2d` | `EncryptedConvTranspose2d` | Transposed convolution |
 | `nn.ReLU/GELU/SiLU` | Polynomial approx | Configurable degree |
+| `nn.Sigmoid/Tanh` | Polynomial approx | Chebyshev fitting |
 | `nn.AvgPool2d` | `EncryptedAvgPool2d` | Rotation-based |
+| `nn.MaxPool2d` | `EncryptedMaxPool2d` | Polynomial approx |
+| `nn.AdaptiveAvgPool2d` | `EncryptedAdaptiveAvgPool2d` | Global-pool fast path |
 | `nn.BatchNorm` | Folded | Merged into prev layer |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Polynomial approx |
-| `nn.Attention` | `EncryptedApproxAttention` | seq_len=1 or packed/list seq_len <= 8 |
+| `nn.GroupNorm` | `EncryptedGroupNorm` | Per-group polynomial |
+| `nn.InstanceNorm` | `EncryptedInstanceNorm1d/2d` | Per-channel polynomial |
+| `nn.Attention` | `EncryptedApproxAttention` | seq_len ≤ 8 packed |
+| `nn.Embedding` | `EncryptedEmbedding` | One-hot matmul |
+| `nn.Upsample` | `EncryptedUpsample` | Nearest/bilinear |
+| `nn.PixelShuffle` | `EncryptedPixelShuffle` | Channel-to-spatial |
+| `nn.ZeroPad2d` | `EncryptedZeroPad2d` | Scatter matrix |
+| `nn.ConstantPad2d` | `EncryptedConstantPad2d` | Scatter + constant |
+| `nn.ReflectionPad2d` | `EncryptedReflectionPad2d` | Reflection mapping |
+| `nn.ReplicationPad2d` | `EncryptedReplicationPad2d` | Replication mapping |
 
 <details>
 <summary><strong>Full layer support table</strong></summary>
@@ -158,7 +172,9 @@ pip install -e .
 | PyTorch Layer | Encrypted Version | Notes |
 |--------------|-------------------|-------|
 | `nn.Linear` | `EncryptedLinear` | Full support with BSGS optimization |
+| `nn.Conv1d` | `EncryptedConv1d` | 1D im2col method |
 | `nn.Conv2d` | `EncryptedConv2d` | Via im2col method |
+| `nn.ConvTranspose2d` | `EncryptedConvTranspose2d` | Transposed convolution (deconvolution) |
 | `nn.ReLU` | `EncryptedReLU` | Polynomial approximation |
 | `nn.GELU` | `EncryptedGELU` | Polynomial approximation |
 | `nn.SiLU` | `EncryptedSiLU` | Polynomial approximation |
@@ -166,12 +182,23 @@ pip install -e .
 | `nn.Tanh` | `EncryptedTanh` | Polynomial approximation |
 | `nn.AvgPool2d` | `EncryptedAvgPool2d` | Full support |
 | `nn.MaxPool2d` | `EncryptedMaxPool2d` | Approximate via polynomial |
+| `nn.AdaptiveAvgPool2d` | `EncryptedAdaptiveAvgPool2d` | Dynamic kernel/stride, global-pool fast path |
 | `nn.Flatten` | `EncryptedFlatten` | Logical reshape |
 | `nn.BatchNorm1d/2d` | Folded | Merged into preceding layer |
+| `nn.GroupNorm` | `EncryptedGroupNorm` | Per-group polynomial inv-sqrt |
+| `nn.InstanceNorm1d/2d` | `EncryptedInstanceNorm1d/2d` | Per-channel polynomial |
 | `nn.Sequential` | `EncryptedSequential` | Full support |
 | `nn.Dropout` | `EncryptedDropout` | No-op during inference |
 | `nn.LayerNorm` | `EncryptedLayerNorm` | Pure HE polynomial approximation |
 | `nn.MultiheadAttention` | `EncryptedApproxAttention` | Taylor softmax (seq_len=1) or Power-Softmax (packed/list seq_len <= 8) |
+| `nn.Embedding` | `EncryptedEmbedding` | One-hot matmul with embedding table |
+| `nn.Upsample` | `EncryptedUpsample` | Nearest neighbor / bilinear interpolation |
+| `nn.PixelShuffle` | `EncryptedPixelShuffle` | Channel-to-spatial permutation |
+| `nn.PixelUnshuffle` | `EncryptedPixelUnshuffle` | Spatial-to-channel permutation |
+| `nn.ZeroPad2d` | `EncryptedZeroPad2d` | Zero-padding via scatter matrix |
+| `nn.ConstantPad2d` | `EncryptedConstantPad2d` | Constant padding |
+| `nn.ReflectionPad2d` | `EncryptedReflectionPad2d` | Reflection padding |
+| `nn.ReplicationPad2d` | `EncryptedReplicationPad2d` | Replication padding |
 
 </details>
 
@@ -208,11 +235,17 @@ ctx = CKKSContext(config, enable_gpu=True)  # GPU enabled by default
 ## Examples
 
 ```bash
-# Quick demo (no GPU required)
-python -m cukks.examples.encrypted_inference --demo conversion
-
 # MNIST encrypted inference
 python examples/mnist_encrypted.py --hidden 64 --samples 5
+
+# UNet-style segmentation (ConvTranspose2d, AdaptiveAvgPool2d, Upsample)
+python examples/unet_encrypted.py --samples 2
+
+# ResNet-style classification (GroupNorm, AdaptiveAvgPool2d)
+python examples/resnet_encrypted.py --samples 1
+
+# Transformer-style NLP (Embedding, LayerNorm)
+python examples/transformer_encrypted.py --samples 2
 ```
 
 ## Contributing
