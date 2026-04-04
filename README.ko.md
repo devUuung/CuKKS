@@ -205,13 +205,19 @@ python benchmarks/run_benchmarks.py --output results.json
 | 모델 | 파라미터 | 입력 | 아키텍처 |
 |------|----------|------|----------|
 | MLP | 50,890 | (1, 784) | Linear(784→64) → ReLU → Linear(64→10) |
+| CNN | 15,770 | (1, 1, 28, 28) | Conv2d(1→8, 3×3) → ReLU → AvgPool2d(2) → Linear(1568→10) |
+| ResNet | 1,300 | (1, 1, 8, 8) | Conv2d(1→8, 3×3) → GroupNorm → ReLU → Conv2d(8→16, 1×1) → GroupNorm → ReLU → AdaptiveAvgPool2d(4×4) → Linear(256→4) |
+| Transformer | 212 | (1, 8) | Linear(8→16) → ReLU → Linear(16→4) |
 
 실행 예시:
 
 ```
 Model           Plain (ms)   Encrypted (ms)  Overhead   MAE       
 --------------------------------------------------------------
-mlp             0.01         82.12           6795      x 0.131713
+mlp             0.01         84.16           6858      x 0.075594
+cnn             0.03         2820.15         94053     x 0.048294
+resnet          0.04         11444.55        269018    x 0.098026
+transformer     0.01         54.27           7794      x 0.087978
 ```
 
 > **참고:** 벤치마크는 OpenFHE GPU 백엔드가 필요합니다. CUDA 지원 머신에서 실행하세요.
