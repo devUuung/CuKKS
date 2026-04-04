@@ -78,15 +78,64 @@ class SmallCNN(nn.Module):
         return self.fc(self.flatten(x))
 
 
+class SimpleResNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 8, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(8, 8)
+        self.act1 = nn.ReLU()
+        self.conv2 = nn.Conv2d(8, 16, kernel_size=1)
+        self.norm2 = nn.GroupNorm(16, 16)
+        self.act2 = nn.ReLU()
+        self.pool = nn.AdaptiveAvgPool2d((4, 4))
+        self.flatten = nn.Flatten()
+        self.fc = nn.Linear(16 * 4 * 4, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.act1(self.norm1(self.conv1(x)))
+        x = self.act2(self.norm2(self.conv2(x)))
+        x = self.pool(x)
+        return self.fc(self.flatten(x))
+
+
+class SimpleTransformerClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(8, 16)
+        self.act1 = nn.ReLU()
+        self.fc2 = nn.Linear(16, 4)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.act1(self.fc1(x))
+        return self.fc2(x)
+
+
 MODELS = {
     "mlp": lambda: TinyMLP(),
     "cnn": lambda: SmallCNN(),
+    "resnet": lambda: SimpleResNet(),
+    "transformer": lambda: SimpleTransformerClassifier(),
 }
 
 INPUT_SHAPES = {
     "mlp": (1, 784),
     "cnn": (1, 1, 28, 28),
+    "resnet": (1, 1, 8, 8),
+    "transformer": (1, 8),
 }
+
+
+CNN_MODELS = {"cnn", "resnet"}
+
+
+def get_first_conv_params(model: nn.Module) -> List[dict]:
+    first_conv = next(module for module in model.modules() if isinstance(module, nn.Conv2d))
+    return [{
+        "kernel_size": first_conv.kernel_size,
+        "stride": first_conv.stride,
+        "padding": first_conv.padding,
+        "out_channels": first_conv.out_channels,
+    }]
 
 
 def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[BenchmarkResult]:
@@ -118,15 +167,21 @@ def benchmark_model(model_name: str, num_samples: int = 3) -> Optional[Benchmark
         return None
 
     try:
-        enc_model, ctx = cukks.convert(model, activation_degree=3, input_shape=input_shape)
+        ctx = cukks.CKKSInferenceContext.for_model(
+            model,
+            activation_degree=3,
+            input_shape=input_shape,
+            security_level=None,
+        )
+        enc_model, ctx = cukks.convert(
+            model,
+            ctx=ctx,
+            activation_degree=3,
+            input_shape=input_shape,
+        )
 
-        if model_name == "cnn":
-            conv_params = [{
-                'in_channels': 1,
-                'out_channels': 8,
-                'kernel_size': 3,
-                'padding': (1, 1),
-            }]
+        if model_name in CNN_MODELS:
+            conv_params = get_first_conv_params(model)
             enc_input = ctx.encrypt_cnn_input(sample.to(torch.float64), conv_params)
         else:
             enc_input = ctx.encrypt(sample.flatten())
@@ -185,6 +240,8 @@ def main():
 
     if args.list:
         print("Available models:")
+        print(f"  {'Model':<15} {'Params':>12}  Input Shape")
+        print("  " + "-" * 44)
         for name, fn in MODELS.items():
             model = fn()
             params = sum(p.numel() for p in model.parameters())
