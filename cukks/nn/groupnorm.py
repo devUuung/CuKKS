@@ -3,30 +3,35 @@
 from __future__ import annotations
 
 import copy
-import math
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
 
 from .module import EncryptedModule
-from ..stats.crypto_inv_sqrt import _compute_inv_sqrt_coeffs
 
 if TYPE_CHECKING:
     from ..tensor import EncryptedTensor
 
 
 class EncryptedGroupNorm(EncryptedModule):
-    """Encrypted GroupNorm using polynomial inverse-square-root approximation."""
+    """Encrypted GroupNorm with fixed per-group statistics.
+
+    Uses pre-computed per-group mean and inverse standard deviation,
+    analogous to BatchNorm inference mode.  This avoids the expensive
+    dynamic mean/variance computation and inverse-square-root polynomial
+    evaluation that would otherwise be required in CKKS.
+    """
 
     def __init__(
         self,
         num_groups: int,
         num_channels: int,
+        group_mean: torch.Tensor,
+        group_inv_std: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         eps: float = 1e-5,
-        inv_sqrt_domain: Tuple[float, float] = (0.01, 10.0),
     ) -> None:
         super().__init__()
 
@@ -43,21 +48,26 @@ class EncryptedGroupNorm(EncryptedModule):
         self.num_channels = num_channels
         self.channels_per_group = num_channels // num_groups
         self.eps = eps
-        self.inv_sqrt_domain = inv_sqrt_domain
-        self.inv_sqrt_coeffs = _compute_inv_sqrt_coeffs(inv_sqrt_domain, degree=15)
 
+        self.group_mean = self._prepare_stat_param(group_mean, "group_mean")
+        self.group_inv_std = self._prepare_stat_param(group_inv_std, "group_inv_std")
         self.weight = self._prepare_param(weight, default=1.0)
         self.bias = self._prepare_param(bias, default=0.0)
-        self._layout_cache: Dict[Tuple[Tuple[int, ...], int], Tuple[torch.Tensor, list[float], list[float]]] = {}
 
         self.register_parameter("weight", self.weight)
         self.register_parameter("bias", self.bias)
-        self.register_parameter("inv_sqrt_coeffs", self.inv_sqrt_coeffs)
+
+    def _prepare_stat_param(self, value: torch.Tensor, name: str) -> torch.Tensor:
+        prepared = value.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+        if prepared.shape != (self.num_channels,):
+            raise ValueError(
+                f"{name} shape must be ({self.num_channels},), got {tuple(prepared.shape)}"
+            )
+        return prepared
 
     def _prepare_param(self, value: Optional[torch.Tensor], *, default: float) -> torch.Tensor:
         if value is None:
             return torch.full((self.num_channels,), default, dtype=torch.float64, device="cpu")
-
         prepared = value.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
         if prepared.shape != (self.num_channels,):
             raise ValueError(
@@ -101,50 +111,37 @@ class EncryptedGroupNorm(EncryptedModule):
         self,
         sample_shape: Tuple[int, ...],
         channel_axis: int,
-    ) -> Tuple[torch.Tensor, list[float], list[float]]:
+    ) -> Tuple[list[float], list[float]]:
         key = (sample_shape, channel_axis)
-        cached = self._layout_cache.get(key)
-        if cached is not None:
-            return cached
+        cached = getattr(self, "_layout_cache", None)
+        if cached is not None and key in cached:
+            return cached[key]
 
-        sample_size = math.prod(sample_shape)
-        spatial_shape = list(sample_shape)
-        spatial_shape.pop(channel_axis)
-        group_size = self.channels_per_group * int(math.prod(spatial_shape))
-
-        channel_view_shape = [1] * len(sample_shape)
-        channel_view_shape[channel_axis] = self.num_channels
-        channel_ids = torch.arange(self.num_channels, dtype=torch.int64).view(*channel_view_shape).expand(*sample_shape)
-        group_ids = (channel_ids // self.channels_per_group).reshape(-1)
-
-        avg_block = (group_ids[:, None] == group_ids[None, :]).to(torch.float64)
-        avg_block /= float(group_size)
-
+        sample_size = int(__import__("math").prod(sample_shape))
         weight_view_shape = [1] * len(sample_shape)
         weight_view_shape[channel_axis] = self.num_channels
         weight_pattern = self.weight.view(*weight_view_shape).expand(*sample_shape).reshape(sample_size).tolist()
         bias_pattern = self.bias.view(*weight_view_shape).expand(*sample_shape).reshape(sample_size).tolist()
 
-        cached = (avg_block, weight_pattern, bias_pattern)
-        self._layout_cache[key] = cached
-        return cached
+        if not hasattr(self, "_layout_cache"):
+            self._layout_cache: dict = {}
+        self._layout_cache[key] = (weight_pattern, bias_pattern)
+        return weight_pattern, bias_pattern
 
     def _restore_metadata(self, result: "EncryptedTensor", x: "EncryptedTensor") -> None:
-        result._cnn_layout = copy.deepcopy(getattr(x, "_cnn_layout", None))
-        result._packed_batch = getattr(x, "_packed_batch", False)
-        result._batch_size = getattr(x, "_batch_size", None)
-        result._slots_per_sample = getattr(x, "_slots_per_sample", None)
-        result._packed_sample_shape = getattr(x, "_packed_sample_shape", None)
-        result._sigma_factor = None
+        result_any = cast(Any, result)
+        x_any = cast(Any, x)
+        result_any._cnn_layout = copy.deepcopy(getattr(x_any, "_cnn_layout", None))
+        result_any._packed_batch = getattr(x_any, "_packed_batch", False)
+        result_any._batch_size = getattr(x_any, "_batch_size", None)
+        result_any._slots_per_sample = getattr(x_any, "_slots_per_sample", None)
+        result_any._packed_sample_shape = getattr(x_any, "_packed_sample_shape", None)
+        result_any._sigma_factor = None
 
     def forward(self, x: "EncryptedTensor") -> "EncryptedTensor":
         sample_shape, channel_axis = self._infer_sample_layout(x)
-        sample_size = math.prod(sample_shape)
-        avg_block, weight_pattern, bias_pattern = self._layout_tensors(sample_shape, channel_axis)
-
-        a, b = self.inv_sqrt_domain
-        alpha = 2.0 / (b - a)
-        beta_map = -(a + b) / (b - a)
+        sample_size = int(__import__("math").prod(sample_shape))
+        weight_pattern, bias_pattern = self._layout_tensors(sample_shape, channel_axis)
 
         if getattr(x, "_packed_batch", False):
             batch_size = getattr(x, "_batch_size", None)
@@ -154,16 +151,11 @@ class EncryptedGroupNorm(EncryptedModule):
         else:
             reshaped = x.view(1, sample_size)
 
-        mean_broadcast = reshaped.matmul(avg_block)
-        centered = reshaped.sub(mean_broadcast)
+        mean_list = self.group_mean.tolist()
+        inv_std_list = self.group_inv_std.tolist()
 
-        sq = centered.square().rescale()
-        var_broadcast = sq.matmul(avg_block)
-        var_eps = var_broadcast.add(self.eps)
-
-        t = var_eps.mul(alpha).rescale().add(beta_map)
-        inv_std = t.poly_eval(self.inv_sqrt_coeffs)
-        normalized = centered.mul(inv_std).rescale()
+        centered = reshaped.sub(mean_list)
+        normalized = centered.mul(inv_std_list)
 
         output = normalized.mul(weight_pattern).rescale()
         output = output.add(bias_pattern)
@@ -172,17 +164,30 @@ class EncryptedGroupNorm(EncryptedModule):
         return result
 
     @classmethod
-    def from_torch(cls, module: nn.GroupNorm) -> "EncryptedGroupNorm":
+    def from_torch(
+        cls,
+        module: nn.GroupNorm,
+        group_mean: Optional[torch.Tensor] = None,
+        group_inv_std: Optional[torch.Tensor] = None,
+        inv_sqrt_degree: Optional[int] = None,
+    ) -> "EncryptedGroupNorm":
+        del inv_sqrt_degree
+        if group_mean is None:
+            group_mean = torch.zeros(module.num_channels, dtype=torch.float64)
+        if group_inv_std is None:
+            group_inv_std = torch.ones(module.num_channels, dtype=torch.float64)
         return cls(
             num_groups=module.num_groups,
             num_channels=module.num_channels,
+            group_mean=group_mean,
+            group_inv_std=group_inv_std,
             weight=module.weight.data,
             bias=module.bias.data,
             eps=module.eps,
         )
 
     def mult_depth(self) -> int:
-        return 18
+        return 1
 
     def extra_repr(self) -> str:
         return (
