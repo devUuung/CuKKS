@@ -254,7 +254,6 @@ FHECKKSRNS::EvalCoeffsToSlotsGPU(
                 // fastRotation_gpu[j].ax__ = LoadConstantVector(gpu_context.degree__ * totalLimbs, 0);
                 fastRotation_gpu[j].ax__.resize(gpu_context.degree__ * totalLimbs);
                 fastRotation_gpu[j].ax__.setConstant(0);
-                gpu_context.AddScaledMessageTerm(fastRotation_gpu[j].ax__ , result_gpu.ax__);
 
                 // {
                 //     const auto shouldBeFastRotGPU = LoadAccurateCiphertext(fastRotation[j]);
@@ -345,10 +344,7 @@ FHECKKSRNS::EvalCoeffsToSlotsGPU(
                     // }
                     // Find the automorphism index that corresponds to rotation index index.
                     usint autoIndex = FindAutomorphismIndex2nComplex(rot_out[s][i], M);
-                    std::vector<usint> map(N);
-                    PrecomputeAutoMap(N, autoIndex, &map);
-                    // first += inner->GetElements()[0].AutomorphismTransform(autoIndex, map);
-                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, map);
+                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, autoIndex);
                     gpu_context.AddCoreInPlace(first_gpu, inner_b_rot);
                     // {
                     //     ckks::DeviceVector should_be_first = loadIntoDeviceVector(first);
@@ -434,7 +430,6 @@ FHECKKSRNS::EvalCoeffsToSlotsGPU(
                 // fastRotation_gpu[j].ax__ = LoadConstantVector(gpu_context.degree__ * totalLimbs, 0);
                 fastRotation_gpu[j].ax__.resize(gpu_context.degree__ * totalLimbs);
                 fastRotation_gpu[j].ax__.setConstant(0);
-                gpu_context.AddScaledMessageTerm(fastRotation_gpu[j].ax__ , result_gpu.ax__);
             }
 
             // {
@@ -491,11 +486,7 @@ FHECKKSRNS::EvalCoeffsToSlotsGPU(
 
                     // Find the automorphism index that corresponds to rotation index index.
                     usint autoIndex = FindAutomorphismIndex2nComplex(rot_out[stop][i], M);
-                    std::vector<usint> map(N);
-                    PrecomputeAutoMap(N, autoIndex, &map);
-
-                    // first += inner->GetElements()[0].AutomorphismTransform(autoIndex, map);
-                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, map);
+                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, autoIndex);
                     gpu_context.AddCoreInPlace(first_gpu, inner_b_rot);
 
                     // auto innerDigits = cc->EvalFastRotationPrecompute(inner);
@@ -725,11 +716,7 @@ FHECKKSRNS::EvalSlotsToCoeffsGPU(
 
                     // Find the automorphism index that corresponds to rotation index index.
                     usint autoIndex = FindAutomorphismIndex2nComplex(rot_out[s][i], M);
-                    std::vector<usint> map(N);
-                    PrecomputeAutoMap(N, autoIndex, &map);
-
-                    // first += inner->GetElements()[0].AutomorphismTransform(autoIndex, map);
-                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, map);
+                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, autoIndex);
                     gpu_context.AddCoreInPlace(first_gpu, inner_b_rot);
 
                     // auto innerDigits = cc->EvalFastRotationPrecompute(inner);
@@ -803,7 +790,6 @@ FHECKKSRNS::EvalSlotsToCoeffsGPU(
                 // fastRotation_gpu[j].ax__ = LoadConstantVector(gpu_context.degree__ * totalLimbs, 0);
                 fastRotation_gpu[j].ax__.resize(gpu_context.degree__ * totalLimbs);
                 fastRotation_gpu[j].ax__.setConstant(0);
-                gpu_context.AddScaledMessageTerm(fastRotation_gpu[j].ax__ , result_gpu.ax__);
             }
         }
 
@@ -851,11 +837,7 @@ FHECKKSRNS::EvalSlotsToCoeffsGPU(
 
                     // Find the automorphism index that corresponds to rotation index index.
                     usint autoIndex = FindAutomorphismIndex2nComplex(rot_out[s][i], M);
-                    std::vector<usint> map(N);
-                    PrecomputeAutoMap(N, autoIndex, &map);
-
-                    // first += inner->GetElements()[0].AutomorphismTransform(autoIndex, map);
-                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, map);
+                    ckks::DeviceVector inner_b_rot = gpu_context.AutomorphismTransform(inner_gpu.bx__, autoIndex);
                     gpu_context.AddCoreInPlace(first_gpu, inner_b_rot);
 
                     // auto innerDigits = cc->EvalFastRotationPrecompute(inner);

@@ -12,8 +12,6 @@
 #include <tuple>
 #include <memory>
 #include <iostream>
-#include <mutex>
-#include <string>
 
 #include "Basic.h"
 #include "Ciphertext.h"
@@ -23,19 +21,13 @@
 #include "MemoryPool.h"
 #include "NttImple.h"
 
+namespace lbcrypto {
+void PrecomputeAutoMap(uint32_t n, uint32_t k, std::vector<uint32_t>* precomp);
+}
+
 using namespace ckks;
 
 #define DEFAULT_BLOCK_DIM 2048
-#define CUDA_KERNEL_CHECK() \
-    do { \
-        cudaError_t _ck_err = cudaGetLastError(); \
-        if (_ck_err != cudaSuccess) { \
-            throw std::runtime_error( \
-                std::string("CUDA kernel error at " __FILE__ ":") + \
-                std::to_string(__LINE__) + ": " + \
-                cudaGetErrorString(_ck_err)); \
-        } \
-    } while(0)
 
 namespace {
 
@@ -47,6 +39,16 @@ inline int ChooseBlockDim(const std::size_t total_threads) {
 
 inline int CeilDiv(const std::size_t x, const int y) {
   return static_cast<int>((x + static_cast<std::size_t>(y) - 1) / static_cast<std::size_t>(y));
+}
+
+inline void SyncLargeRingStage(const uint32_t degree, const char* stage) {
+  if (degree <= 32768) {
+    return;
+  }
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("CUDA failure after ") + stage + ": " + cudaGetErrorString(err));
+  }
 }
 
 // from https://github.com/snucrypto/HEAAN, 131d275
@@ -244,16 +246,18 @@ auto ComputeProdQiModQj = [](const auto &end_primes, auto start_begin,
 }  // namespace
 
 void Context::setup(const Parameter &param, const std::vector<word64>& primitiveRoots) {
-  HostVector barret_k, barret_ratio, power_of_roots_vec,
+  HostVector barret_k, barret_ratio, barret_ratio_128, power_of_roots_vec,
       power_of_roots_shoup_vec, inv_power_of_roots_vec,
       inv_power_of_roots_shoup_vec;
   size_t i = 0; 
   for (auto p : param.primes_) {
     long barret = floor(log2(p)) + 63;
     barret_k.push_back(barret);
-    word128 temp = ((word64)1 << (barret - 64));
-    temp <<= 64;
+    word128 temp = static_cast<word128>(1) << barret;
     barret_ratio.push_back((word64)(temp / p));
+    const word128 ratio128 = temp / p;
+    barret_ratio_128.push_back(static_cast<word64>(ratio128));
+    barret_ratio_128.push_back(static_cast<word64>(ratio128 >> 64));
     auto root = primitiveRoots[i++];
     // std::cout << "gpu setup " << i << "th root: " << root << std::endl;
     auto [power_of_roots, inverse_power_of_roots] =
@@ -267,6 +271,7 @@ void Context::setup(const Parameter &param, const std::vector<word64>& primitive
     Append(inv_power_of_roots_shoup_vec, inv_power_of_roots_shoup);
   }
   barret_ratio__ = DeviceVector(barret_ratio);
+  barret_ratio_128__ = DeviceVector(barret_ratio_128);
   barret_k__ = DeviceVector(barret_k);
   power_of_roots__ = DeviceVector(power_of_roots_vec);
   power_of_roots_shoup__ = DeviceVector(power_of_roots_shoup_vec);
@@ -283,7 +288,12 @@ Context::Context(const Parameter &param, const std::vector<word64>& primitiveRoo
   : param__{param},
     degree__{param.degree_},
     alpha__{param.alpha_},
+    num_special_moduli__{param.num_special_moduli_},
     primes__{param.primes_} {
+
+    if (degree__ > 32768) {
+      is_modup_batched = false;
+    }
 
     setup(param, primitiveRoots);
 }
@@ -292,7 +302,12 @@ Context::Context(const Parameter &param)
   : param__{param},
     degree__{param.degree_},
     alpha__{param.alpha_},
+    num_special_moduli__{param.num_special_moduli_},
     primes__{param.primes_} {
+
+  if (degree__ > 32768) {
+    is_modup_batched = false;
+  }
 
   std::vector<word64> roots; roots.reserve(param.primes_.size());
   for (auto p : param.primes_) {
@@ -313,6 +328,7 @@ void Context::GenModUpParams() {
   hat_inverse_vec_shoup_batched__.reserve(param__.chain_length_);
   primes_qp__.reserve(param__.chain_length_);
   barret_ratio_qp__.reserve(param__.chain_length_);
+  barret_ratio_128_qp__.reserve(param__.chain_length_);
   barret_k_qp__.reserve(param__.chain_length_);
 
   for (int num_limbs = 1; num_limbs <= param__.chain_length_ ; num_limbs++) {
@@ -320,23 +336,27 @@ void Context::GenModUpParams() {
       // std::cout << "computing ModUp parameters for digit " << num_limbs << " limbs\n"; 
 
     // std::vector<word64> curr_primes(param__.primes_.begin(), param__.primes_.begin() + num_limbs);
-    std::vector<word64> curr_primes(num_limbs+alpha__);
-    HostVector curr_primes_qp(num_limbs + alpha__);
-    HostVector curr_barret_ratio_qp(num_limbs + alpha__);
-    HostVector curr_barret_k_qp(num_limbs + alpha__);
+    std::vector<word64> curr_primes(num_limbs + num_special_moduli__);
+    HostVector curr_primes_qp(num_limbs + num_special_moduli__);
+    HostVector curr_barret_ratio_qp(num_limbs + num_special_moduli__);
+    HostVector curr_barret_ratio_128_qp(2 * (num_limbs + num_special_moduli__));
+    HostVector curr_barret_k_qp(num_limbs + num_special_moduli__);
     for (int i = 0; i < num_limbs; i++) curr_primes[i] = param__.primes_[i];
-    for (int i = 0; i < alpha__; i++) curr_primes[num_limbs+i] = param__.primes_[param__.chain_length_  + i];
-    for (int i = 0; i < num_limbs + alpha__; i++) {
+    for (int i = 0; i < num_special_moduli__; i++) curr_primes[num_limbs+i] = param__.primes_[param__.chain_length_  + i];
+    for (int i = 0; i < num_limbs + num_special_moduli__; i++) {
       const word64 prime = curr_primes[i];
       const long barret = floor(log2(prime)) + 63;
       curr_primes_qp[i] = prime;
       curr_barret_k_qp[i] = barret;
-      word128 temp = ((word64)1 << (barret - 64));
-      temp <<= 64;
+      word128 temp = static_cast<word128>(1) << barret;
       curr_barret_ratio_qp[i] = static_cast<word64>(temp / prime);
+      const word128 ratio128 = temp / prime;
+      curr_barret_ratio_128_qp[2 * i] = static_cast<word64>(ratio128);
+      curr_barret_ratio_128_qp[2 * i + 1] = static_cast<word64>(ratio128 >> 64);
     }
     primes_qp__.push_back(DeviceVector(curr_primes_qp));
     barret_ratio_qp__.push_back(DeviceVector(curr_barret_ratio_qp));
+    barret_ratio_128_qp__.push_back(DeviceVector(curr_barret_ratio_128_qp));
     barret_k_qp__.push_back(DeviceVector(curr_barret_k_qp));
     // assert(curr_primes.size() == num_limbs + alpha__);
 
@@ -380,9 +400,9 @@ void Context::GenModUpParams() {
 
   prime_inds_cache__.reserve(param__.chain_length_);
   for (int n = 1; n <= param__.chain_length_; n++) {
-    HostVector inds(n + alpha__);
+    HostVector inds(n + num_special_moduli__);
     for (int i = 0; i < n; i++) inds[i] = i;
-    for (int i = 0; i < alpha__; i++) inds[n + i] = param__.chain_length_ + i;
+    for (int i = 0; i < num_special_moduli__; i++) inds[n + i] = param__.chain_length_ + i;
     prime_inds_cache__.push_back(DeviceVector(inds));
   }
 }
@@ -506,6 +526,7 @@ CtAccurate Context::EvalMultAndRelin(const CtAccurate& ct1, const CtAccurate& ct
   CtAccurate orig_elems;
   // std::cout << "input levels: " << multInput1.level << " " << multInput2.level << std::endl;
   EvalMult(multInput1, multInput2, orig_elems.bx__, orig_elems.ax__, gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "EvalMultAndRelin::EvalMult");
   orig_elems.level = multInput1.level;
   orig_elems.noiseScaleDeg = multInput1.noiseScaleDeg + multInput2.noiseScaleDeg;
   orig_elems.scalingFactor = multInput1.scalingFactor * multInput2.scalingFactor;
@@ -513,18 +534,21 @@ CtAccurate Context::EvalMultAndRelin(const CtAccurate& ct1, const CtAccurate& ct
   // if (verbose) std::cout << "\tFinished eval mult\n";
 
   DeviceVector raisedDigits = ModUp(gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "EvalMultAndRelin::ModUp");
 
   // if (verbose) std::cout << "\tFinished modup\n";
 
   DeviceVector ks_a, ks_b;
 
   KeySwitch(raisedDigits, evk, ks_a, ks_b);
+  SyncLargeRingStage(degree__, "EvalMultAndRelin::KeySwitch");
 
   // if (verbose) std::cout << "\tFinished keyswitch\n";
 
   Ciphertext ks_output;
   ModDown(ks_a, ks_output.ax__);
   ModDown(ks_b, ks_output.bx__);
+  SyncLargeRingStage(degree__, "EvalMultAndRelin::ModDown");
   // ks_output.level = orig_elems.level;
   // ks_output.noiseScaleDeg = orig_elems.noiseScaleDeg;
   // ks_output.scalingFactor = orig_elems.scalingFactor;
@@ -534,6 +558,7 @@ CtAccurate Context::EvalMultAndRelin(const CtAccurate& ct1, const CtAccurate& ct
   CtAccurate toLoad; 
   // Add(ks_output, orig_elems, toLoad);
   AddCore(ks_output.ax__, ks_output.bx__, orig_elems.ax__, orig_elems.bx__, toLoad.ax__, toLoad.bx__);
+  SyncLargeRingStage(degree__, "EvalMultAndRelin::AddCore");
 
   toLoad.level = orig_elems.level;
   toLoad.noiseScaleDeg = orig_elems.noiseScaleDeg;
@@ -546,16 +571,20 @@ Ciphertext Context::EvalMultAndRelinNoRescale(const Ciphertext& ct1, const Ciphe
   DeviceVector gpu_to_relin_2;
   Ciphertext orig_elems;
   EvalMult(ct1, ct2, orig_elems.bx__, orig_elems.ax__, gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "EvalMult");
 
   DeviceVector raisedDigits = ModUp(gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "ModUp");
 
   DeviceVector ks_a, ks_b;
 
   KeySwitch(raisedDigits, evk, ks_a, ks_b);
+  SyncLargeRingStage(degree__, "KeySwitch");
 
   Ciphertext ks_output;
   ModDown(ks_a, ks_output.ax__);
   ModDown(ks_b, ks_output.bx__);
+  SyncLargeRingStage(degree__, "ModDown");
 
   Ciphertext toLoad; 
   Add(ks_output, orig_elems, toLoad);
@@ -592,35 +621,7 @@ void Context::EvalSquareAndRelin(const Ciphertext& ct, const EvaluationKey& evk,
 }
 
 CtAccurate Context::EvalSquareAndRelin(const CtAccurate& ct, const EvaluationKey& evk) const {
-  CtAccurate multInput;
-  Rescale(ct, multInput);
-
-  DeviceVector gpu_to_relin_2;
-  CtAccurate orig_elems;
-  EvalSquare(multInput, orig_elems.bx__, orig_elems.ax__, gpu_to_relin_2);
-  orig_elems.level = multInput.level;
-  orig_elems.noiseScaleDeg = multInput.noiseScaleDeg + multInput.noiseScaleDeg;
-  orig_elems.scalingFactor = multInput.scalingFactor * multInput.scalingFactor;
-
-  DeviceVector raisedDigits = ModUp(gpu_to_relin_2);
-
-  DeviceVector ks_a, ks_b;
-
-  KeySwitch(raisedDigits, evk, ks_a, ks_b);
-
-  Ciphertext ks_output;
-  ModDown(ks_a, ks_output.ax__);
-  ModDown(ks_b, ks_output.bx__);
-
-  CtAccurate toLoad; 
-  // Add(ks_output, orig_elems, toLoad);
-  AddCore(ks_output.ax__, ks_output.bx__, orig_elems.ax__, orig_elems.bx__, toLoad.ax__, toLoad.bx__);
-
-  toLoad.level = orig_elems.level;
-  toLoad.noiseScaleDeg = orig_elems.noiseScaleDeg;
-  toLoad.scalingFactor = orig_elems.scalingFactor;
-
-  return toLoad;
+  return EvalMultAndRelin(ct, ct, evk);
 }
 
 Ciphertext Context::EvalSquareAndRelinNoRescale(const Ciphertext& ct, const EvaluationKey& evk) const {
@@ -648,6 +649,7 @@ CtAccurate Context::EvalMultAndRelinNoRescale(const CtAccurate& ct1, const CtAcc
   DeviceVector gpu_to_relin_2;
   CtAccurate orig_elems;
   EvalMult(ct1, ct2, orig_elems.bx__, orig_elems.ax__, gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "EvalMult");
   orig_elems.level = ct1.level;
   orig_elems.noiseScaleDeg = ct1.noiseScaleDeg + ct2.noiseScaleDeg;
   orig_elems.scalingFactor = ct1.scalingFactor * ct2.scalingFactor;
@@ -655,22 +657,26 @@ CtAccurate Context::EvalMultAndRelinNoRescale(const CtAccurate& ct1, const CtAcc
 
 
   DeviceVector raisedDigits = ModUp(gpu_to_relin_2);
+  SyncLargeRingStage(degree__, "ModUp");
 
 
 
   DeviceVector ks_a, ks_b;
   KeySwitch(raisedDigits, evk, ks_a, ks_b);
+  SyncLargeRingStage(degree__, "KeySwitch");
 
 
 
   Ciphertext ks_output;
   ModDown(ks_a, ks_output.ax__);
   ModDown(ks_b, ks_output.bx__);
+  SyncLargeRingStage(degree__, "ModDown");
 
 
 
   CtAccurate toLoad; 
   AddCore(ks_output.ax__, ks_output.bx__, orig_elems.ax__, orig_elems.bx__, toLoad.ax__, toLoad.bx__);
+  SyncLargeRingStage(degree__, "EvalMultAndRelinNoRescale::AddCore");
 
   toLoad.level = orig_elems.level;
   toLoad.noiseScaleDeg = orig_elems.noiseScaleDeg;
@@ -682,32 +688,7 @@ CtAccurate Context::EvalMultAndRelinNoRescale(const CtAccurate& ct1, const CtAcc
 }
 
 CtAccurate Context::EvalSquareAndRelinNoRescale(const CtAccurate& ct, const EvaluationKey& evk) const {
-  DeviceVector gpu_to_relin_2;
-  CtAccurate orig_elems;
-  EvalSquare(ct, orig_elems.bx__, orig_elems.ax__, gpu_to_relin_2);
-  orig_elems.level = ct.level;
-  orig_elems.noiseScaleDeg = ct.noiseScaleDeg + ct.noiseScaleDeg;
-  orig_elems.scalingFactor = ct.scalingFactor * ct.scalingFactor;
-
-  DeviceVector raisedDigits = ModUp(gpu_to_relin_2);
-
-  DeviceVector ks_a, ks_b;
-
-  KeySwitch(raisedDigits, evk, ks_a, ks_b);
-
-  Ciphertext ks_output;
-  ModDown(ks_a, ks_output.ax__);
-  ModDown(ks_b, ks_output.bx__);
-
-  CtAccurate toLoad; 
-  // Add(ks_output, orig_elems, toLoad);
-  AddCore(ks_output.ax__, ks_output.bx__, orig_elems.ax__, orig_elems.bx__, toLoad.ax__, toLoad.bx__);
-
-  toLoad.level = orig_elems.level;
-  toLoad.noiseScaleDeg = orig_elems.noiseScaleDeg;
-  toLoad.scalingFactor = orig_elems.scalingFactor;
-
-  return toLoad;
+  return EvalMultAndRelinNoRescale(ct, ct, evk);
 }
 
 
@@ -793,16 +774,16 @@ void automorph_(word64* out,
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
 
-  // compute output index
-  // uint32_t jTmp    = ((j << 1) + 1);
-  // usint idx        = ((jTmp * k) - (((jTmp * k) >> logm) << logm)) >> 1;
-  // usint jrev       = ReverseBits(j, logn);
-  // usint idxrev     = ReverseBits(idx, logn);
-  // (*precomp)[jrev] = idxrev;
-  const uint32_t jTmp    = ((dataInd << 1) + 1);
-  const uint32_t idx        = ((jTmp * auto_index) - (((jTmp * auto_index) >> (log_degree+1)) << (log_degree+1))) >> 1;
-  const uint32_t jrev       = ReverseBits(dataInd, log_degree);
-  const uint32_t idxrev     = ReverseBits(idx, log_degree);
+  // The CPU/OpenFHE contract indexes automorphism maps by jrev, where
+  // precomp[jrev] = idxrev. The direct GPU kernel must therefore treat the
+  // thread-local data index as the bit-reversed output slot, recover the
+  // natural-order j, compute idx, and finally read from idxrev.
+  const uint32_t jrev = dataInd;
+  const uint32_t j = ReverseBits(jrev, log_degree);
+  const uint64_t jTmp = (static_cast<uint64_t>(j) << 1) + 1;
+  const uint64_t product = jTmp * static_cast<uint64_t>(auto_index);
+  const uint32_t idx = static_cast<uint32_t>((product & ((static_cast<uint64_t>(1) << (log_degree + 1)) - 1)) >> 1);
+  const uint32_t idxrev = ReverseBits(idx, log_degree);
 
   out[limbInd*degree + jrev] = in[limbInd*degree + idxrev];
 }
@@ -816,34 +797,35 @@ void automorph_pair_(word64* out_a, word64* out_b,
   const uint32_t limbInd = i >> log_degree;
   const uint32_t dataInd = i & degree_mask;
 
-  // compute output index
-  // uint32_t jTmp    = ((j << 1) + 1);
-  // usint idx        = ((jTmp * k) - (((jTmp * k) >> logm) << logm)) >> 1;
-  // usint jrev       = ReverseBits(j, logn);
-  // usint idxrev     = ReverseBits(idx, logn);
-  // (*precomp)[jrev] = idxrev;
-  const uint32_t jTmp    = ((dataInd << 1) + 1);
-  const uint32_t idx        = ((jTmp * auto_index) - (((jTmp * auto_index) >> (log_degree+1)) << (log_degree+1))) >> 1;
-  const uint32_t jrev       = ReverseBits(dataInd, log_degree);
-  const uint32_t idxrev     = ReverseBits(idx, log_degree);
+  const uint32_t jrev = dataInd;
+  const uint32_t j = ReverseBits(jrev, log_degree);
+  const uint64_t jTmp = (static_cast<uint64_t>(j) << 1) + 1;
+  const uint64_t product = jTmp * static_cast<uint64_t>(auto_index);
+  const uint32_t idx = static_cast<uint32_t>((product & ((static_cast<uint64_t>(1) << (log_degree + 1)) - 1)) >> 1);
+  const uint32_t idxrev = ReverseBits(idx, log_degree);
 
   out_a[limbInd*degree + jrev] = in_a[limbInd*degree + idxrev];
   out_b[limbInd*degree + jrev] = in_b[limbInd*degree + idxrev];
 }
 
 DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const uint32_t auto_index) const {
-  // This function is untested.
-  
+  if (degree__ > 32768) {
+    std::vector<uint32_t> inds(degree__);
+    lbcrypto::PrecomputeAutoMap(degree__, auto_index, &inds);
+    return AutomorphismTransform(in, inds);
+  }
+
   DeviceVector out(in.size());
   const uint32_t numLimbs = in.size() / degree__;
+  assert(in.size() == numLimbs * degree__);
 
   const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
   const int block_dim = ChooseBlockDim(total_size);
   const int grid_dim = CeilDiv(total_size, block_dim);
-  const uint32_t degree_mask = degree__-1;
-  automorph_<<<grid_dim, block_dim>>>(out.data(), in.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
-  CUDA_KERNEL_CHECK();
-
+  const uint32_t degree_mask = degree__ - 1;
+  automorph_<<<grid_dim, block_dim>>>(out.data(), in.data(), auto_index, param__.log_degree_, degree__, degree_mask,
+                                      static_cast<uint32_t>(total_size));
+  SyncLargeRingStage(degree__, "AutomorphismTransform(auto_index)");
   return out;
 }
 
@@ -864,7 +846,6 @@ DeviceVector Context::AutomorphismTransform(const DeviceVector& in, const std::v
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   permute_<<<grid_dim, block_dim>>>(out.data(), in.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
-  CUDA_KERNEL_CHECK();
 
   return out;
 }
@@ -886,51 +867,63 @@ void Context::AutomorphismTransformInPlace(CtAccurate& in, const std::vector<uin
   const int grid_dim = CeilDiv(total_size, block_dim);
   const uint32_t degree_mask = degree__-1;
   permute_two_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), indices_gpu.data(), param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
-  CUDA_KERNEL_CHECK();
+  SyncLargeRingStage(degree__, "AutomorphismTransformInPlace(map)");
 
-  in.ax__ = DeviceVector(out_a);
-  in.bx__ = DeviceVector(out_b);
+  in.ax__ = std::move(out_a);
+  in.bx__ = std::move(out_b);
 }
 
 void Context::AutomorphismTransformInPlace(CtAccurate& in, const uint32_t auto_index) const {
-  // This function seems to work fine but should be tested further.
+  if (degree__ > 32768) {
+    std::vector<uint32_t> inds(degree__);
+    lbcrypto::PrecomputeAutoMap(degree__, auto_index, &inds);
+    AutomorphismTransformInPlace(in, inds);
+    return;
+  }
 
   DeviceVector out_a(in.ax__.size());
   DeviceVector out_b(in.bx__.size());
   const uint32_t numLimbs = in.ax__.size() / degree__;
+  assert(in.ax__.size() == numLimbs * degree__);
+  assert(in.bx__.size() == numLimbs * degree__);
 
   const std::size_t total_size = static_cast<std::size_t>(degree__) * static_cast<std::size_t>(numLimbs);
   const int block_dim = ChooseBlockDim(total_size);
   const int grid_dim = CeilDiv(total_size, block_dim);
-  const uint32_t degree_mask = degree__-1;
-  automorph_pair_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), auto_index, param__.log_degree_, degree__, degree_mask, static_cast<uint32_t>(total_size));
-  CUDA_KERNEL_CHECK();
+  const uint32_t degree_mask = degree__ - 1;
+  automorph_pair_<<<grid_dim, block_dim>>>(out_a.data(), out_b.data(), in.ax__.data(), in.bx__.data(), auto_index,
+                                           param__.log_degree_, degree__, degree_mask,
+                                           static_cast<uint32_t>(total_size));
+  SyncLargeRingStage(degree__, "AutomorphismTransformInPlace(auto_index)");
 
-  in.ax__ = DeviceVector(out_a);
-  in.bx__ = DeviceVector(out_b);
+  in.ax__ = std::move(out_a);
+  in.bx__ = std::move(out_b);
 }
 
 CtAccurate Context::EvalAtIndex(const CtAccurate& ct, const EvaluationKey& evk, const uint32_t auto_index) const {
-  // Correct order: KeySwitch THEN AutomorphismTransform
-  // (matches CPU EvalAutomorphism in base-leveledshe.cpp)
-  
-  // Step 1: ModUp on the original ax__ (not transformed)
+  // Match CPU EvalAutomorphism semantics: KeySwitch FIRST, then Automorphism.
+  // The eval automorphism key is generated by KeySwitchGen(old=s, new=σ(s)),
+  // so it expects the KeySwitch to run on the ORIGINAL c1 before any
+  // automorphism is applied.  Doing Automorphism → KeySwitch (the previous
+  // order) feeds the KS a permuted c1 whose digit decomposition no longer
+  // aligns with the key's secret-key orientation.
   DeviceVector raisedDigits = ModUp(ct.ax__);
+  SyncLargeRingStage(degree__, "EvalAtIndex::ModUp");
 
-  // Step 2: KeySwitch
   DeviceVector ks_a, ks_b;
   KeySwitch(raisedDigits, evk, ks_a, ks_b);
+  SyncLargeRingStage(degree__, "EvalAtIndex::KeySwitch");
 
-  // Step 3: ModDown
   CtAccurate result;
   ModDown(ks_a, result.ax__);
   ModDown(ks_b, result.bx__);
+  SyncLargeRingStage(degree__, "EvalAtIndex::ModDown");
 
-  // Step 4: Add back the original bx__ (scaled by P during ModDown)
   AddCoreInPlace(result.bx__, ct.bx__);
+  SyncLargeRingStage(degree__, "EvalAtIndex::AddCoreInPlace(original c0)");
 
-  // Step 5: Apply automorphism transform AFTER key switch
   AutomorphismTransformInPlace(result, auto_index);
+  SyncLargeRingStage(degree__, "EvalAtIndex::AutomorphismTransformInPlace");
 
   result.level = ct.level;
   result.noiseScaleDeg = ct.noiseScaleDeg;
@@ -951,7 +944,7 @@ __global__ __launch_bounds__(256, 8)
 void mulAndAddScaled_(word64 *op1, const word64* __restrict__ op2, const word64* __restrict__ scalar,
   // const word64* scalar_shoup,
   const word64* __restrict__ primes,
-  const word64 * __restrict__ barrett_ratios, const word64 * __restrict__ barrett_Ks,
+  const word64 * __restrict__ barrett_ratios_128, const word64 * __restrict__ barrett_Ks,
   const uint32_t op2_limbs, const uint32_t degree) {
 
   STRIDED_LOOP_START(degree * op2_limbs, i);
@@ -960,7 +953,8 @@ void mulAndAddScaled_(word64 *op1, const word64* __restrict__ op2, const word64*
   const auto prime = primes[prime_idx];
   // const word64 toAdd = mul_and_reduce_shoup(op2[i], scalar[prime_idx], scalar_shoup[prime_idx], prime);
   const auto toReduce = mult_64_64_128(op2[i], scalar[prime_idx]);
-  const auto toAdd = barret_reduction_128_64(toReduce, prime, barrett_ratios[prime_idx], barrett_Ks[prime_idx]);
+  const auto toAdd = barret_reduction_128_64(toReduce, prime,
+      barrett_ratios_128[2 * prime_idx], barrett_ratios_128[2 * prime_idx + 1], barrett_Ks[prime_idx]);
   op1[i] += toAdd;
   if (op1[i] >= prime) op1[i] -= prime;
   STRIDED_LOOP_END;
@@ -992,21 +986,21 @@ void Context::AddScaledMessageTerm(DeviceVector& inner_prod_b, const DeviceVecto
     inner_prod_b.data(), message_term.data(), Pmodq.data(), 
     // Pmodq_shoup.data(), 
     primes__.data(), 
-    barret_ratio__.data(), barret_k__.data(),
+    barret_ratio_128__.data(), barret_k__.data(),
     message_limbs, degree__);
-  CUDA_KERNEL_CHECK();
 }
 
 // NTT is made up of two NTT stages. Here the 'first' means the first NTT
 // stage in NTT (so it becomes second in view of iNTT).
 DeviceVector Context::FromNTT(const DeviceVector &in) const {
-  static std::once_flag s_from_ntt_flag;
-  std::call_once(s_from_ntt_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
                            cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   DeviceVector out;
   out.resize(in.size());
   const int batch = in.size() / degree__;
@@ -1026,7 +1020,6 @@ DeviceVector Context::FromNTT(const DeviceVector &in) const {
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(),
       out.data());
-  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoP<<<grid, (first_stage_radix_size / 8) * pad,
                                  (first_stage_radix_size + pad + 1) * pad *
                                      sizeof(uint64_t)>>>(
@@ -1039,13 +1032,14 @@ DeviceVector Context::FromNTT(const DeviceVector &in) const {
 }
 
 void Context::FromNTTInplace(word64 *op1, int start_prime_idx, int batch, const bool verbose) const {
-  static std::once_flag s_from_ntt_inplace_flag;
-  std::call_once(s_from_ntt_inplace_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase2OoP,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Intt8PointPerThreadPhase1OoP,
                            cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   const int total_ntt_work = (degree__ / 8) * batch;
   const int grid_dim_val = (total_ntt_work + 255) / 256;
   dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
@@ -1063,7 +1057,6 @@ void Context::FromNTTInplace(word64 *op1, int start_prime_idx, int batch, const 
       second_radix_size / per_thread_ntt_size,
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(), op1);
-  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoP<<<gridDim, (first_stage_radix_size / 8) * pad,
                                  (first_stage_radix_size + pad + 1) * pad *
                                      sizeof(uint64_t)>>>(
@@ -1095,7 +1088,6 @@ DeviceVector Context::FromNTT(const DeviceVector &in,
       inverse_power_of_roots_div_two__.data(),
       inverse_scaled_power_of_roots_div_two__.data(), primes__.data(),
       out.data());
-  CUDA_KERNEL_CHECK();
   Intt8PointPerThreadPhase1OoPWithEpilogue<<<
       grid, (first_stage_radix_size / 8) * pad,
       (first_stage_radix_size + pad + 1) * pad * sizeof(uint64_t)>>>(
@@ -1110,7 +1102,7 @@ DeviceVector Context::FromNTT(const DeviceVector &in,
 DeviceVector Context::ModUp(const DeviceVector &in) const {
   const int num_moduli = in.size() / degree__;
   const int beta = ceil(float(num_moduli) / float(alpha__));
-  const int num_moduli_after_modup = num_moduli + alpha__;
+  const int num_moduli_after_modup = num_moduli + num_special_moduli__;
   // std::cout << "Context ModUp params: " << alpha__ << " " << beta << std::endl;
   // std::cout <<"\t" << num_moduli << " " << alpha__ << std::endl;
   // if ((num_moduli+1) % alpha__ != 0) {
@@ -1132,7 +1124,7 @@ DeviceVector Context::ModUp(const DeviceVector &in) const {
 }
 
 void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_original_input_limbs) const {
-  const int num_moduli_after_modup = num_original_input_limbs + alpha__;
+  const int num_moduli_after_modup = num_original_input_limbs + num_special_moduli__;
   // if (alpha__ == 1) {
   //   DeviceVector temp(param__.max_num_moduli_ * degree__);
   //   cudaMemcpyAsync(temp.data() + idx * degree__, from, 8 * degree__,
@@ -1148,6 +1140,25 @@ void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_o
     const int beta = ceil(float(num_original_input_limbs)/(float)alpha__);
     if (idx == beta-1) 
       num_raised_input_limbs = num_original_input_limbs - idx*alpha__;
+    if (num_raised_input_limbs == 1) {
+      DeviceVector coeff_limb(degree__);
+      cudaMemcpyAsync(coeff_limb.data(), from, 8 * degree__, cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+      FromNTTInplace(coeff_limb.data(), 0, 1);
+      SyncLargeRingStage(degree__, "ModUpImpl::FromNTTInplace(single)");
+
+      ModUpLengthIsOne(coeff_limb.data(), from, begin_idx, num_moduli_after_modup - num_raised_input_limbs, to);
+      SyncLargeRingStage(degree__, "ModUpImpl::ModUpLengthIsOne");
+
+      HostVector prime_inds(num_original_input_limbs + num_special_moduli__);
+      for (size_t i = 0; i < num_original_input_limbs; i++) prime_inds[i] = i;
+      for (size_t i = 0; i < num_special_moduli__; i++) prime_inds[num_original_input_limbs+i] = param__.chain_length_ + i;
+      DeviceVector prime_inds_device(prime_inds);
+      ToNTTInplaceExceptSomeRange(to, 0, num_moduli_after_modup, begin_idx, 1, prime_inds_device);
+      SyncLargeRingStage(degree__, "ModUpImpl::ToNTTInplaceExceptSomeRange(single)");
+      cudaMemcpyAsync(to + (degree__ * begin_idx), from, 8 * degree__, cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+      SyncLargeRingStage(degree__, "ModUpImpl::RestoreInputLimbs(single)");
+      return;
+    }
     cudaMemcpyAsync(to + (degree__ * begin_idx), from, 8 * num_raised_input_limbs * degree__, cudaMemcpyDeviceToDevice, cudaStreamLegacy);
     // if (idx == 0) {
     //   DeviceVector from_vec(degree__*num_raised_input_limbs);
@@ -1157,6 +1168,7 @@ void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_o
     //     std::cout << "ModUpImpl (gpu) input limb (eval) " << limbInd << " : " << from_host[limbInd*degree__] << std::endl; 
     // }
     FromNTTInplace(to, begin_idx, num_raised_input_limbs);  // these are always over standard limbs
+    SyncLargeRingStage(degree__, "ModUpImpl::FromNTTInplace");
     // if (idx == 0) {
     //   DeviceVector from_vec(degree__*num_raised_input_limbs);
     //   cudaMemcpyAsync(from_vec.data(), to, 8*num_raised_input_limbs*degree__, cudaMemcpyDeviceToDevice, cudaStreamLegacy);
@@ -1167,17 +1179,20 @@ void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_o
     const DeviceVector &hat_inverse_vec = hat_inverse_vec__[num_original_input_limbs-1].at(idx);
     const DeviceVector &hat_inverse_vec_psinv = hat_inverse_vec_shoup__[num_original_input_limbs-1].at(idx);
     ConstMultBatch(to, hat_inverse_vec, hat_inverse_vec_psinv, begin_idx, num_raised_input_limbs, to);  // these are always over standard limbs
+    SyncLargeRingStage(degree__, "ModUpImpl::ConstMultBatch");
 
     ModUpMatMul(to + degree__ * begin_idx, idx, to, num_original_input_limbs);  // this handles the shifted limbs
+    SyncLargeRingStage(degree__, "ModUpImpl::ModUpMatMul");
     
-    HostVector prime_inds(num_original_input_limbs + alpha__);
-    assert(prime_inds.size() == num_original_input_limbs + alpha__);
+      HostVector prime_inds(num_original_input_limbs + num_special_moduli__);
+      assert(prime_inds.size() == num_original_input_limbs + num_special_moduli__);
     for (size_t i = 0; i < num_original_input_limbs; i++) prime_inds[i] = i;
-    for (size_t i = 0; i < alpha__; i++) prime_inds[num_original_input_limbs+i] = param__.chain_length_ + i;
+      for (size_t i = 0; i < num_special_moduli__; i++) prime_inds[num_original_input_limbs+i] = param__.chain_length_ + i;
 
     DeviceVector prime_inds_device(prime_inds);
 
     ToNTTInplaceExceptSomeRange(to, 0, num_moduli_after_modup, begin_idx, num_raised_input_limbs, prime_inds_device);
+    SyncLargeRingStage(degree__, "ModUpImpl::ToNTTInplaceExceptSomeRange");
     // This NTT has three pieces. The first is from 0 to the start of the input limbs
     // ToNTTInplace(to, 0, begin_idx);
     // The second is from the end of the input limbs to the end of the end of the standard basis
@@ -1185,6 +1200,7 @@ void Context::ModUpImpl(const word64 *from, word64 *to, int idx, const int num_o
     // The third piece this is the extension limbs
     // ToNTTInplace(to - num_original_input_limbs, )
     cudaMemcpyAsync(to + (degree__ * begin_idx), from, 8 * num_raised_input_limbs * degree__, cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+    SyncLargeRingStage(degree__, "ModUpImpl::RestoreInputLimbs");
   // }
 }
 
@@ -1215,7 +1231,6 @@ void Context::ConstMultBatch(const word64 *op1, const DeviceVector &op2,
   constMultBatch_<<<grid_dim, block_dim>>>(degree__, primes__.data(), op1,
                                            op2.data(), op2_psinv.data(),
                                            start_prime_idx, batch, res);
-  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -1245,7 +1260,6 @@ void Context::ConstMultBatchModDown(const word64 *op1, const int start_limb_idx,
   constMultBatchModDown_<<<grid_dim, block_dim>>>(
     degree__, primes__.data(), op1, start_limb_idx, op2.data(), op2_psinv.data(), 
     start_prime_idx, batch, res);
-  CUDA_KERNEL_CHECK();
 }
 
 __device__ uint128_t4 AccumulateInModUp(const word64 *ptr, const int degree,
@@ -1290,7 +1304,7 @@ __device__ uint128_t4 AccumulateInModUp(const word64 *ptr, const int degree,
 __global__ __launch_bounds__(256, 4)
 void modUpStepTwoKernel(
   const word64 * __restrict__ ptr, const int begin_idx, const int degree, const word64 * __restrict__ primes,
-  const word64 * __restrict__ barrett_ratios, const word64 * __restrict__ barrett_Ks,
+  const word64 * __restrict__ barrett_ratios_128, const word64 * __restrict__ barrett_Ks,
   const word64 * __restrict__ hat_mod_end, const int hat_mod_end_size,
   const word64 start_length, const word64 end_length, word64 *to) {
   constexpr const int unroll_number = 4;
@@ -1308,25 +1322,21 @@ void modUpStepTwoKernel(
   assert(degree_idx < degree);
   uint128_t4 accum = AccumulateInModUp(ptr, degree, s_hat_mod_end, start_length, degree_idx, hat_mod_end_idx);
   const auto prime = primes[out_prime_idx];
-  const auto barret_ratio = barrett_ratios[out_prime_idx];
   const auto barret_k = barrett_Ks[out_prime_idx];
-  {
-    uint64_t out =
-        barret_reduction_128_64(accum.x, prime, barret_ratio, barret_k);
-    uint64_t out2 =
-        barret_reduction_128_64(accum.y, prime, barret_ratio, barret_k);
-    asm("st.cs.global.v2.u64 [%0],{%1, %2};" ::"l"(to + out_prime_idx * degree +
-                                                   degree_idx),
-        "l"(out), "l"(out2));
+  word64* base = to + out_prime_idx * degree + degree_idx;
+  base[0] = barret_reduction_128_64(accum.x, prime,
+      barrett_ratios_128[2 * out_prime_idx], barrett_ratios_128[2 * out_prime_idx + 1], barret_k);
+  if (degree_idx + 1 < degree) {
+    base[1] = barret_reduction_128_64(accum.y, prime,
+        barrett_ratios_128[2 * out_prime_idx], barrett_ratios_128[2 * out_prime_idx + 1], barret_k);
   }
-  {
-    uint64_t out =
-        barret_reduction_128_64(accum.z, prime, barret_ratio, barret_k);
-    uint64_t out2 =
-        barret_reduction_128_64(accum.w, prime, barret_ratio, barret_k);
-    asm("st.cs.global.v2.u64 [%0],{%1, %2};" ::"l"(to + out_prime_idx * degree +
-                                                   degree_idx + 2),
-        "l"(out), "l"(out2));
+  if (degree_idx + 2 < degree) {
+    base[2] = barret_reduction_128_64(accum.z, prime,
+        barrett_ratios_128[2 * out_prime_idx], barrett_ratios_128[2 * out_prime_idx + 1], barret_k);
+  }
+  if (degree_idx + 3 < degree) {
+    base[3] = barret_reduction_128_64(accum.w, prime,
+        barrett_ratios_128[2 * out_prime_idx], barrett_ratios_128[2 * out_prime_idx + 1], barret_k);
   }
   STRIDED_LOOP_END;
 }
@@ -1368,22 +1378,21 @@ void ModDownKernel(
   uint128_t4 accum = AccumulateInModUp(ptr, ring.degree, hat_mod_end,
                                        start_length, degree_idx, out_prime_idx);
   const auto prime = ring.primes[out_prime_idx];
-  const auto barret_ratio = ring.barret_ratio[out_prime_idx];
   const auto barret_k = ring.barret_k[out_prime_idx];
   {
     uint64_t out =
-        barret_reduction_128_64(accum.x, prime, barret_ratio, barret_k);
+        barret_reduction_128_64(accum.x, prime, ring.barret_ratio_128[2 * out_prime_idx], ring.barret_ratio_128[2 * out_prime_idx + 1], barret_k);
     uint64_t out2 =
-        barret_reduction_128_64(accum.y, prime, barret_ratio, barret_k);
+        barret_reduction_128_64(accum.y, prime, ring.barret_ratio_128[2 * out_prime_idx], ring.barret_ratio_128[2 * out_prime_idx + 1], barret_k);
     asm("st.cs.global.v2.u64 [%0],{%1, %2};" ::"l"(
             to + out_prime_idx * ring.degree + degree_idx),
         "l"(out), "l"(out2));
   }
   {
     uint64_t out =
-        barret_reduction_128_64(accum.z, prime, barret_ratio, barret_k);
+        barret_reduction_128_64(accum.z, prime, ring.barret_ratio_128[2 * out_prime_idx], ring.barret_ratio_128[2 * out_prime_idx + 1], barret_k);
     uint64_t out2 =
-        barret_reduction_128_64(accum.w, prime, barret_ratio, barret_k);
+        barret_reduction_128_64(accum.w, prime, ring.barret_ratio_128[2 * out_prime_idx], ring.barret_ratio_128[2 * out_prime_idx + 1], barret_k);
     asm("st.cs.global.v2.u64 [%0],{%1, %2};" ::"l"(
             to + out_prime_idx * ring.degree + degree_idx + 2),
         "l"(out), "l"(out2));
@@ -1406,7 +1415,6 @@ void Context::NegateInplace(word64 *op1, const int batch) const {
   const int grid_dim = degree__ * batch / block_dim;
   negateInplace_<<<grid_dim, block_dim>>>(degree__, log2(degree__), batch,
                                           primes__.data(), op1);
-  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -1430,28 +1438,28 @@ void Context::SubInplace(word64 *op1, const word64 *op2,
   const int grid_dim = degree__ * batch / block_dim;
   subInplace_<<<grid_dim, block_dim>>>(degree__, log2(degree__), batch,
                                        primes__.data(), op1, op2);
-  CUDA_KERNEL_CHECK();
 }
 
 // Input should be base limbs + extension limbs
 // output should just be base limbs
 // void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v, long target_chain_idx) const {
 void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
-  static std::once_flag s_mod_down_flag;
-  std::call_once(s_mod_down_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(ModDownKernel, cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   // if (target_chain_idx > param__.chain_length_)
     // throw std::logic_error("Target chain index is too big.");
   
   const int input_num_limbs = from_v.size()/degree__;
-  const int output_num_limbs = input_num_limbs - param__.alpha_;
+  const int output_num_limbs = input_num_limbs - param__.num_special_moduli_;
 
   to_v.resize(output_num_limbs * degree__);
 
   const int gap = param__.chain_length_ - output_num_limbs;
   // const int start_length = param__.max_num_moduli_ - output_num_limbs;
-  const int start_length = param__.alpha_;
+  const int start_length = param__.num_special_moduli_;
   const int end_length = output_num_limbs;
   const int block_dim = 256;
   const int grid_dim = degree__ * end_length / block_dim;
@@ -1465,25 +1473,44 @@ void Context::ModDown(DeviceVector &from_v, DeviceVector &to_v) const {
     // std::cout << "ModDown start length: " << start_length << std::endl;
     // std::cout << "ModDown end length: " << end_length << std::endl;
 
-    // shift primes to always be over the final primes
-    // FromNTTInplace(from_v.data(), end_length, start_length);
-    // when we shift by param__.chain_length_, we want to land on from_v.data() + end_length
-    FromNTTInplace((from_v.data()) - degree__*(param__.chain_length_ - end_length), param__.chain_length_, start_length);
+    DeviceVector ext_coeff(start_length * degree__);
+    cudaMemcpyAsync(ext_coeff.data(),
+                    from_v.data() + degree__ * end_length,
+                    sizeof(DeviceVector::Dtype) * start_length * degree__,
+                    cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+    SyncLargeRingStage(degree__, "ModDown::CopyExtSlice");
+    // FromNTTInplace indexes both the buffer and the prime tables by
+    // start_prime_idx. To test/use the special-prime roots safely, place the
+    // copied P suffix into a padded scratch buffer at its global prime offset,
+    // run iNTT there, then copy the transformed slice back into a compact
+    // local buffer for the remaining local-slice ModDown math.
+    DeviceVector ext_coeff_ntt((param__.chain_length_ + start_length) * degree__);
+    cudaMemcpyAsync(ext_coeff_ntt.data() + degree__ * param__.chain_length_,
+                    ext_coeff.data(),
+                    sizeof(DeviceVector::Dtype) * start_length * degree__,
+                    cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+    SyncLargeRingStage(degree__, "ModDown::PadExtSliceForFromNTT");
+    FromNTTInplace(ext_coeff_ntt.data(), param__.chain_length_, start_length);
+    cudaMemcpyAsync(ext_coeff.data(),
+                    ext_coeff_ntt.data() + degree__ * param__.chain_length_,
+                    sizeof(DeviceVector::Dtype) * start_length * degree__,
+                    cudaMemcpyDeviceToDevice, cudaStreamLegacy);
+    SyncLargeRingStage(degree__, "ModDown::FromNTTInplaceExt");
 
     // these are always the same
     const DeviceVector &hat_inverse_vec = hat_inverse_vec_moddown__.at(gap);
     const DeviceVector &hat_inverse_vec_psinv = hat_inverse_vec_shoup_moddown__.at(gap);
 
-    // shift the primes again
-    ConstMultBatchModDown(from_v.data(), end_length, hat_inverse_vec, hat_inverse_vec_psinv,
-                   param__.chain_length_, start_length, from_v.data());
+    ConstMultBatchModDown(ext_coeff.data(), 0, hat_inverse_vec, hat_inverse_vec_psinv,
+                   param__.chain_length_, start_length, ext_coeff.data());
+    SyncLargeRingStage(degree__, "ModDown::ConstMultBatchExt");
 
-    auto ptr = from_v.data() + degree__ * end_length;
+    auto ptr = ext_coeff.data();
     const auto &prod_q_i_mod_q_j = prod_q_i_mod_q_j_moddown__[gap];
     ModDownKernel<<<grid_dim, block_dim, prod_q_i_mod_q_j.size() * sizeof(word64)>>>(
         GetKernelParams(), ptr, prod_q_i_mod_q_j.data(),
         start_length * end_length, start_length, end_length, to_v.data());
-  CUDA_KERNEL_CHECK();
+    SyncLargeRingStage(degree__, "ModDown::Kernel");
   // }
   const auto &prod_inv = prod_inv_moddown__.at(gap);
   const auto &prod_inv_psinv = prod_inv_shoup_moddown__.at(gap);
@@ -1578,6 +1605,36 @@ void switchModulusFused_(
 // }
 
 // Just drop the last limb
+void Context::RescaleSwitchOnly(const DeviceVector &from_v, DeviceVector &to_v) const {
+  const int inputLimbs = from_v.size()/degree__;
+  assert(inputLimbs <= param__.chain_length_);
+  assert(inputLimbs > 1);
+  const int end_length = inputLimbs - 1;
+
+  DeviceVector last_from_limb(degree__);
+  cudaMemcpyAsync(last_from_limb.data(), from_v.data() + end_length * degree__, degree__ * sizeof(DeviceVector::Dtype),
+                  cudaMemcpyDefault, last_from_limb.stream_);
+  FromNTTInplace(last_from_limb.data(), end_length, 1);
+
+  to_v.resize(end_length * degree__);
+  const auto oldModulus = param__.primes_[end_length];
+  switchModulusFused_<<<degree__ * end_length / 256, 256>>>(to_v.data(), last_from_limb.data(), degree__, oldModulus,
+                                                            primes__.data(), barret_ratio__.data(), barret_k__.data());
+}
+
+void Context::RescaleLowerScaleOnly(const DeviceVector &from_v, DeviceVector &to_v) const {
+  const int inputLimbs = from_v.size()/degree__;
+  assert(inputLimbs <= param__.chain_length_);
+  assert(inputLimbs > 1);
+  const int end_length = inputLimbs - 1;
+  const int gap = param__.chain_length_ - inputLimbs;
+  const auto &prod_inv = prod_inv_rescale__.at(gap);
+  const auto &prod_inv_psinv = prod_inv_shoup_rescale__.at(gap);
+  to_v.resize(end_length * degree__);
+  cudaMemcpyAsync(to_v.data(), from_v.data(), to_v.size() * sizeof(DeviceVector::Dtype), cudaMemcpyDefault, cudaStreamLegacy);
+  ConstMultBatch(to_v.data(), prod_inv, prod_inv_psinv, 0, end_length, to_v.data());
+}
+
 void Context::Rescale(const DeviceVector &from_v, DeviceVector &to_v) const {
   
   const int inputLimbs = from_v.size()/degree__;
@@ -1593,7 +1650,12 @@ void Context::Rescale(const DeviceVector &from_v, DeviceVector &to_v) const {
   DeviceVector last_from_limb(degree__);
   cudaMemcpyAsync(last_from_limb.data(), from_v.data() + end_length*degree__, degree__ * sizeof(DeviceVector::Dtype),
                   cudaMemcpyDefault, last_from_limb.stream_);
-  FromNTTInplaceShiftedPointer(last_from_limb, end_length, 1);
+  DeviceVector last_from_limb_ntt(param__.chain_length_ * degree__);
+  cudaMemcpyAsync(last_from_limb_ntt.data() + end_length * degree__, last_from_limb.data(),
+                  degree__ * sizeof(DeviceVector::Dtype), cudaMemcpyDefault, last_from_limb.stream_);
+  FromNTTInplace(last_from_limb_ntt.data(), end_length, 1);
+  cudaMemcpyAsync(last_from_limb.data(), last_from_limb_ntt.data() + end_length * degree__,
+                  degree__ * sizeof(DeviceVector::Dtype), cudaMemcpyDefault, last_from_limb.stream_);
 
   // FromNTTInplace(from_v.data(), end_length, 1);
 
@@ -1626,7 +1688,6 @@ void Context::Rescale(const DeviceVector &from_v, DeviceVector &to_v) const {
   // }
 
   switchModulusFused_<<<degree__ * end_length / 256, 256>>>(to_v.data(), last_from_limb.data(), degree__, oldModulus, primes__.data(), barret_ratio__.data(), barret_k__.data());
-  CUDA_KERNEL_CHECK();
 
   // fuse four functions: NTT, sub, negate, and const-mult.
   if (is_rescale_fused)
@@ -1669,8 +1730,8 @@ Ciphertext Context::DropLimbs(const Ciphertext& ct, const uint32_t numDropLimbs)
   out.ax__.resize(degree__*outputLimbs);
   out.bx__.resize(degree__*outputLimbs);
 
-  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
-  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
+  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
 
   return out;
 }
@@ -1682,8 +1743,8 @@ CtAccurate Context::DropLimbs(const CtAccurate& ct, const uint32_t numDropLimbs)
   out.ax__.resize(degree__*outputLimbs);
   out.bx__.resize(degree__*outputLimbs);
 
-  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
-  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyDeviceToDevice);
+  cudaMemcpy(out.ax__.data(), ct.ax__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
+  cudaMemcpy(out.bx__.data(), ct.bx__.data(), outputLimbs*degree__*sizeof(word64), cudaMemcpyHostToDevice);
 
   out.level = ct.level + numDropLimbs;
   out.scalingFactor = ct.scalingFactor;
@@ -1699,13 +1760,14 @@ DeviceVector Context::ToNTT(const DeviceVector& in) const {
 }
 
 void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
-  static std::once_flag s_to_ntt_inplace_flag;
-  std::call_once(s_to_ntt_inplace_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2,
                            cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   const int total_ntt_work = (degree__ / 8) * batch;
   const int grid_dim_val = (total_ntt_work + 255) / 256;
   dim3 gridDim(grid_dim_val < 2048 ? grid_dim_val : 2048);
@@ -1722,7 +1784,6 @@ void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
       op, 1, batch, degree__, start_prime_idx, pad,
       first_stage_radix_size / per_thread_ntt_size, power_of_roots__.data(),
       power_of_roots_shoup__.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2<<<gridDim, blockDim.x, per_thread_storage>>>(
       op, first_stage_radix_size, batch, degree__, start_prime_idx,
       second_radix_size / per_thread_ntt_size, power_of_roots__.data(),
@@ -1731,9 +1792,9 @@ void Context::ToNTTInplace(word64 *op, int start_prime_idx, int batch) const {
 }
 
 DeviceVector Context::copyLimbData(const DeviceVector& from, const int num_orig_limbs) const {
-  DeviceVector to; to.resize(num_orig_limbs+alpha__);
+  DeviceVector to; to.resize(num_orig_limbs + num_special_moduli__);
   cudaMemcpy(to.data(), from.data(), num_orig_limbs * sizeof(word64), cudaMemcpyHostToDevice);
-  cudaMemcpy(to.data() + num_orig_limbs, from.data() + param__.chain_length_, alpha__ * sizeof(word64), 
+  cudaMemcpy(to.data() + num_orig_limbs, from.data() + param__.chain_length_, num_special_moduli__ * sizeof(word64), 
       cudaMemcpyHostToDevice);
   // cudaMemcpyAsync(to.data(), from.data(), num_orig_limbs * sizeof(word64), cudaMemcpyHostToDevice, to.stream_);
   // cudaMemcpyAsync(to.data() + num_orig_limbs, from.data() + param__.chain_length_, alpha__ * sizeof(word64), 
@@ -1742,12 +1803,13 @@ DeviceVector Context::copyLimbData(const DeviceVector& from, const int num_orig_
 }
 
 void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int num_orig_limbs) const {
-  static std::once_flag s_mod_up_mat_mul_flag;
-  std::call_once(s_mod_up_mat_mul_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(modUpStepTwoKernel, cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   // std::cout << "In ModUpMatMul\n";
-  const int num_moduli_after_modup = num_orig_limbs + alpha__;
+  const int num_moduli_after_modup = num_orig_limbs + num_special_moduli__;
   const int unroll_factor = 4;
 
   int num_raised_input_limbs = alpha__;
@@ -1762,24 +1824,24 @@ void Context::ModUpMatMul(const word64 *ptr, int beta_idx, word64 *to, const int
 
   const auto& curr_primes = primes_qp__[num_orig_limbs - 1];
   // assert(curr_primes == primes__);
-  const auto& curr_barret_ratio = barret_ratio_qp__[num_orig_limbs - 1];
+  const auto& curr_barret_ratio_128 = barret_ratio_128_qp__[num_orig_limbs - 1];
   // assert(curr_barret_ratio == barret_ratio__);
   const auto& curr_barret_k = barret_k_qp__[num_orig_limbs - 1];
   // assert(curr_barret_k == barret_k__);
 
   // std::cout << "finished copying limb data\n";
 
-  long grid_dim{degree__ * end_length / 256 / unroll_factor};
-  int block_dim{256};
+  const int block_dim = 256;
+  const int total_threads = CeilDiv(static_cast<std::size_t>(degree__) * static_cast<std::size_t>(end_length), unroll_factor);
+  const int grid_dim = CeilDiv(static_cast<std::size_t>(total_threads), block_dim);
   const auto &prod_q_i_mod_q_j = prod_q_i_mod_q_j__[num_orig_limbs-1].at(beta_idx);
   // std::cout << "launching modUpStepTwoKernel\n";
   modUpStepTwoKernel<<<grid_dim, block_dim, prod_q_i_mod_q_j.size() * sizeof(word64)>>>(
       ptr, begin_idx, degree__, 
       // primes__.data(), barret_ratio__.data(), barret_k__.data(), 
-      curr_primes.data(), curr_barret_ratio.data(), curr_barret_k.data(),
+      curr_primes.data(), curr_barret_ratio_128.data(), curr_barret_k.data(),
       prod_q_i_mod_q_j.data(), prod_q_i_mod_q_j.size(),
       start_length, end_length, to);
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::ModUpBatchImpl(const DeviceVector &from, DeviceVector &to, int beta) const {
@@ -1787,7 +1849,7 @@ void Context::ModUpBatchImpl(const DeviceVector &from, DeviceVector &to, int bet
 
   const int num_input_limbs = from.size()/param__.degree_;
 
-  const int num_moduli_after_modup = num_input_limbs + alpha__;
+  const int num_moduli_after_modup = num_input_limbs + num_special_moduli__;
 
   const auto& prime_inds_device = prime_inds_cache__[num_input_limbs - 1];
   // std::cout << "ModUp Primes\n";
@@ -1852,7 +1914,6 @@ void Context::ModUpLengthIsOne(const word64 *ptr_after_intt,
   modUpStepTwoSimple<<<grid_dim, block_dim>>>(
       ptr_after_intt, ptr_before_intt, begin_idx, degree__, primes__.data(),
       barret_ratio__.data(), barret_k__.data(), end_length, to);
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::ToNTTInplaceExceptSomeRange(
@@ -1860,13 +1921,14 @@ void Context::ToNTTInplaceExceptSomeRange(
   int excluded_range_start, int excluded_range_size,
   const DeviceVector& prime_inds) const {
 
-  static std::once_flag s_to_ntt_except_some_range_flag;
-  std::call_once(s_to_ntt_except_some_range_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1ExcludeSomeRange,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2ExcludeSomeRange,
                            cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
 
   const int excluded_range_end = excluded_range_start + excluded_range_size;
   if (excluded_range_start < start_prime_idx ||
@@ -1889,7 +1951,6 @@ void Context::ToNTTInplaceExceptSomeRange(
       excluded_range_end, pad, first_stage_radix_size / per_thread_ntt_size,
       prime_inds.data(),
       power_of_roots__.data(), power_of_roots_shoup__.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2ExcludeSomeRange<<<grid, block.x,
                                              per_thread_storage>>>(
       op, first_stage_radix_size, batch, degree__, start_prime_idx,
@@ -1903,13 +1964,14 @@ void Context::ToNTTInplaceExceptSomeRange(
 void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
                                 const DeviceVector &epilogue,
                                 const DeviceVector &epilogue_) const {
-  static std::once_flag s_to_ntt_fused_flag;
-  std::call_once(s_to_ntt_fused_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase1,
                            cudaFuncCachePreferShared);
     cudaFuncSetCacheConfig(Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult,
                            cudaFuncCachePreferShared);
-  });
+    configured = true;
+  }
   // dim3 gridDim(8192);
   // dim3 gridDim(32768);
   const int batch = op1.size() / degree__;
@@ -1932,7 +1994,6 @@ void Context::ToNTTInplaceFused(DeviceVector &op1, const DeviceVector &op2,
       op1.data(), 1, batch, degree__, start_prime_idx, pad,
       first_stage_radix_size / per_thread_ntt_size, power_of_roots__.data(),
       power_of_roots_shoup__.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   Ntt8PointPerThreadPhase2FusedWithSubNegateConstMult<<<gridDim, blockDim.x,
                                                         per_thread_storage>>>(
       op1.data(), first_stage_radix_size, batch, degree__, start_prime_idx,
@@ -1948,7 +2009,7 @@ void sumAndReduceFused(
   const int eval_length,
   const word64 * __restrict__ eval_ax, const word64 * __restrict__ eval_bx,
   const word64 * __restrict__ prime_inds,
-  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios,
+  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios_128,
   word64 *dst_ax, word64 *dst_bx) {
 
   STRIDED_LOOP_START(degree * length, i);
@@ -1970,12 +2031,11 @@ void sumAndReduceFused(
   }
   const int prime_idx = prime_inds[i / degree];
   const auto prime = primes[prime_idx];
-  const auto barret_ratio = barret_ratios[prime_idx];
   const auto barret_k = barret_ks[prime_idx];
   const auto res_ax =
-      barret_reduction_128_64(accum_ax, prime, barret_ratio, barret_k);
+      barret_reduction_128_64(accum_ax, prime, barret_ratios_128[2 * prime_idx], barret_ratios_128[2 * prime_idx + 1], barret_k);
   const auto res_bx =
-      barret_reduction_128_64(accum_bx, prime, barret_ratio, barret_k);
+      barret_reduction_128_64(accum_bx, prime, barret_ratios_128[2 * prime_idx], barret_ratios_128[2 * prime_idx + 1], barret_k);
   dst_ax[i] = res_ax;
   dst_bx[i] = res_bx;
   STRIDED_LOOP_END;
@@ -2006,26 +2066,26 @@ void mult_(const word64 * __restrict__ modup_out,
 __global__ __launch_bounds__(256, 8)
 void Reduce(
   const uint128_t * __restrict__ accum, const int degree, const int length,
-  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios,
+  const word64 * __restrict__ primes, const word64 * __restrict__ barret_ks, const word64 * __restrict__ barret_ratios_128,
   word64 *res) {
 
   STRIDED_LOOP_START(degree * length, i);
   const int prime_idx = i / degree;
   const auto prime = primes[prime_idx];
-  const auto barret_ratio = barret_ratios[prime_idx];
   const auto barret_k = barret_ks[prime_idx];
   const auto res_ax =
-      barret_reduction_128_64(accum[i], prime, barret_ratio, barret_k);
+      barret_reduction_128_64(accum[i], prime, barret_ratios_128[2 * prime_idx], barret_ratios_128[2 * prime_idx + 1], barret_k);
   res[i] = res_ax;
   STRIDED_LOOP_END;
 }
 
 void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk, DeviceVector &sum_ax, DeviceVector &sum_bx) const {
 
-  static std::once_flag s_key_switch_flag;
-  std::call_once(s_key_switch_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(sumAndReduceFused, cudaFuncCachePreferL1);
-  });
+    configured = true;
+  }
 
   assert(modup_out.size() > 0 && modup_out.size() % degree__ == 0);
   const int total_length = modup_out.size() / degree__;
@@ -2043,7 +2103,7 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
     // possible correct beta
     int cand_num_modup_limbs = total_length / beta;
     // check that these input limbs correspond to alpha__
-    if (cand_num_modup_limbs > param__.max_num_moduli_ || beta != ceil((float)(cand_num_modup_limbs-alpha__) / (float)alpha__)) {
+  if (cand_num_modup_limbs > param__.max_num_moduli_ || beta != ceil((float)(cand_num_modup_limbs - num_special_moduli__) / (float)alpha__)) {
       beta -= 1;
       continue;
     }
@@ -2053,7 +2113,7 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
   }
 
   assert(beta > 0 && length > 0);
-  const int num_original_input_limbs = length - alpha__;
+  const int num_original_input_limbs = length - num_special_moduli__;
 
   // std::cout << "KeySwitch params\n";
   // std::cout << "\t" << total_length << " " << beta << " " << length << std::endl;
@@ -2074,34 +2134,23 @@ void Context::KeySwitch(const DeviceVector &modup_out, const EvaluationKey &evk,
     sumAndReduceFused<<<gridDim, blockDim>>>(
         modup_out.data(), degree__, length, beta, param__.max_num_moduli_, eval_ax.data(), eval_bx.data(), 
         prime_inds_device.data(),
-        primes__.data(), barret_k__.data(), barret_ratio__.data(), sum_ax.data(), sum_bx.data());
-  CUDA_KERNEL_CHECK();
+        primes__.data(), barret_k__.data(), barret_ratio_128__.data(), sum_ax.data(), sum_bx.data());
   } else {
-    const int quad_word_size_byte = sizeof(uint128_t);
-    const size_t scratch_size = modup_out.size() * quad_word_size_byte;
-    if (!ks_scratch_ax__ || ks_scratch_ax__->size() < scratch_size) {
-      ks_scratch_ax__ = std::make_unique<DeviceBuffer>(scratch_size, cudaStreamLegacy);
-      ks_scratch_bx__ = std::make_unique<DeviceBuffer>(scratch_size, cudaStreamLegacy);
+    HostVector prime_inds_host(length);
+    int current_prime_ind = 0;
+    for (int i = 0; i < length; i++) {
+      if (current_prime_ind >= num_original_input_limbs) {
+        current_prime_ind = param__.chain_length_;
+      }
+      prime_inds_host[i] = current_prime_ind;
+      current_prime_ind++;
     }
-    auto accum_ax_ptr = (uint128_t *)ks_scratch_ax__->data();
-    auto accum_bx_ptr = (uint128_t *)ks_scratch_bx__->data();
-    mult_<false><<<gridDim, blockDim>>>(modup_out.data(), eval_ax.data(),
-                                        eval_bx.data(), degree__, length,
-                                        accum_ax_ptr, accum_bx_ptr);
-  CUDA_KERNEL_CHECK();
-    for (int i = 1; i < beta; i++) {
-      const auto d2_ptr = modup_out.data() + i * degree__ * length;
-      const auto ax_ptr = eval_ax.data() + i * degree__ * param__.max_num_moduli_;
-      const auto bx_ptr = eval_bx.data() + i * degree__ * param__.max_num_moduli_;
-      mult_<true><<<gridDim, blockDim>>>(d2_ptr, ax_ptr, bx_ptr, degree__, length, accum_ax_ptr, accum_bx_ptr);
-  CUDA_KERNEL_CHECK();
-    }
-    Reduce<<<gridDim, blockDim>>>(accum_ax_ptr, degree__, length, primes__.data(), 
-                                  barret_k__.data(), barret_ratio__.data(), sum_ax.data());
-  CUDA_KERNEL_CHECK();
-    Reduce<<<gridDim, blockDim>>>(accum_bx_ptr, degree__, length, primes__.data(), 
-                                  barret_k__.data(), barret_ratio__.data(), sum_bx.data());
-  CUDA_KERNEL_CHECK();
+    DeviceVector prime_inds_device(prime_inds_host);
+    sumAndReduceFused<<<gridDim, blockDim>>>(
+        modup_out.data(), degree__, length, beta, param__.max_num_moduli_,
+        eval_ax.data(), eval_bx.data(), prime_inds_device.data(),
+        primes__.data(), barret_k__.data(), barret_ratio_128__.data(),
+        sum_ax.data(), sum_bx.data());
   }
 }
 
@@ -2124,9 +2173,9 @@ void hadamardMultAndAddBatch_(
     sum_bx += mult_64_64_128(bx[idx], mx_element);
   }
   out_ax[idx] = barret_reduction_128_64(
-      sum_ax, prime, ring.barret_ratio[prime_idx], ring.barret_k[prime_idx]);
+      sum_ax, prime, ring.barret_ratio_128[2 * prime_idx], ring.barret_ratio_128[2 * prime_idx + 1], ring.barret_k[prime_idx]);
   out_bx[idx] = barret_reduction_128_64(
-      sum_bx, prime, ring.barret_ratio[prime_idx], ring.barret_k[prime_idx]);
+      sum_bx, prime, ring.barret_ratio_128[2 * prime_idx], ring.barret_ratio_128[2 * prime_idx + 1], ring.barret_k[prime_idx]);
   if (out_ax[idx] > prime) out_ax[idx] -= prime;
   if (out_bx[idx] > prime) out_bx[idx] -= prime;
   STRIDED_LOOP_END;
@@ -2155,32 +2204,33 @@ void Context::hadamardMultAndAddBatch(const std::vector<const word64 *> ax_addr,
       (const word64 **)d_bx_addr.data(), (const word64 **)d_mx_addr.data(),
       fold_size, each_operand_size, param__.log_degree_, out_ax.data(),
       out_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(256, 8)
 void hadamardMultFused_(size_t degree, size_t log_degree,
                                size_t num_primes, const uint64_t* __restrict__ primes,
-                               const uint64_t* __restrict__ barret_ratio,
-                               const uint64_t* __restrict__ barret_k, const uint64_t* op1,
-                               const uint64_t* op2, const uint64_t* __restrict__ mx,
-                               uint64_t* op1_out, uint64_t* op2_out) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int prime_idx = i >> log_degree;
+                                const uint64_t* __restrict__ barret_ratio_128,
+                                const uint64_t* __restrict__ barret_k, const uint64_t* op1,
+                                const uint64_t* op2, const uint64_t* __restrict__ mx,
+                                uint64_t* op1_out, uint64_t* op2_out) {
+  const size_t total_size = degree * num_primes;
+  STRIDED_LOOP_START(total_size, i);
+  const size_t prime_idx = static_cast<size_t>(i) >> log_degree;
   const uint64_t prime = primes[prime_idx];
   uint64_t mx_element = mx[i];
   uint128_t out_op1 = mult_64_64_128(op1[i], mx_element);
   uint128_t out_op2 = mult_64_64_128(op2[i], mx_element);
-  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx],
-                                   barret_k[prime_idx]);
-  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx],
-                                   barret_k[prime_idx]);
+  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx],
+                                     barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio_128[2 * prime_idx],
+                                     barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  STRIDED_LOOP_END;
 }
 
 __global__ __launch_bounds__(256, 8)
 void constantMultFusedInPlace_(size_t degree, size_t log_degree,
                                size_t num_primes, const uint64_t* __restrict__ primes,
-                               const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+                               const uint64_t* __restrict__ barret_ratio_128, const uint64_t* __restrict__ barret_k,
                                uint64_t* op1, uint64_t* op2, const uint64_t* mx) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int prime_idx = i >> log_degree;
@@ -2188,95 +2238,96 @@ void constantMultFusedInPlace_(size_t degree, size_t log_degree,
   uint64_t mx_element = mx[prime_idx];
   uint128_t out_op1 = mult_64_64_128(op1[i], mx_element);
   uint128_t out_op2 = mult_64_64_128(op2[i], mx_element);
-  op1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
+  op1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
 }
 
 __global__ __launch_bounds__(256, 8)
 void integerMultFusedInPlace_(size_t degree, size_t log_degree,
                                size_t num_primes, const uint64_t* __restrict__ primes,
-                               const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+                               const uint64_t* __restrict__ barret_ratio_128, const uint64_t* __restrict__ barret_k,
                                uint64_t* op1, uint64_t* op2, const uint64_t m) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int prime_idx = i >> log_degree;
   const uint64_t prime = primes[prime_idx];
   uint128_t out_op1 = mult_64_64_128(op1[i], m);
   uint128_t out_op2 = mult_64_64_128(op2[i], m);
-  op1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-}
-
-__global__ __launch_bounds__(256, 4)
-void evalMultFused_(
-  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* __restrict__ primes,
-  const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
-  const uint64_t* __restrict__ op1_0, const uint64_t* __restrict__ op1_1, const uint64_t* __restrict__ op2_0, const uint64_t* __restrict__ op2_1,
-  uint64_t* op0_out, uint64_t* op1_out, uint64_t* op2_out) {
-
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int prime_idx = i >> log_degree;
-  const uint64_t prime = primes[prime_idx];
-
-  uint128_t out_op0 = mult_64_64_128(op1_0[i], op2_0[i]);
-  uint128_t out_op1 = mult_64_64_128(op1_0[i], op2_1[i]); 
-  out_op1 += mult_64_64_128(op1_1[i], op2_0[i]);
-  uint128_t out_op2 = mult_64_64_128(op1_1[i], op2_1[i]);
-
-  op0_out[i] = barret_reduction_128_64(out_op0, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
+  op1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op2[i] = barret_reduction_128_64(out_op2, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
 }
 
 __global__ __launch_bounds__(256, 8)
 void evalMultPlainFused_(
   size_t log_degree, 
-  const uint64_t* __restrict__ primes, const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ primes, const uint64_t* __restrict__ barret_ratio_128, const uint64_t* __restrict__ barret_k,
   const uint64_t* __restrict__ c_0, const uint64_t* __restrict__ c_1, const uint64_t* __restrict__ m_op,
-  uint64_t* out_0, uint64_t* out_1) {
-
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int prime_idx = i >> log_degree;
+  uint64_t* out_0, uint64_t* out_1, size_t total_size, size_t pt_size = 0) {
+  STRIDED_LOOP_START(total_size, i);
+  const size_t prime_idx = static_cast<size_t>(i) >> log_degree;
   const uint64_t prime = primes[prime_idx];
 
-  uint128_t out_op0 = mult_64_64_128(c_0[i], m_op[i]);
-  uint128_t out_op1 = mult_64_64_128(c_1[i], m_op[i]); 
+  const uint64_t m_val = (pt_size > 0 && i >= pt_size) ? 0 : m_op[i];
+  uint128_t out_op0 = mult_64_64_128(c_0[i], m_val);
+  uint128_t out_op1 = mult_64_64_128(c_1[i], m_val); 
 
-  out_0[i] = barret_reduction_128_64(out_op0, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  out_1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
+  out_0[i] = barret_reduction_128_64(out_op0, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  out_1[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  STRIDED_LOOP_END;
+}
+
+__global__ __launch_bounds__(256, 4)
+void evalMultFused_(
+  size_t degree, size_t log_degree, size_t num_primes, const uint64_t* __restrict__ primes,
+  const uint64_t* __restrict__ barret_ratio_128, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ op1_0, const uint64_t* __restrict__ op1_1, const uint64_t* __restrict__ op2_0, const uint64_t* __restrict__ op2_1,
+  uint64_t* op0_out, uint64_t* op1_out, uint64_t* op2_out) {
+  const size_t total_size = degree * num_primes;
+  STRIDED_LOOP_START(total_size, i);
+  const size_t prime_idx = static_cast<size_t>(i) >> log_degree;
+  const uint64_t prime = primes[prime_idx];
+
+  uint128_t out_op0 = mult_64_64_128(op1_0[i], op2_0[i]);
+  uint128_t out_op1 = mult_64_64_128(op1_0[i], op2_1[i]);
+  out_op1 += mult_64_64_128(op1_1[i], op2_0[i]);
+  uint128_t out_op2 = mult_64_64_128(op1_1[i], op2_1[i]);
+
+  op0_out[i] = barret_reduction_128_64(out_op0, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  STRIDED_LOOP_END;
 }
 
 __global__ __launch_bounds__(256, 4)
 void evalSquareFused_(
   size_t degree, size_t log_degree, size_t num_primes, const uint64_t* __restrict__ primes,
-  const uint64_t* __restrict__ barret_ratio, const uint64_t* __restrict__ barret_k,
+  const uint64_t* __restrict__ barret_ratio_128, const uint64_t* __restrict__ barret_k,
   const uint64_t* __restrict__ op_0, const uint64_t* __restrict__ op_1,
   uint64_t* op0_out, uint64_t* op1_out, uint64_t* op2_out) {
-
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int prime_idx = i >> log_degree;
+  const size_t total_size = degree * num_primes;
+  STRIDED_LOOP_START(total_size, i);
+  const size_t prime_idx = static_cast<size_t>(i) >> log_degree;
   const uint64_t prime = primes[prime_idx];
-
-  // constexpr uint128_t two_const{0,2};
 
   uint128_t out_op0 = mult_64_64_128(op_0[i], op_0[i]);
   uint128_t out_op1 = mult_64_64_128(op_0[i], op_1[i]);
-  out_op1 += out_op1; 
-  // out_op1 += mult_64_64_128(op_1[i], op_0[i]);
+  out_op1 += out_op1;
   uint128_t out_op2 = mult_64_64_128(op_1[i], op_1[i]);
 
-  op0_out[i] = barret_reduction_128_64(out_op0, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
-  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio[prime_idx], barret_k[prime_idx]);
+  op0_out[i] = barret_reduction_128_64(out_op0, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op1_out[i] = barret_reduction_128_64(out_op1, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  op2_out[i] = barret_reduction_128_64(out_op2, prime, barret_ratio_128[2 * prime_idx], barret_ratio_128[2 * prime_idx + 1], barret_k[prime_idx]);
+  STRIDED_LOOP_END;
 }
 
 void Context::EvalMult(
   const Ciphertext& ct1, const Ciphertext& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static std::once_flag s_eval_mult_ciphertext_flag;
-  std::call_once(s_eval_mult_ciphertext_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
-  });
+    configured = true;
+  }
 
   const auto &op1_0 = ct1.getBxDevice();
   const auto &op1_1 = ct1.getAxDevice();
@@ -2320,7 +2371,7 @@ void Context::EvalMult(
 
   evalMultFused_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), 
-      barret_ratio__.data(), barret_k__.data(), 
+      barret_ratio_128__.data(), barret_k__.data(), 
       op1_0.data(), op1_1.data(), op2_0.data(), op2_1.data(), 
       res0.data(), res1.data(), res2.data());
   CudaCheckError();
@@ -2328,29 +2379,32 @@ void Context::EvalMult(
 
 // Last num
 CtAccurate Context::EvalMultPlainExt(const CtAccurate& ct, const PtAccurate& pt) const {
+  if (ct.bx__.size() != pt.mx__.size()) {
+    throw std::logic_error("EvalMultPlainExt: ciphertext/plaintext size mismatch");
+  }
 
   const uint32_t numLimbs = ct.bx__.size()/degree__;
-  const uint32_t numRegularLimbs = numLimbs - param__.alpha_;
+  const uint32_t numRegularLimbs = numLimbs - param__.num_special_moduli_;
 
   CtAccurate out;
   out.ax__.resize(numLimbs*degree__);
   out.bx__.resize(numLimbs*degree__);
 
   const int block_dim = 256;
-  const int regular_grid_dim = degree__ * numRegularLimbs / block_dim;
+  const int regular_grid_dim = CeilDiv(static_cast<std::size_t>(degree__) * numRegularLimbs, block_dim);
   evalMultPlainFused_<<<regular_grid_dim, block_dim>>>(
-    param__.log_degree_, primes__.data(), barret_ratio__.data(), barret_k__.data(), 
-    ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data());
-  CUDA_KERNEL_CHECK();
+    param__.log_degree_, primes__.data(), barret_ratio_128__.data(), barret_k__.data(), 
+    ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data(),
+    static_cast<size_t>(degree__) * numRegularLimbs);
 
   const auto data_shift = numRegularLimbs*degree__;
-  const int ext_grid_dim = degree__ * param__.alpha_ / block_dim;
+  const int ext_grid_dim = CeilDiv(static_cast<std::size_t>(degree__) * param__.num_special_moduli_, block_dim);
   evalMultPlainFused_<<<ext_grid_dim, block_dim>>>(
     param__.log_degree_, 
-    primes__.data() + param__.chain_length_, barret_ratio__.data() + param__.chain_length_, barret_k__.data() + param__.chain_length_, 
+    primes__.data() + param__.chain_length_, barret_ratio_128__.data() + 2 * param__.chain_length_, barret_k__.data() + param__.chain_length_, 
     ct.ax__.data() + data_shift, ct.bx__.data() + data_shift, pt.mx__.data() + data_shift, 
-    out.ax__.data() + data_shift, out.bx__.data() + data_shift);
-  CUDA_KERNEL_CHECK();
+    out.ax__.data() + data_shift, out.bx__.data() + data_shift,
+    static_cast<size_t>(degree__) * param__.num_special_moduli_);
 
   out.level = ct.level;
   out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
@@ -2360,19 +2414,20 @@ CtAccurate Context::EvalMultPlainExt(const CtAccurate& ct, const PtAccurate& pt)
 }
 
 CtAccurate Context::EvalMultPlain(const CtAccurate& ct, const PtAccurate& pt) const {
-  const uint32_t numLimbs = ct.bx__.size() / degree__;
+  const uint32_t ct_limbs = ct.bx__.size() / degree__;
+  const uint32_t pt_limbs = pt.mx__.size() / degree__;
 
   CtAccurate out;
-  out.ax__.resize(numLimbs * degree__);
-  out.bx__.resize(numLimbs * degree__);
+  out.ax__.resize(ct_limbs * degree__);
+  out.bx__.resize(ct_limbs * degree__);
 
   const int block_dim = 256;
-  const int grid_dim = degree__ * numLimbs / block_dim;
+  const int grid_dim = CeilDiv(static_cast<std::size_t>(degree__) * ct_limbs, block_dim);
 
   evalMultPlainFused_<<<grid_dim, block_dim>>>(
-      param__.log_degree_, primes__.data(), barret_ratio__.data(), barret_k__.data(),
-      ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data());
-  CUDA_KERNEL_CHECK();
+      param__.log_degree_, primes__.data(), barret_ratio_128__.data(), barret_k__.data(),
+      ct.ax__.data(), ct.bx__.data(), pt.mx__.data(), out.ax__.data(), out.bx__.data(),
+      static_cast<size_t>(degree__) * ct_limbs, static_cast<size_t>(degree__) * pt_limbs);
 
   out.level = ct.level;
   out.noiseScaleDeg = ct.noiseScaleDeg + pt.noiseScaleDeg;
@@ -2406,10 +2461,11 @@ void Context::EvalMult(
   const CtAccurate& ct1, const CtAccurate& ct2, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static std::once_flag s_eval_mult_ctaccurate_flag;
-  std::call_once(s_eval_mult_ctaccurate_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(evalMultFused_, cudaFuncCachePreferL1);
-  });
+    configured = true;
+  }
 
   // assert(ct1.level == 1);
   // assert(ct2.level == 1);
@@ -2437,10 +2493,9 @@ void Context::EvalMult(
 
   evalMultFused_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), 
-      barret_ratio__.data(), barret_k__.data(), 
+      barret_ratio_128__.data(), barret_k__.data(), 
       op1_0.data(), op1_1.data(), op2_0.data(), op2_1.data(), 
       res0.data(), res1.data(), res2.data());
-  CUDA_KERNEL_CHECK();
   // CudaCheckError();
 }
 
@@ -2448,10 +2503,11 @@ void Context::EvalSquare(
   const Ciphertext& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static std::once_flag s_eval_square_ciphertext_flag;
-  std::call_once(s_eval_square_ciphertext_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
-  });
+    configured = true;
+  }
 
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
@@ -2464,10 +2520,9 @@ void Context::EvalSquare(
 
   evalSquareFused_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), 
-      barret_ratio__.data(), barret_k__.data(), 
+      barret_ratio_128__.data(), barret_k__.data(), 
       op_0.data(), op_1.data(),
       res0.data(), res1.data(), res2.data());
-  CUDA_KERNEL_CHECK();
 }
 
 // duplicate function from above...
@@ -2475,10 +2530,11 @@ void Context::EvalSquare(
   const CtAccurate& ct, 
   DeviceVector& res0, DeviceVector& res1, DeviceVector& res2) const {
 
-  static std::once_flag s_eval_square_ctaccurate_flag;
-  std::call_once(s_eval_square_ctaccurate_flag, [&]() {
+  static bool configured = false;
+  if (!configured) {
     cudaFuncSetCacheConfig(evalSquareFused_, cudaFuncCachePreferL1);
-  });
+    configured = true;
+  }
 
   const auto &op_0 = ct.getBxDevice();
   const auto &op_1 = ct.getAxDevice();
@@ -2491,10 +2547,9 @@ void Context::EvalSquare(
 
   evalSquareFused_<<<degree__ * num_primes / 256, 256>>>(
       degree__, param__.log_degree_, num_primes, primes__.data(), 
-      barret_ratio__.data(), barret_k__.data(), 
+      barret_ratio_128__.data(), barret_k__.data(), 
       op_0.data(), op_1.data(),
       res0.data(), res1.data(), res2.data());
-  CUDA_KERNEL_CHECK();
 }
 
 
@@ -2522,19 +2577,16 @@ void Context::MultByMonomialInPlace(CtAccurate& ct1, const uint32_t power) const
     // for (uint32_t i = 0; i < numLimbs; i++)
     //   coeffs.data()[i*degree__ + index] = param__.primes_[i] - 1;
     setMonomialLargePower_<<<1, numLimbs>>>(coeffs.data(), index, degree__, primes__.data());
-  CUDA_KERNEL_CHECK();
   } else {
     setMonomialSmallPower_<<<1, numLimbs>>>(coeffs.data(), index, degree__);
-  CUDA_KERNEL_CHECK();
     // for (uint32_t i = 0; i < numLimbs; i++)
     //   coeffs.data()[i*degree__ + index] = 1;
   }
 
   ToNTTInplace(coeffs.data(), 0, numLimbs);
 
-  hadamardMultFused_<<<degree__ * numLimbs / 256, 256>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio__.data(), barret_k__.data(), 
+  hadamardMultFused_<<<degree__ * numLimbs / 256, 256>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio_128__.data(), barret_k__.data(), 
     ct1.ax__.data(), ct1.bx__.data(), coeffs.data(), ct1.ax__.data(), ct1.bx__.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::PMult(const Ciphertext &ct, const Plaintext &pt, Ciphertext &out) const {
@@ -2547,10 +2599,9 @@ void Context::PMult(const Ciphertext &ct, const Plaintext &pt, Ciphertext &out) 
   op2_out.resize(op1.size());
   int num_primes = op1.size() / degree__;
   hadamardMultFused_<<<degree__ * num_primes / 256, 256>>>(
-      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
+      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio_128__.data(),
       barret_k__.data(), op1.data(), op2.data(), mx.data(), op1_out.data(),
       op2_out.data());
-  CUDA_KERNEL_CHECK();
 }
 
 Ciphertext Context::EvalMultConst(const Ciphertext& ct, const DeviceVector& op) const {
@@ -2571,9 +2622,8 @@ void Context::EvalMultConstInPlace(Ciphertext& ct, const DeviceVector& op) const
   auto &op2 = ct.getBxDevice();
   int num_primes = op1.size() / degree__;
   constantMultFusedInPlace_<<<degree__ * num_primes / 256, 256>>>(
-      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
+      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio_128__.data(),
       barret_k__.data(), op1.data(), op2.data(), op.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::EvalMultConstInPlace(CtAccurate& ct, const DeviceVector& op) const {
@@ -2581,9 +2631,8 @@ void Context::EvalMultConstInPlace(CtAccurate& ct, const DeviceVector& op) const
   auto &op2 = ct.getBxDevice();
   int num_primes = op1.size() / degree__;
   constantMultFusedInPlace_<<<degree__ * num_primes / 256, 256>>>(
-      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio__.data(),
+      degree__, param__.log_degree_, num_primes, primes__.data(), barret_ratio_128__.data(),
       barret_k__.data(), op1.data(), op2.data(), op.data());
-  CUDA_KERNEL_CHECK();
 
   // ciphertext->SetNoiseScaleDeg(ciphertext->GetNoiseScaleDeg() + 1);
   ct.noiseScaleDeg += 1;
@@ -2599,8 +2648,7 @@ void Context::EvalMultIntegerInPlace(CtAccurate& ct, const uint64_t c) const {
   const uint32_t blockDim = 256;
   const uint32_t gridDim = ct.ax__.size() / blockDim;
   const uint32_t numLimbs = ct.ax__.size() / degree__;
-  integerMultFusedInPlace_<<<gridDim, blockDim>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio__.data(), barret_k__.data(), ct.ax__.data(), ct.bx__.data(), c);
-  CUDA_KERNEL_CHECK();
+  integerMultFusedInPlace_<<<gridDim, blockDim>>>(degree__, param__.log_degree_, numLimbs, primes__.data(), barret_ratio_128__.data(), barret_k__.data(), ct.ax__.data(), ct.bx__.data(), c);
 }
 
 __global__ __launch_bounds__(256, 8)
@@ -2703,9 +2751,7 @@ void Context::AddCore(
   int blockDim_ = 256;
   int gridDim_ = op1_ax.size()/blockDim_;
   add_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(), op2_ax.data(), out_ax.data());
-  CUDA_KERNEL_CHECK();
   add_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(), op2_bx.data(), out_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::AddCoreInPlace(DeviceVector& x1, const DeviceVector& x2) const {
@@ -2713,7 +2759,6 @@ void Context::AddCoreInPlace(DeviceVector& x1, const DeviceVector& x2) const {
   int blockDim_ = 256;
   int gridDim_ = x1.size()/blockDim_;
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), numLimbs, x1.data(), x2.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
 }
 
 
@@ -2790,16 +2835,14 @@ void Context::EvalAddInPlace(CtAccurate &ct1, const CtAccurate &ct2) const {
   int gridDim_ = 2048;
   int blockDim_ = 256;
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(), op2_ax.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   addInPlace_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(), op2_bx.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   // ct1.level = min(ct1.level, ct2.level);
 }
 
 
 void Context::EvalAddInPlaceExt(CtAccurate& ct1, const CtAccurate& ct2) const {
   const uint32_t numLimbs = ct1.bx__.size()/degree__;
-  const uint32_t numRegularLimbs = numLimbs - param__.alpha_;
+  const uint32_t numRegularLimbs = numLimbs - param__.num_special_moduli_;
 
   const int block_dim = 256;
   const int regular_grid_dim = degree__ * numRegularLimbs / block_dim;
@@ -2807,18 +2850,14 @@ void Context::EvalAddInPlaceExt(CtAccurate& ct1, const CtAccurate& ct2) const {
   const auto kernelParams = GetKernelParams();
 
   addInPlace_<<<regular_grid_dim, block_dim>>>(kernelParams, numRegularLimbs, ct1.ax__.data(), ct2.ax__.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
   addInPlace_<<<regular_grid_dim, block_dim>>>(kernelParams, numRegularLimbs, ct1.bx__.data(), ct2.bx__.data(), primes__.data());
-  CUDA_KERNEL_CHECK();
 
   const auto data_shift = numRegularLimbs*degree__;
-  const int ext_grid_dim = degree__ * param__.alpha_ / block_dim;
-  addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.alpha_, 
+  const int ext_grid_dim = degree__ * param__.num_special_moduli_ / block_dim;
+  addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.num_special_moduli_, 
     ct1.ax__.data() + data_shift, ct2.ax__.data() + data_shift, primes__.data() + param__.chain_length_);
-  CUDA_KERNEL_CHECK();
-  addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.alpha_, 
+  addInPlace_<<<ext_grid_dim, block_dim>>>(kernelParams, param__.num_special_moduli_, 
     ct1.bx__.data() + data_shift, ct2.bx__.data() + data_shift, primes__.data() + param__.chain_length_);
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::Sub(const Ciphertext &ct1, const Ciphertext &ct2, Ciphertext &out) const {
@@ -2839,10 +2878,8 @@ void Context::Sub(const Ciphertext &ct1, const Ciphertext &ct2, Ciphertext &out)
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), out_ax.data());
-  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), out_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 CtAccurate Context::Sub(const CtAccurate &ct1, const CtAccurate &ct2) const {
@@ -2868,10 +2905,8 @@ CtAccurate Context::Sub(const CtAccurate &ct1, const CtAccurate &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), out_ax.data());
-  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), out_bx.data());
-  CUDA_KERNEL_CHECK();
 
   return out;
 }
@@ -2886,10 +2921,8 @@ void Context::SubInPlace(Ciphertext &ct1, const Ciphertext &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), op1_ax.data());
-  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), op1_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 // duplicate as above
@@ -2903,10 +2936,8 @@ void Context::SubInPlace(CtAccurate &ct1, const CtAccurate &ct2) const {
   int blockDim_ = 256;
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_ax.data(),
                                 op2_ax.data(), op1_ax.data());
-  CUDA_KERNEL_CHECK();
   sub_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op1_bx.data(),
                                 op2_bx.data(), op1_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 __global__ __launch_bounds__(512)
@@ -2952,7 +2983,6 @@ void Context::AddScalarInPlace(Ciphertext &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::AddScalarInPlace(CtAccurate &ct, const word64* op) const {
@@ -2962,7 +2992,6 @@ void Context::AddScalarInPlace(CtAccurate &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   add_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
@@ -2972,7 +3001,6 @@ void Context::SubScalarInPlace(Ciphertext &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 // assume scaling and loading has already happened
@@ -2984,7 +3012,6 @@ void Context::SubScalarInPlace(CtAccurate &ct, const word64* op) const {
   int blockDim_ = ChooseBlockDim(total_size);
   int gridDim_ = CeilDiv(total_size, blockDim_);
   sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::SubScalarInPlace(const word64* op, CtAccurate &ct) const {
@@ -2995,7 +3022,6 @@ void Context::SubScalarInPlace(const word64* op, CtAccurate &ct) const {
   int gridDim_ = CeilDiv(total_size, blockDim_);
   // sub_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, ct_bx.data(), op, ct_bx.data());
   sub_from_scalar_<<<gridDim_, blockDim_>>>(GetKernelParams(), length, op, ct_bx.data(), ct_bx.data());
-  CUDA_KERNEL_CHECK();
 }
 
 void Context::EnableMemoryPool() {

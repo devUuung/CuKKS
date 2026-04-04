@@ -90,20 +90,60 @@ __inline__ __device__ void inplace_add_128_128(const uint128_t op1,
       : "l"(op1.hi), "l"(op1.lo));
 }
 
+__inline__ __device__ uint64_t add_with_carry_u64(const uint64_t lhs,
+                                                  const uint64_t rhs,
+                                                  uint64_t& carry) {
+  uint64_t out;
+  asm("add.cc.u64 %0, %2, %3;\n\t"
+      "addc.u64 %1, 0, 0;\n\t"
+      : "=l"(out), "=l"(carry)
+      : "l"(lhs), "l"(rhs));
+  return out;
+}
+
+__inline__ __device__ uint64_t add_with_carry_in_u64(const uint64_t lhs,
+                                                     const uint64_t rhs,
+                                                     const uint64_t carry_in,
+                                                     uint64_t& carry_out) {
+  uint64_t out;
+  asm("add.cc.u64 %0, %2, %3;\n\t"
+      "addc.cc.u64 %1, %4, 0;\n\t"
+      "addc.u64 %1, %1, 0;\n\t"
+      : "=l"(out), "=l"(carry_out)
+      : "l"(lhs), "l"(rhs), "l"(carry_in));
+  return out;
+}
+
 __inline__ __device__ uint64_t
 barret_reduction_128_64(const uint128_t in, const uint64_t prime,
-                        const uint64_t barret_ratio, const uint64_t barret_k) {
-  uint128_t temp1 = mult_64_64_128(in.lo, barret_ratio);
-  uint128_t temp2 = mult_64_64_128(in.hi, barret_ratio);
-  // carry = add_64_64_carry(temp1.hi, temp2.lo, temp1.hi);
-  asm("add.cc.u64 %0, %0, %1;" : "+l"(temp1.hi) : "l"(temp2.lo));
-  // carry = add_64_64_carry(temp2.hi, 0, temp2.hi, carry);
-  asm("{addc.cc.u64 %0, %0, %1;}" : "+l"(temp2.hi) : "l"((unsigned long)0));
-  temp1.hi >>= barret_k - 64;
-  temp2.hi <<= 128 - barret_k;
-  temp1.hi = temp1.hi + temp2.hi;
-  temp1.hi = temp1.hi * prime;
-  uint64_t res = in.lo - temp1.hi;
+                        const uint64_t barret_ratio_lo,
+                        const uint64_t barret_ratio_hi,
+                        const uint64_t barret_k) {
+  const uint128_t lo_lo = mult_64_64_128(in.lo, barret_ratio_lo);
+  const uint128_t lo_hi = mult_64_64_128(in.lo, barret_ratio_hi);
+  const uint128_t hi_lo = mult_64_64_128(in.hi, barret_ratio_lo);
+  const uint128_t hi_hi = mult_64_64_128(in.hi, barret_ratio_hi);
+
+  uint64_t carry_w1 = 0;
+  const uint64_t w1_partial = add_with_carry_u64(lo_lo.hi, lo_hi.lo, carry_w1);
+  uint64_t carry_w1b = 0;
+  const uint64_t w1 = add_with_carry_u64(w1_partial, hi_lo.lo, carry_w1b);
+  const uint64_t carry_into_w2 = carry_w1 + carry_w1b;
+
+  uint64_t carry_w2 = 0;
+  const uint64_t w2_partial = add_with_carry_u64(lo_hi.hi, hi_lo.hi, carry_w2);
+  uint64_t carry_w2b = 0;
+  const uint64_t w2_partial2 = add_with_carry_u64(w2_partial, hi_hi.lo, carry_w2b);
+  uint64_t carry_w2c = 0;
+  const uint64_t w2 = add_with_carry_in_u64(w2_partial2, carry_into_w2, 0, carry_w2c);
+  (void)carry_w2;
+  (void)carry_w2b;
+  (void)carry_w2c;
+  (void)hi_hi.hi;
+  const uint64_t shift = barret_k - 64;
+  const uint64_t q = (shift == 0) ? w1 : ((w1 >> shift) | (w2 << (64 - shift)));
+  const uint64_t q_times_prime = q * prime;
+  uint64_t res = in.lo - q_times_prime;
   if (res >= prime) res -= prime;
   return res;
 }

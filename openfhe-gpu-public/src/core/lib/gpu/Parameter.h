@@ -17,14 +17,23 @@ class Parameter {
  public:
   Parameter(int log_degree, int chain_length, int dnum,
             const std::vector<word64>& primes)
+      : Parameter(log_degree,
+                  chain_length,
+                  dnum,
+                  static_cast<int>(std::ceil(static_cast<float>(chain_length) / static_cast<float>(dnum))),
+                  static_cast<int>(std::ceil(static_cast<float>(chain_length) / static_cast<float>(dnum))),
+                  primes) {}
+
+  Parameter(int log_degree, int chain_length, int dnum, int alpha, int num_special_moduli,
+            const std::vector<word64>& primes)
       : log_degree_{log_degree},
         degree_{1 << log_degree_},
         // level_{level},
         dnum_{dnum},
         chain_length_{chain_length},  // length of base modulus chain
-        alpha_{(int)std::ceil((float)chain_length_ / (float)dnum_)},
-        max_num_moduli_{chain_length_ + alpha_},
-        num_special_moduli_{alpha_},
+        alpha_{alpha},
+        max_num_moduli_{chain_length_ + num_special_moduli},
+        num_special_moduli_{num_special_moduli},
         primes_{primes.begin(), primes.begin() + (size_t)chain_length_ + num_special_moduli_} {
     // if ((level_ + 1) % dnum_ != 0) {
     //   std::cout << (level_ + 1) << " " << dnum_ << " " << (level_ + 1) % dnum_ << std::endl;

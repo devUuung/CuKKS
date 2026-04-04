@@ -19,6 +19,7 @@ struct KernelParams {
   const int degree;
   const word64* primes;
   const word64* barret_ratio;
+  const word64* barret_ratio_128;
   const word64* barret_k;
   const int log_degree;
 };
@@ -257,6 +258,8 @@ class Context {
   auto GetDegree() const { return degree__; }
 
   void Rescale(const DeviceVector &from_v, DeviceVector &to_v) const;
+  void RescaleSwitchOnly(const DeviceVector &from_v, DeviceVector &to_v) const;
+  void RescaleLowerScaleOnly(const DeviceVector &from_v, DeviceVector &to_v) const;
   void Rescale(const Ciphertext &from_ct, Ciphertext &to_ct) const;
   void Rescale(const CtAccurate &from_ct, CtAccurate &to_ct) const;
   Ciphertext Rescale(const Ciphertext& from) const;
@@ -270,7 +273,7 @@ class Context {
   void ModDown(DeviceVector& from, DeviceVector& to) const;
   bool is_modup_batched = true;
   bool is_moddown_fused = true;
-  bool is_rescale_fused = true;
+bool is_rescale_fused = true;
   bool is_keyswitch_fused = true;
 
 //  private:
@@ -313,7 +316,7 @@ class Context {
                                const int num_primes, DeviceVector& out_ax,
                                DeviceVector& out_bx) const;
   auto GetKernelParams() const {
-    return KernelParams{degree__, primes__.data(), barret_ratio__.data(),
+    return KernelParams{degree__, primes__.data(), barret_ratio__.data(), barret_ratio_128__.data(),
                         barret_k__.data(), param__.log_degree_};
   }
   void GenModUpParams();
@@ -326,13 +329,16 @@ class Context {
   int degree__;
   // int num_moduli_after_modup__;
   int alpha__;
+  int num_special_moduli__;
   Parameter param__;
   DeviceVector __align__(8) primes__;
   DeviceVector __align__(8) barret_ratio__;
+  DeviceVector __align__(8) barret_ratio_128__;
   DeviceVector __align__(8) barret_k__;
   // Pre-computed concatenated Q||P prime/barret arrays, indexed by (num_orig_limbs - 1)
   std::vector<DeviceVector> primes_qp__;
   std::vector<DeviceVector> barret_ratio_qp__;
+  std::vector<DeviceVector> barret_ratio_128_qp__;
   std::vector<DeviceVector> barret_k_qp__;
   // Cached device prime index arrays for ModUp/KeySwitch
   std::vector<DeviceVector> prime_inds_cache__;

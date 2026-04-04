@@ -115,8 +115,9 @@ inline ckks::Context GenGPUContext(const std::shared_ptr<CryptoParamsType>& cryp
         // std::cout << "Standard mod " << limb_moduli.size() << " " << limb->GetModulus() << " " << limb->GetRootOfUnity() << std::endl;
     }
 
-    // const size_t chain_length = limb_moduli.size();
-    const int dnum = ceil((float)limb_moduli.size() / (float)ext_params.size()); 
+    const int dnum = static_cast<int>(cryptoParams->GetNumberOfQPartitions());
+    const int alpha = static_cast<int>(cryptoParams->GetNumPerPartQ());
+    const int num_special_moduli = static_cast<int>(ext_params.size());
 
     for (const auto& limb : ext_params) {
         limb_moduli.push_back((uint64_t)limb->GetModulus());
@@ -125,7 +126,7 @@ inline ckks::Context GenGPUContext(const std::shared_ptr<CryptoParamsType>& cryp
     }
 
 
-    ckks::Parameter gpu_params(logn, limb_params.size(), dnum, limb_moduli);
+    ckks::Parameter gpu_params(logn, limb_params.size(), dnum, alpha, num_special_moduli, limb_moduli);
 
     gpu_params.m_scalingFactorsReal.reserve(cryptoParams->m_scalingFactorsReal.size());
     for (const auto& sF : cryptoParams->m_scalingFactorsReal) gpu_params.m_scalingFactorsReal.push_back(sF);
