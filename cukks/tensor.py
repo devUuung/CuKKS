@@ -15,6 +15,21 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Un
 
 import torch
 
+
+# Profiler hook — lazy import to avoid circular dependency
+def _get_active_profiler():
+    """Returns the active profiler if enabled, None otherwise. Fast path returns None."""
+    try:
+        import importlib
+
+        get_profiler = importlib.import_module("cukks.profiling").get_profiler
+        p = get_profiler()
+        if p is not None and p.is_enabled():
+            return p
+    except Exception:
+        pass
+    return None
+
 if TYPE_CHECKING:
     from .batching import PackingLayout
     from .context import CKKSInferenceContext
@@ -112,6 +127,13 @@ class EncryptedTensor:
         self._packing_layout: Optional["PackingLayout"] = None
         self._stip_layout_fresh: bool = False
         self._sigma_factor_ref = None
+
+    def _profile_op(self, op_name: str) -> None:
+        """Report an operation to the active profiler (no-op if none active)."""
+        profiler = _get_active_profiler()
+        if profiler is not None:
+            profiler.record_operation(op_name)
+            profiler.record_depth(self._depth)
 
     @property
     def _sigma_factor(self) -> Optional["EncryptedTensor"]:
@@ -245,6 +267,14 @@ class EncryptedTensor:
         if length != self.size:
             prefix_mask = [1.0] * length + [0.0] * (self.size - length)
             tensor = self.mul(prefix_mask).rescale()
+
+        if length <= 16:
+            reduced = tensor
+            step = 1
+            while step < length:
+                reduced = reduced.add(reduced.rotate(step))
+                step <<= 1
+            return reduced
 
         reduced_cipher = tensor._cipher.sum_slots()
         slot_count = tensor._cipher_slot_count()
@@ -394,6 +424,7 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with the sum.
         """
+        self._profile_op("add")
         if isinstance(other, EncryptedTensor):
             if self.size != other.size:
                 raise ValueError(
@@ -432,6 +463,7 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with the difference.
         """
+        self._profile_op("sub")
         if hasattr(self._cipher, 'sub'):
             if isinstance(other, EncryptedTensor):
                 if self.size != other.size:
@@ -485,6 +517,7 @@ class EncryptedTensor:
             Cipher-cipher multiplication increases noise and consumes levels.
             Rescale is deferred (lazy) until needed by next operation.
         """
+        self._profile_op("mul")
         if isinstance(other, EncryptedTensor):
             if self.size != other.size:
                 raise ValueError(
@@ -540,6 +573,7 @@ class EncryptedTensor:
         Uses dedicated GPU square operation when available, which is more
         efficient and stable than cipher-cipher multiplication with self.
         """
+        self._profile_op("square")
         # Use dedicated square() if available (GPU-optimized path)
         if hasattr(self._cipher, 'square'):
             new_cipher = self._cipher.square()
@@ -569,6 +603,7 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with reduced scale.
         """
+        self._profile_op("rescale")
         # Check if FLEXIBLEAUTO already rescaled this ciphertext.
         # noiseScaleDeg == 1 means scale is already at the nominal level;
         # calling ModReduce/Rescale again would wastefully consume a level.
@@ -576,15 +611,42 @@ class EncryptedTensor:
         noise_scale_deg = meta.get("noise_scale", None)
         if noise_scale_deg is not None and noise_scale_deg <= 1:
             # Already at nominal scale — skip the redundant rescale.
-            result = EncryptedTensor(self._cipher, self._shape, self._context, self._depth)
+            result = self.clone()
             result._needs_rescale = False
-            result._copy_runtime_metadata_from(self)
             return result
 
         new_cipher = self._cipher.rescale()
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._needs_rescale = False
         result._copy_runtime_metadata_from(self)
+        return result
+
+    def sum_reduce(self, window: int) -> "EncryptedTensor":
+        """Compute sliding window sum using tree reduction.
+
+        Returns a tensor where each slot i contains
+        sum(self[i], self[i+1], ..., self[i+window-1]) (cyclic).
+
+        Uses O(log window) rotations instead of O(window).
+        """
+        self._profile_op("sum_reduce")
+        if window <= 1:
+            return self.clone()
+
+        result = self
+        step = 1
+        while step < window:
+            if step * 2 <= window:
+                rotated = result.rotate(step)
+                result = result.add(rotated)
+                step *= 2
+            else:
+                remaining = window - step
+                rotated = self.rotate(step)
+                partial = rotated.sum_reduce(remaining)
+                result = result.add(partial)
+                break
+
         return result
 
     def _ensure_rescaled(self) -> "EncryptedTensor":
@@ -601,6 +663,10 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with rotated slots.
         """
+        self._profile_op("rotate")
+        profiler = _get_active_profiler()
+        if profiler is not None:
+            profiler.record_rotation(steps)
         new_cipher = self._cipher.rotate(steps)
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._needs_rescale = self._needs_rescale
@@ -705,6 +771,7 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with refreshed levels.
         """
+        self._profile_op("bootstrap")
         new_cipher = self._cipher.bootstrap()
         result = EncryptedTensor(new_cipher, self._shape, self._context, 0)
         result._copy_runtime_metadata_from(self)
@@ -964,6 +1031,7 @@ class EncryptedTensor:
         weight_hash: int = 0,
         diag_nonzero: list | None = None,
     ) -> "EncryptedTensor":
+        self._profile_op("matmul")
         # Auto-rescale if previous operation left pending rescale
         tensor = self
         if self._needs_rescale:
@@ -1020,7 +1088,9 @@ class EncryptedTensor:
         
         out_features = weight_2d.shape[0]
         in_features = weight_2d.shape[1]
-        use_small_output = out_features <= 16 and out_features < in_features
+        if in_features <= 16:
+            resolved_use_bsgs = False
+        use_small_output = out_features <= 16 and out_features <= in_features
 
         if use_small_output:
             result = tensor._matmul_small_output(
@@ -1075,6 +1145,7 @@ class EncryptedTensor:
         Returns:
             New EncryptedTensor with polynomial evaluated element-wise.
         """
+        self._profile_op("poly_eval")
         tensor = self._ensure_rescaled()
         coeff_list = list(coeffs)
         if not coeff_list:

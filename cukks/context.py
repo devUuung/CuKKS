@@ -81,12 +81,14 @@ class InferenceConfig:
                 # OpenFHE GPU fork (1.2.x) enforces HE standard limits including
                 # key-switching prime overhead. Empirically:
                 #   N=32768: max ~620 total coeff_mod bits (10 primes × 50 + 2 × 60)
-                #   N=65536: supports deeper circuits but uses ~4x GPU memory
+                #   N=65536: max ~1240 total coeff_mod bits with scale_bits=40
                 # With 13+ primes, the key-switching overhead pushes logQ(P) beyond
                 # what N=32768 allows, even if coeff_mod bits alone fit.
                 total_bits = 60 + scale_bits * effective_depth + 60
                 num_primes = effective_depth + 2
                 if total_bits <= 620 and num_primes <= 12:
+                    poly_mod_degree = 32768
+                elif total_bits <= 620 and num_primes <= 14 and not kwargs.get("enable_gpu", False):
                     poly_mod_degree = 32768
                 else:
                     poly_mod_degree = 65536
@@ -147,6 +149,8 @@ def _estimate_model_depth(
             depth += 2 if module.rank > 0 else 1
         elif isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, BlockDiagonalLinear)):
             depth += 1
+            if enable_gpu:
+                depth += 1
         elif isinstance(module, (
             torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU,
             torch.nn.Sigmoid, torch.nn.Tanh,
@@ -160,6 +164,10 @@ def _estimate_model_depth(
                 depth += 5
             else:
                 depth += 18
+        elif isinstance(module, torch.nn.GroupNorm):
+            depth += activation_degree + 3
+        elif isinstance(module, torch.nn.AdaptiveAvgPool2d):
+            depth += 1
     return max(1, depth)
 
 
@@ -246,6 +254,17 @@ def _collect_rotation_requirements(
             pending_sparse_pool = None
             continue
 
+        if isinstance(module, torch.nn.GroupNorm):
+            if current_channels is not None:
+                sample_size = spatial_h * spatial_w * current_channels
+            else:
+                sample_size = int(module.num_channels)
+            generic_dims.append(sample_size)
+            if pending_sparse_pool is not None:
+                generic_dims.append(pending_sparse_pool[1])
+                pending_sparse_pool = None
+            continue
+
         if isinstance(module, torch.nn.AvgPool2d):
             if pending_sparse_pool is not None:
                 generic_dims.append(pending_sparse_pool[1])
@@ -297,12 +316,33 @@ def _collect_rotation_requirements(
             spatial_w = (spatial_w + 2 * p_w - pk_w) // ps_w + 1
             continue
 
+        if isinstance(module, torch.nn.AdaptiveAvgPool2d):
+            if pending_sparse_pool is not None:
+                generic_dims.append(pending_sparse_pool[1])
+                pending_sparse_pool = None
+
+            if current_channels is not None:
+                total_in = spatial_h * spatial_w * current_channels
+                generic_dims.append(total_in)
+
+            output_size = module.output_size
+            if isinstance(output_size, int):
+                out_h = out_w = int(output_size)
+            elif output_size is not None:
+                out_h_s, out_w_s = output_size
+                out_h = int(out_h_s) if out_h_s is not None else spatial_h
+                out_w = int(out_w_s) if out_w_s is not None else spatial_w
+            else:
+                out_h, out_w = spatial_h, spatial_w
+            spatial_h, spatial_w = out_h, out_w
+            continue
+
         if isinstance(module, torch.nn.Linear):
             if pending_sparse_pool is not None and pending_sparse_pool[0] != module.in_features:
                 generic_dims.append(pending_sparse_pool[1])
                 pending_sparse_pool = None
 
-            if module.out_features <= small_output_threshold:
+            if module.out_features <= small_output_threshold and module.out_features < module.in_features:
                 reduction_length = int(module.in_features)
                 if pending_sparse_pool is not None and pending_sparse_pool[0] == module.in_features:
                     reduction_length = pending_sparse_pool[1]
@@ -498,7 +538,7 @@ class CKKSInferenceContext:
         if rotations is None:
             max_dim = max_rotation_dim or min(self.config.num_slots, 1024)
             _resolved_max_dim = max_dim
-            if use_bsgs:
+            if self.use_bsgs:
                 rotations = compute_packed_batch_rotations(max_dim, batch_size)
                 neg_rotations = [-r for r in rotations if r > 0]
                 rotations = sorted(set(rotations + neg_rotations))
@@ -918,13 +958,14 @@ class CKKSInferenceContext:
             input_shape=input_shape_tuple,
         )
         max_dim = max(dims) if dims else 0
+        resolved_use_bsgs = use_bsgs
 
         positive_rotations: set[int] = set(extra_rotations)
         for length in reduction_lengths:
             positive_rotations.update(_compute_reduction_rotations(length))
 
         if max_dim > 1:
-            if use_bsgs:
+            if resolved_use_bsgs:
                 positive_rotations.update(compute_packed_batch_rotations(max_dim, batch_size))
             else:
                 positive_rotations.update(range(1, max_dim))
@@ -946,7 +987,7 @@ class CKKSInferenceContext:
         return cls(
             config,
             rotations=rotations,
-            use_bsgs=use_bsgs,
+            use_bsgs=resolved_use_bsgs,
             max_rotation_dim=resolved_max_dim,
             batch_size=batch_size,
             architecture=architecture,

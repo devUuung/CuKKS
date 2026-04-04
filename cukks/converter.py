@@ -619,7 +619,10 @@ class ModelConverter:
         return EncryptedMaxPool2d.from_torch(module)
 
     def _convert_groupnorm(self, module: nn.GroupNorm) -> EncryptedGroupNorm:
-        return EncryptedGroupNorm.from_torch(module)
+        return EncryptedGroupNorm.from_torch(
+            module,
+            inv_sqrt_degree=self.options.activation_degree,
+        )
 
     def _convert_instancenorm1d(self, module: nn.InstanceNorm1d) -> EncryptedInstanceNorm1d:
         return EncryptedInstanceNorm1d.from_torch(module)
@@ -947,10 +950,9 @@ def convert(
         cnn_config = _build_cnn_config(converter, input_shape)
 
     # Auto-detect whether bootstrapping is needed.
-    # The C++ backend gives 10 levels after bootstrap (levelsAfterBootstrap=10).
-    # Without bootstrap, 32768 poly_mod_degree supports ~16 effective levels.
-    # If estimated depth > 14, we need bootstrapping.
-    _AUTO_BOOTSTRAP_DEPTH_THRESHOLD = 14
+    # N=65536 with scale_bits=40 (auto-selected for deep circuits) supports up to
+    # ~26 effective levels before bootstrap is required.
+    _AUTO_BOOTSTRAP_DEPTH_THRESHOLD = 24
     if enable_bootstrap is None:
         est_depth = _estimate_model_depth(
             model,
