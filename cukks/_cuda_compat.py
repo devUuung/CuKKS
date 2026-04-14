@@ -4,7 +4,7 @@ CUDA version detection and backend package resolution for CuKKS.
 Used at three stages:
   1. Install-time  (setup.py)              — detect torch CUDA, add matching dependency
   2. Runtime       (cukks/__init__.py)     — warn on CUDA mismatch
-  3. CLI           (python -m cukks.install_backend) — post-install auto-detection
+  3. CLI           (python -m cukks.install_backend) — choose a matching backend package
 
 Design constraints:
   - No external dependencies beyond stdlib (torch is imported lazily)
@@ -15,10 +15,7 @@ Design constraints:
 from __future__ import annotations
 
 import importlib.metadata
-import os
 import re
-import subprocess
-import sys
 from typing import Dict, List, Optional, Tuple
 
 __all__ = [
@@ -30,7 +27,6 @@ __all__ = [
     "get_installed_backend",
     "get_installed_backend_cuda_version",
     "validate_backend_cuda",
-    "auto_install_backend",
 ]
 
 # ── Package registry ─────────────────────────────────────────────────────────
@@ -250,89 +246,3 @@ def validate_backend_cuda() -> Tuple[str, Optional[str]]:
         f"Backend {backend_pkg} (CUDA {backend_cuda}) is compatible with "
         f"PyTorch CUDA {torch_cuda} (same major, backend ≤ torch)."
     )
-
-
-def auto_install_backend(
-    *,
-    quiet: bool = False,
-) -> Tuple[bool, Optional[str], Optional[str]]:
-    """Attempt to auto-install the correct cukks-cuXXX backend package.
-
-    Respects environment variables:
-        CUKKS_NO_BACKEND=1       → skip (return immediately)
-        CUKKS_AUTO_INSTALL=0     → skip (return immediately)
-        CUKKS_BACKEND=cukks-cuXXX → install that specific package
-
-    Returns:
-        (success, package_name, error_message)
-
-        * success: True if installation succeeded or was skipped (already installed)
-        * package_name: The package that was/would be installed (e.g., 'cukks-cu121')
-        * error_message: None on success, error description on failure
-    """
-    # ── Check environment variable overrides ────────────────────────────
-    if os.environ.get("CUKKS_NO_BACKEND", "").strip() in ("1", "true", "yes"):
-        return False, None, "Auto-install disabled by CUKKS_NO_BACKEND=1"
-
-    if os.environ.get("CUKKS_AUTO_INSTALL", "").strip() in ("0", "false", "no"):
-        return False, None, "Auto-install disabled by CUKKS_AUTO_INSTALL=0"
-
-    # ── Determine which package to install ──────────────────────────────
-    forced = os.environ.get("CUKKS_BACKEND", "").strip()
-    if forced:
-        # Parse forced backend (accepts "cu128", "cukks-cu128", "12.8")
-        if forced.startswith("cukks-cu") and forced[8:].isdigit():
-            package = forced
-        elif forced.startswith("cu") and forced[2:].isdigit():
-            package = f"cukks-{forced}"
-        elif "." in forced:
-            # Looks like a version string
-            package = resolve_backend_package(forced)
-        else:
-            return False, None, f"CUKKS_BACKEND={forced!r} not recognized"
-    else:
-        # Auto-detect from PyTorch
-        cuda_ver = detect_cuda_version()
-        if cuda_ver is None:
-            return (
-                False,
-                None,
-                "Cannot auto-detect CUDA version. Is PyTorch with CUDA support installed?",
-            )
-        package = resolve_backend_package(cuda_ver)
-        if package is None:
-            available = ", ".join(CUDA_TO_PACKAGE.values())
-            return (
-                False,
-                None,
-                f"PyTorch uses CUDA {cuda_ver}, but no compatible backend found. "
-                f"Available: {available}",
-            )
-
-    # ── Check if already installed ──────────────────────────────────────
-    current = get_installed_backend()
-    if current == package:
-        return True, package, None  # Already installed, no error
-
-    if package is None:
-        return False, None, "No compatible CuKKS GPU backend could be resolved."
-
-    resolved_package = package
-
-    # ── Perform installation ────────────────────────────────────────────
-    if not quiet:
-        print(f"CuKKS: Auto-installing GPU backend ({resolved_package})...", file=sys.stderr)
-
-    cmd = [sys.executable, "-m", "pip", "install", resolved_package]
-
-    try:
-        subprocess.check_call(cmd)
-    except subprocess.CalledProcessError as e:
-        return False, resolved_package, f"pip install failed with exit code {e.returncode}"
-    except Exception as e:
-        return False, resolved_package, f"pip install failed: {e}"
-
-    if not quiet:
-        print(f"CuKKS: Successfully installed {resolved_package}", file=sys.stderr)
-
-    return True, resolved_package, None

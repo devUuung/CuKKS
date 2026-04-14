@@ -15,7 +15,6 @@ Usage::
 
 from __future__ import annotations
 
-import importlib
 import threading
 from typing import Any, Optional, Tuple, Type
 
@@ -32,13 +31,11 @@ def load_backend() -> Tuple[Type[Any], Type[Any]]:
     1. **Direct import** — ``from ckks import CKKSConfig, CKKSContext``
        (works when any ``cukks-cu*`` wheel or a dev-editable install of
        ``bindings/openfhe_backend`` is present).
-    2. **Auto-install** — calls ``_cuda_compat.auto_install_backend()`` to
-       pip-install the correct wheel, then retries the import.
 
     Raises
     ------
     RuntimeError
-        If neither attempt succeeds.  The error message includes
+        If the backend is unavailable. The error message includes
         actionable install instructions.
     """
     global _cache
@@ -52,24 +49,13 @@ def load_backend() -> Tuple[Type[Any], Type[Any]]:
         if _cache is not None:
             return _cache
 
-        # ── Attempt 1: direct import ────────────────────────────────
+        # ── Attempt direct import ───────────────────────────────────
         cfg, ctx = _try_import()
         if cfg is not None and ctx is not None:
             _cache = (cfg, ctx)
             return _cache
 
-        # ── Attempt 2: auto-install + retry ─────────────────────────
-        from ._cuda_compat import auto_install_backend
-
-        success, _package, _err = auto_install_backend(quiet=False)
-        if success:
-            importlib.invalidate_caches()
-            cfg, ctx = _try_import()
-            if cfg is not None and ctx is not None:
-                _cache = (cfg, ctx)
-                return _cache
-
-        # ── All attempts failed — build a helpful error ─────────────
+        # ── Backend unavailable — build a helpful error ─────────────
         raise RuntimeError(_build_error_message())
 
 
@@ -94,9 +80,7 @@ def _build_error_message() -> str:
             f"CKKS backend not available. PyTorch uses CUDA {cuda_ver}.\n"
             f"Install the matching backend:\n"
             f"  pip install {recommended}\n"
-            f"Or run: python -m cukks.install_backend\n"
-            f"\n"
-            f"To enable auto-installation, ensure CUKKS_AUTO_INSTALL is not set to '0'."
+            f"Or run: python -m cukks.install_backend"
         )
     if cuda_ver:
         return (

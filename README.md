@@ -80,25 +80,32 @@ docker run --gpus all -it pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime bash
 pip install cukks[cu121]
 ```
 
-### Auto-install CLI
+### Backend Install CLI
 
 ```bash
 pip install cukks
-cukks-install-backend  # Auto-detects PyTorch CUDA and installs matching backend
+cukks-install-backend  # Detects PyTorch CUDA and installs the matching backend on demand
 ```
 
 ### Build from source
 
 ```bash
 git clone https://github.com/devUuung/CuKKS.git && cd CuKKS
+
+# Base Python API
 pip install -e .
 
 # Build OpenFHE backend
 cd openfhe-gpu-public && mkdir build && cd build
-cmake .. -DWITH_CUDA=ON && make -j$(nproc)
+cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
 
-cd ../../bindings/openfhe_backend
-pip install -e .
+cd ../..
+export OPENFHE_ROOT="$PWD/openfhe-gpu-public"
+export OPENFHE_BUILD_DIR="$OPENFHE_ROOT/build"
+export LD_LIBRARY_PATH="$OPENFHE_BUILD_DIR/lib:$OPENFHE_BUILD_DIR/_deps/rmm-build${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Native backend package
+pip install -e bindings/openfhe_backend
 ```
 
 </details>
