@@ -1,11 +1,16 @@
 #include <openfhe.h>
 #include "scheme/ckksrns/ckksrns-cryptoparameters.h"
 #include "scheme/ckksrns/ckksrns-fhe.h"
+#include "cryptocontext-ser.h"
+#include "ciphertext-ser.h"
+#include "key/key-ser.h"
+#include "utils/serial.h"
 #if CUKKS_ENABLE_GPU
 #include "gpu/Utils.h"
 #endif
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -77,6 +82,146 @@ py::dict cipher_metadata(const std::shared_ptr<CiphertextHandle>& handle) {
         meta["max_level"] = handle->ciphertext->GetLevel();
     }
     return meta;
+}
+
+constexpr auto kSerializationType = SerType::BINARY;
+
+void save_context_bundle(
+    const std::shared_ptr<ContextHandle>& ctx,
+    const std::shared_ptr<KeySetHandle>& keys,
+    const std::string& context_path,
+    const std::string& public_key_path,
+    const std::string& secret_key_path,
+    const std::string& eval_mult_key_path,
+    const std::string& eval_sum_key_path,
+    const std::string& eval_auto_key_path
+) {
+    if (!lbcrypto::Serial::SerializeToFile(context_path, ctx->context, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize crypto context to " + context_path);
+    }
+    if (!lbcrypto::Serial::SerializeToFile(public_key_path, keys->public_key, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize public key to " + public_key_path);
+    }
+    if (!lbcrypto::Serial::SerializeToFile(secret_key_path, keys->secret_key, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize secret key to " + secret_key_path);
+    }
+
+    {
+        std::ofstream out(eval_mult_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval mult key path " + eval_mult_key_path);
+        }
+        if (!ctx->context->SerializeEvalMultKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval mult keys to " + eval_mult_key_path);
+        }
+    }
+    {
+        std::ofstream out(eval_sum_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval sum key path " + eval_sum_key_path);
+        }
+        if (!ctx->context->SerializeEvalSumKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval sum keys to " + eval_sum_key_path);
+        }
+    }
+    {
+        std::ofstream out(eval_auto_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval automorphism key path " + eval_auto_key_path);
+        }
+        if (!ctx->context->SerializeEvalAutomorphismKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval automorphism keys to " + eval_auto_key_path);
+        }
+    }
+}
+
+std::pair<std::shared_ptr<ContextHandle>, std::shared_ptr<KeySetHandle>> load_context_bundle(
+    const std::string& context_path,
+    const std::string& public_key_path,
+    const std::string& secret_key_path,
+    const std::string& eval_mult_key_path,
+    const std::string& eval_sum_key_path,
+    const std::string& eval_auto_key_path,
+    bool enable_bootstrap,
+    const std::vector<std::uint32_t>& level_budget
+) {
+    CryptoContext<DCRTPoly> context;
+    if (!lbcrypto::Serial::DeserializeFromFile(context_path, context, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize crypto context from " + context_path);
+    }
+    context->Enable(PKE);
+    context->Enable(KEYSWITCH);
+    context->Enable(LEVELEDSHE);
+    context->Enable(ADVANCEDSHE);
+    if (enable_bootstrap) {
+        context->Enable(FHE);
+    }
+
+    PublicKey<DCRTPoly> public_key;
+    if (!lbcrypto::Serial::DeserializeFromFile(public_key_path, public_key, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize public key from " + public_key_path);
+    }
+
+    PrivateKey<DCRTPoly> secret_key;
+    if (!lbcrypto::Serial::DeserializeFromFile(secret_key_path, secret_key, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize secret key from " + secret_key_path);
+    }
+
+    {
+        std::ifstream in(eval_mult_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval mult key path " + eval_mult_key_path);
+        }
+        if (!context->DeserializeEvalMultKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval mult keys from " + eval_mult_key_path);
+        }
+    }
+    {
+        std::ifstream in(eval_sum_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval sum key path " + eval_sum_key_path);
+        }
+        if (!context->DeserializeEvalSumKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval sum keys from " + eval_sum_key_path);
+        }
+    }
+    {
+        std::ifstream in(eval_auto_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval automorphism key path " + eval_auto_key_path);
+        }
+        if (!context->DeserializeEvalAutomorphismKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval automorphism keys from " + eval_auto_key_path);
+        }
+    }
+
+    auto ctx = std::make_shared<ContextHandle>();
+    ctx->context = context;
+    ctx->bootstrap_enabled = enable_bootstrap;
+    ctx->level_budget = level_budget;
+
+    auto keys = std::make_shared<KeySetHandle>();
+    keys->context = ctx;
+    keys->public_key = public_key;
+    keys->secret_key = secret_key;
+    return {ctx, keys};
+}
+
+void save_ciphertext(const std::shared_ptr<CiphertextHandle>& handle, const std::string& ciphertext_path) {
+    if (!lbcrypto::Serial::SerializeToFile(ciphertext_path, handle->ciphertext, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize ciphertext to " + ciphertext_path);
+    }
+}
+
+std::shared_ptr<CiphertextHandle> load_ciphertext(
+    const std::shared_ptr<ContextHandle>& ctx,
+    const std::string& ciphertext_path
+) {
+    Ciphertext<DCRTPoly> ciphertext;
+    if (!lbcrypto::Serial::DeserializeFromFile(ciphertext_path, ciphertext, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize ciphertext from " + ciphertext_path);
+    }
+    return make_cipher(ctx, ciphertext);
 }
 
 std::vector<double> build_attention_plain(
@@ -654,4 +799,18 @@ PYBIND11_MODULE(ckks_openfhe_backend, m) {
     m.def("bootstrap", &bootstrap_cipher, py::arg("tensor"),
           py::call_guard<py::gil_scoped_release>());
     m.def("cipher_metadata", &cipher_metadata, py::arg("cipher"));
+    m.def("save_context_bundle", &save_context_bundle,
+          py::arg("context"), py::arg("keys"),
+          py::arg("context_path"), py::arg("public_key_path"), py::arg("secret_key_path"),
+          py::arg("eval_mult_key_path"), py::arg("eval_sum_key_path"), py::arg("eval_auto_key_path"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("load_context_bundle", &load_context_bundle,
+          py::arg("context_path"), py::arg("public_key_path"), py::arg("secret_key_path"),
+          py::arg("eval_mult_key_path"), py::arg("eval_sum_key_path"), py::arg("eval_auto_key_path"),
+          py::arg("enable_bootstrap"), py::arg("level_budget"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("save_ciphertext", &save_ciphertext, py::arg("cipher"), py::arg("ciphertext_path"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("load_ciphertext", &load_ciphertext, py::arg("context"), py::arg("ciphertext_path"),
+          py::call_guard<py::gil_scoped_release>());
 }

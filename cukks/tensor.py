@@ -7,8 +7,10 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
+import json
 import math
 import pickle
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
@@ -41,6 +43,53 @@ def _get_active_profiler():
 if TYPE_CHECKING:
     from .batching import PackingLayout
     from .context import CKKSInferenceContext
+
+
+_TENSOR_MANIFEST_KIND = "cukks.tensor.native.v1"
+
+
+def _tensor_bundle_paths(path: Union[str, Path]) -> Dict[str, Path]:
+    base = Path(path)
+    return {
+        "manifest": base,
+        "ciphertext": Path(f"{base}.ciphertext.bin"),
+    }
+
+
+def _packing_layout_to_dict(layout: Optional["PackingLayout"]) -> Optional[Dict[str, Any]]:
+    if layout is None:
+        return None
+    return {
+        "seq_len": layout.seq_len,
+        "d_model": layout.d_model,
+        "num_heads": layout.num_heads,
+        "block_size": layout.block_size,
+        "complex_packing": layout.complex_packing,
+    }
+
+
+def _packing_layout_from_dict(data: Optional[Dict[str, Any]]) -> Optional["PackingLayout"]:
+    if data is None:
+        return None
+    from .batching import PackingLayout
+
+    return PackingLayout(
+        seq_len=int(data["seq_len"]),
+        d_model=int(data["d_model"]),
+        num_heads=int(data["num_heads"]),
+        block_size=int(data["block_size"]),
+        complex_packing=str(data.get("complex_packing", "real_only")),
+    )
+
+
+def _load_native_tensor_manifest(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if manifest.get("kind") != _TENSOR_MANIFEST_KIND:
+        return None
+    return manifest
 
 
 class EncryptedTensor:
@@ -1527,6 +1576,36 @@ class EncryptedTensor:
         Args:
             path: Path to save the tensor.
         """
+        if hasattr(self._context, "_ensure_initialized"):
+            self._context._ensure_initialized()
+
+        backend_context = getattr(self._context, "_ctx", None)
+        bundle_paths = _tensor_bundle_paths(path)
+        if backend_context is not None and hasattr(backend_context, "save_ciphertext"):
+            backend_context.save_ciphertext(self._cipher, ciphertext_path=str(bundle_paths["ciphertext"]))
+            tensor_data = {
+                "kind": _TENSOR_MANIFEST_KIND,
+                "shape": list(self._shape),
+                "depth": self._depth,
+                "original_size": self._original_size,
+                "slot_count_hint": self._slot_count_hint,
+                "needs_rescale": self._needs_rescale,
+                "cnn_layout": self._copy_cnn_layout(self._cnn_layout),
+                "packed_batch": self._packed_batch,
+                "batch_size": self._batch_size,
+                "slots_per_sample": self._slots_per_sample,
+                "packed_sample_shape": list(self._packed_sample_shape)
+                if self._packed_sample_shape is not None
+                else None,
+                "packing_layout": _packing_layout_to_dict(self._packing_layout),
+                "stip_layout_fresh": self._stip_layout_fresh,
+            }
+            bundle_paths["manifest"].write_text(
+                json.dumps(tensor_data, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            return
+
         cipher_data = None
         if hasattr(self._cipher, "data"):
             cipher_data = self._cipher.data
@@ -1560,7 +1639,40 @@ class EncryptedTensor:
         Returns:
             The loaded EncryptedTensor.
         """
-        import warnings
+        path_obj = Path(path)
+        manifest = _load_native_tensor_manifest(path_obj)
+        if manifest is not None:
+            if hasattr(context, "_ensure_initialized"):
+                context._ensure_initialized()
+            backend_context = getattr(context, "_ctx", context)
+            if not hasattr(backend_context, "load_ciphertext"):
+                raise RuntimeError("Active backend does not support native ciphertext deserialization")
+
+            shape = tuple(int(v) for v in manifest["shape"])
+            depth = int(manifest["depth"])
+            bundle_paths = _tensor_bundle_paths(path_obj)
+            cipher = backend_context.load_ciphertext(
+                ciphertext_path=str(bundle_paths["ciphertext"]),
+                shape=shape,
+            )
+
+            result = cls(cipher, shape, context, depth)
+            result._original_size = manifest.get("original_size")
+            result._slot_count_hint = manifest.get("slot_count_hint")
+            result._needs_rescale = bool(manifest.get("needs_rescale", False))
+            result._cnn_layout = cls._copy_cnn_layout(manifest.get("cnn_layout", None))
+            result._packed_batch = bool(manifest.get("packed_batch", False))
+            result._batch_size = manifest.get("batch_size", None)
+            result._slots_per_sample = manifest.get("slots_per_sample", None)
+            packed_sample_shape = manifest.get("packed_sample_shape", None)
+            result._packed_sample_shape = (
+                tuple(int(v) for v in packed_sample_shape)
+                if packed_sample_shape is not None
+                else None
+            )
+            result._packing_layout = _packing_layout_from_dict(manifest.get("packing_layout"))
+            result._stip_layout_fresh = bool(manifest.get("stip_layout_fresh", False))
+            return result
 
         warnings.warn(
             "EncryptedTensor.load() uses pickle, which can execute arbitrary code. "
