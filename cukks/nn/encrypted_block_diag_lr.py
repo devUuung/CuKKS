@@ -17,11 +17,11 @@ import torch
 from .module import EncryptedModule
 
 if TYPE_CHECKING:
+    from .block_diagonal_low_rank import BlockDiagLowRankLinear
     from ..tensor import EncryptedTensor
 
 
 class EncryptedBlockDiagLowRank(EncryptedModule):
-
     def __init__(
         self,
         in_features: int,
@@ -97,8 +97,6 @@ class EncryptedBlockDiagLowRank(EncryptedModule):
 
     @classmethod
     def from_module(cls, module: "BlockDiagLowRankLinear") -> "EncryptedBlockDiagLowRank":
-        from .block_diagonal_low_rank import BlockDiagLowRankLinear
-
         # Build dense BD weight matrix (zeros in off-blocks → zero-diag skip)
         bd_weight = torch.zeros(
             module.out_features, module.in_features,

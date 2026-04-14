@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import torch
 
@@ -188,7 +188,7 @@ class EncryptedTensor:
             if context_slots is not None:
                 resolved = context_slots() if callable(context_slots) else context_slots
                 if resolved is not None:
-                    return int(resolved)
+                    return int(cast(Any, resolved))
         except Exception:
             pass
 

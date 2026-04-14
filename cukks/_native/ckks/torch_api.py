@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterable, Sequence
 
 import torch
 
@@ -14,37 +14,41 @@ _backend = None
 
 def _load_backends():
     global _gpu_backend, _cpu_backend, _backend
-    
+
     if _backend is not None:
         return
-    
+
     _gpu_error = None
     _cpu_error = None
-    
+
     try:
         from ckks.backends import ckks_openfhe_gpu_backend as gpu_mod
+
         _gpu_backend = gpu_mod
     except Exception as e:
         _gpu_error = f"ckks.backends.ckks_openfhe_gpu_backend: {e}"
         try:
             import ckks_openfhe_gpu_backend as gpu_mod
+
             _gpu_backend = gpu_mod
         except ImportError as e2:
             _gpu_error += f"; direct import: {e2}"
             _gpu_backend = None
-    
+
     try:
         from ckks.backends import ckks_openfhe_backend as cpu_mod
+
         _cpu_backend = cpu_mod
     except Exception as e:
         _cpu_error = f"ckks.backends.ckks_openfhe_backend: {e}"
         try:
             import ckks_openfhe_backend as cpu_mod
+
             _cpu_backend = cpu_mod
         except ImportError as e2:
             _cpu_error += f"; direct import: {e2}"
             _cpu_backend = None
-    
+
     if _gpu_backend is None and _cpu_backend is None:
         error_details = []
         if _gpu_error:
@@ -56,7 +60,7 @@ def _load_backends():
             f"Errors: {'; '.join(error_details)}. "
             "Build with `pip install -e bindings/openfhe_backend` first."
         )
-    
+
     use_gpu = os.environ.get("CKKS_USE_GPU", "1").lower() in ("1", "true", "yes")
     if use_gpu and _gpu_backend is not None:
         _backend = _gpu_backend
@@ -117,15 +121,21 @@ class CKKSConfig:
 class CKKSContext:
     """Thin wrapper around the native backend, tuned for Torch tensors."""
 
-    def __init__(self, config: CKKSConfig | None = None, *, device: str | torch.device | None = None, enable_gpu: bool = True):
+    def __init__(
+        self,
+        config: CKKSConfig | None = None,
+        *,
+        device: str | torch.device | None = None,
+        enable_gpu: bool = True,
+    ):
         self.config = config or CKKSConfig()
         self.device = torch.device(device) if device is not None else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
         self._enable_gpu = enable_gpu and _gpu_backend is not None
-        
+
         active_backend = _gpu_backend if self._enable_gpu else (_cpu_backend or _backend)
-        
+
         if hasattr(active_backend, "create_context"):
             if self._enable_gpu:
                 self._ctx = active_backend.create_context(
@@ -158,18 +168,25 @@ class CKKSContext:
                 list(self.config.level_budget or []),
                 int(self.config.resolved_batch_size()),
             )
-        
+
         self._active_backend = active_backend if hasattr(active_backend, "keygen") else _backend
-        
+
         if self._enable_gpu:
             self._keys = self._active_backend.keygen(
-                self._ctx, list(self.config.rotations), bool(self.config.relin), bool(self.config.generate_conjugate_keys), True
+                self._ctx,
+                list(self.config.rotations),
+                bool(self.config.relin),
+                bool(self.config.generate_conjugate_keys),
+                True,
             )
         else:
             self._keys = self._active_backend.keygen(
-                self._ctx, list(self.config.rotations), bool(self.config.relin), bool(self.config.generate_conjugate_keys)
+                self._ctx,
+                list(self.config.rotations),
+                bool(self.config.relin),
+                bool(self.config.generate_conjugate_keys),
             )
-    
+
     @property
     def gpu_enabled(self) -> bool:
         if hasattr(self._ctx, "gpu_enabled"):
@@ -226,7 +243,13 @@ class CKKSContext:
 class CKKSTensor:
     """Encrypted tensor that mirrors a Torch tensor shape."""
 
-    def __init__(self, context: CKKSContext, cipher, shape: Sequence[int], device):
+    def __init__(
+        self,
+        context: CKKSContext,
+        cipher: Any,
+        shape: Sequence[int],
+        device: str | torch.device | None,
+    ) -> None:
         self.context = context
         self._cipher = cipher
         self.shape = tuple(shape)
@@ -268,7 +291,7 @@ class CKKSTensor:
 
     def square(self) -> "CKKSTensor":
         """Square this ciphertext."""
-        if hasattr(self._backend, 'square'):
+        if hasattr(self._backend, "square"):
             new_cipher = self._backend.square(self._cipher)
         else:
             new_cipher = self._backend.mul_cipher(self._cipher, self._cipher)
@@ -316,7 +339,7 @@ class CKKSTensor:
         return result
 
     def matmul_diagonal(self, diagonals: Sequence[Sequence[float]]) -> "CKKSTensor":
-        diag_plain = [ _tensor_to_list(diag, expected=self.size) for diag in diagonals ]
+        diag_plain = [_tensor_to_list(diag, expected=self.size) for diag in diagonals]
         result = self._backend.matvec_diag(self._cipher, diag_plain)
         return CKKSTensor(self.context, result, self.shape, self.device)
 
@@ -341,12 +364,24 @@ class CKKSTensor:
         result = self._backend.matmul_dense(self._cipher, rows)
         return CKKSTensor(self.context, result, (len(rows),), self.device)
 
-    def matmul_bsgs(self, matrix: Sequence[Sequence[float]], bsgs_n1: int = 0, bsgs_n2: int = 0,
-                    weight_hash: int = 0, diag_nonzero: Sequence[bool] | None = None) -> "CKKSTensor":
+    def matmul_bsgs(
+        self,
+        matrix: Sequence[Sequence[float]],
+        bsgs_n1: int = 0,
+        bsgs_n2: int = 0,
+        weight_hash: int = 0,
+        diag_nonzero: Sequence[bool] | None = None,
+    ) -> "CKKSTensor":
         diag_nonzero_list = list(diag_nonzero) if diag_nonzero is not None else []
         if hasattr(self._backend, "plain_cache_stats_count"):
-            result = self._backend.matmul_bsgs(self._cipher, matrix, bsgs_n1, bsgs_n2,
-                                               weight_hash, diag_nonzero_list)
+            result = self._backend.matmul_bsgs(
+                self._cipher,
+                matrix,
+                bsgs_n1,
+                bsgs_n2,
+                weight_hash,
+                diag_nonzero_list,
+            )
         else:
             result = self._backend.matmul_bsgs(self._cipher, matrix, bsgs_n1, bsgs_n2)
         return CKKSTensor(self.context, result, (len(matrix),), self.device)
@@ -390,33 +425,38 @@ class CKKSTensor:
         bootstrapped = self._backend.bootstrap(self._cipher)
         return CKKSTensor(self.context, bootstrapped, self.shape, self.device)
 
-    def decrypt(self, *, device: str | torch.device | None = None, shape: Sequence[int] | None = None) -> torch.Tensor:
+    def decrypt(
+        self,
+        *,
+        device: str | torch.device | None = None,
+        shape: Sequence[int] | None = None,
+    ) -> torch.Tensor:
         return self.context.decrypt(self, device=device, shape=shape)
 
     def _check_context(self, other: "CKKSTensor") -> None:
         if self.context is not other.context:
             raise ValueError("Ciphertexts originate from different CKKS contexts or key sets")
 
-    def __add__(self, other):
+    def __add__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         return self.add(other)
 
-    def __radd__(self, other):
+    def __radd__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         return self.add(other)
 
-    def __sub__(self, other):
+    def __sub__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         return self.sub(other)
 
-    def __rsub__(self, other):
+    def __rsub__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         # other - self = -(self - other) = -self + other
         return self.mul(-1.0).add(other)
 
-    def __mul__(self, other):
+    def __mul__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         return self.mul(other)
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: "CKKSTensor | torch.Tensor | float | int") -> "CKKSTensor":
         return self.mul(other)
 
-    def __neg__(self):
+    def __neg__(self) -> "CKKSTensor":
         return self.mul(-1.0)
 
     def __repr__(self) -> str:
