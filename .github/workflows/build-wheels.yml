@@ -261,6 +261,8 @@ jobs:
         cuda_version: ${{ fromJson(needs.setup.outputs.test_gpu_cuda_versions) }}
         python-version: ${{ fromJson(needs.setup.outputs.test_gpu_python_versions) }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: wheels-gpu-cu${{ matrix.cuda_version }}
@@ -289,7 +291,43 @@ jobs:
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
 
           echo "All required files present for CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }}!"
-          echo "Note: Import test skipped - requires CUDA drivers (libcuda.so.1)"
+      - name: Smoke test GPU wheel on CPU backend (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+          CKKS_USE_GPU=0 python - <<'PY'
+          import torch
+          from ckks import CKKSConfig, CKKSContext
+
+          config = CKKSConfig(
+              poly_mod_degree=16384,
+              coeff_mod_bits=(60, 40, 40, 60),
+              scale_bits=40,
+              security_level="notset",
+              enable_bootstrap=False,
+              rotations=[1],
+              relin=True,
+          )
+          ctx = CKKSContext(config, device="cpu")
+          values = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+          cipher = ctx.encrypt(values)
+          recovered = ctx.decrypt(cipher, shape=values.shape)
+          error = (recovered[: values.numel()] - values).abs().max().item()
+          assert error < 1e-4, f"Encrypt/decrypt error too large: {error}"
+          PY
+
+      - name: Native serialization roundtrip (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+          pip install -e .[dev]
+          python -m pytest tests/test_serialization.py -k native_context_and_tensor_roundtrip -q
 
   test-gpu-pr:
     needs: [setup, build-gpu-pr]
@@ -301,6 +339,8 @@ jobs:
         cuda_version: ${{ fromJson(needs.setup.outputs.test_gpu_cuda_versions) }}
         python-version: ${{ fromJson(needs.setup.outputs.test_gpu_python_versions) }}
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: wheels-gpu-cu${{ matrix.cuda_version }}
@@ -325,6 +365,44 @@ jobs:
           test -f "$SITE_PACKAGES/ckks/backends/__init__.py"
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_backend.cpython-*.so
           ls "$SITE_PACKAGES/ckks/backends/"ckks_openfhe_gpu_backend.cpython-*.so
+
+      - name: Smoke test PR GPU wheel on CPU backend (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+          CKKS_USE_GPU=0 python - <<'PY'
+          import torch
+          from ckks import CKKSConfig, CKKSContext
+
+          config = CKKSConfig(
+              poly_mod_degree=16384,
+              coeff_mod_bits=(60, 40, 40, 60),
+              scale_bits=40,
+              security_level="notset",
+              enable_bootstrap=False,
+              rotations=[1],
+              relin=True,
+          )
+          ctx = CKKSContext(config, device="cpu")
+          values = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+          cipher = ctx.encrypt(values)
+          recovered = ctx.decrypt(cipher, shape=values.shape)
+          error = (recovered[: values.numel()] - values).abs().max().item()
+          assert error < 1e-4, f"Encrypt/decrypt error too large: {error}"
+          PY
+
+      - name: Native serialization roundtrip for PR wheel (CUDA ${{ matrix.cuda_version }}, Python ${{ matrix.python-version }})
+        run: |
+          set -ex
+          PY_VER=$(echo "${{ matrix.python-version }}" | tr -d '.')
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install wheelhouse/*cp${PY_VER}*.whl
+          pip install -e .[dev]
+          python -m pytest tests/test_serialization.py -k native_context_and_tensor_roundtrip -q
 
   build-main:
     needs: setup

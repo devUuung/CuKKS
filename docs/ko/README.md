@@ -114,6 +114,10 @@ export LD_LIBRARY_PATH="$PWD/../../openfhe-gpu-public/build/lib:$LD_LIBRARY_PATH
 pip install -e .
 ```
 
+CUDA 13 소스 빌드에서는 CCCL/Thrust 헤더가 별도 패키지로 제공될 수 있습니다.
+현재 백엔드 CMake는 대표적인 CUDA 13 `cccl` include 경로를 자동으로 찾지만,
+툴킷 쪽에 해당 헤더가 실제로 설치되어 있어야 합니다.
+
 ### 설치 확인
 
 ```python
@@ -127,6 +131,9 @@ print(cukks.get_backend_info())
 ## 문서
 
 - **[API 레퍼런스](api.md)**: 완전한 API 문서
+- **직렬화**: 기본 저장 형식은 OpenFHE native binary + JSON manifest입니다.
+  레거시 `pickle` 저장/로드는 `allow_unsafe_pickle=True`일 때만 허용되며,
+  신뢰된 개발용 아티팩트에서만 사용해야 합니다.
 - **[CKKS 개념](concepts.md)**: 동형암호 이해하기
 - **[예제 개요](../examples/README.md)**: 동작하는 코드 예제
 - **[CI/CD 개요](../ci-cd.ko.md)**: 기여와 배포 자동화 구조

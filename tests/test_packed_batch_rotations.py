@@ -269,9 +269,11 @@ class TestBatchSizeSerialization:
 
         ctx = CKKSInferenceContext(device="cpu", batch_size=8)
         path = tmp_path / "ctx.pkl"
-        ctx.save_context(path)
+        with pytest.warns(UserWarning, match="unsafe"):
+            ctx.save_context(path, allow_unsafe_pickle=True)
 
-        loaded = CKKSInferenceContext.load_context(path)
+        with pytest.warns(UserWarning, match="pickle deserialization"):
+            loaded = CKKSInferenceContext.load_context(path, allow_unsafe_pickle=True)
         assert loaded.batch_size == 8
 
     def test_load_legacy_defaults_to_1(self, tmp_path):
@@ -299,5 +301,6 @@ class TestBatchSizeSerialization:
         with open(path, "wb") as f:
             pickle.dump(legacy_data, f)
 
-        loaded = CKKSInferenceContext.load_context(path)
+        with pytest.warns(UserWarning, match="pickle deserialization"):
+            loaded = CKKSInferenceContext.load_context(path, allow_unsafe_pickle=True)
         assert loaded.batch_size == 1

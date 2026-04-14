@@ -11,6 +11,21 @@ pip install -e bindings/openfhe_backend
 ```
 
 The CMake build links against CUDA (cublas/curand/cudart) plus the GPU OpenFHE libraries already built in `openfhe-gpu-public/build` (and the bundled `librmm`). RPATH is set so the extension can find those shared libs in-place.
+On CUDA 13 source builds, CCCL/Thrust headers may live under a separate `cccl`
+include tree; the backend CMake now probes those layouts automatically.
+
+## Native Serialization
+
+The backend now exposes native save/load helpers for:
+
+- crypto context bundles
+- public and secret keys
+- eval mult/sum/automorphism keys
+- ciphertexts
+
+CuKKS uses those helpers as the default serialization path. Legacy Python
+pickle fallback is intentionally unsafe and must be opted into explicitly from
+the high-level API.
 
 ## Quickstart
 

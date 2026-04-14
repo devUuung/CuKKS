@@ -111,8 +111,18 @@ ctx = CKKSInferenceContext.for_depth(
 Load a saved context configuration.
 
 ```python
-ctx = CKKSInferenceContext.load_context(path: str) -> CKKSInferenceContext
+ctx = CKKSInferenceContext.load_context(
+    path: str,
+    allow_unsafe_pickle: bool = False,
+    device: Optional[str] = None,
+    enable_gpu: Optional[bool] = None,
+) -> CKKSInferenceContext
 ```
+
+Native manifests are the default. Legacy pickle files require
+`allow_unsafe_pickle=True` and should only be loaded from trusted development
+artifacts. `device` and `enable_gpu` can override the saved runtime target when
+loading native artifacts.
 
 #### Instance Methods
 
@@ -211,8 +221,11 @@ samples = ctx.decrypt_batch(
 Save the context configuration.
 
 ```python
-ctx.save_context(path: str) -> None
+ctx.save_context(path: str, allow_unsafe_pickle: bool = False) -> None
 ```
+
+By default this writes a JSON manifest plus native OpenFHE sidecar files. The
+legacy pickle fallback is disabled unless `allow_unsafe_pickle=True`.
 
 #### Properties
 
@@ -391,11 +404,19 @@ tensor = enc_tensor.decrypt(shape: Optional[Sequence[int]] = None) -> torch.Tens
 
 ```python
 # Save encrypted tensor
-enc_tensor.save(path: str) -> None
+enc_tensor.save(path: str, allow_unsafe_pickle: bool = False) -> None
 
 # Load encrypted tensor
-enc_tensor = EncryptedTensor.load(path: str, context: CKKSInferenceContext) -> EncryptedTensor
+enc_tensor = EncryptedTensor.load(
+    path: str,
+    context: CKKSInferenceContext,
+    allow_unsafe_pickle: bool = False,
+) -> EncryptedTensor
 ```
+
+By default CuKKS saves a JSON manifest plus a native OpenFHE ciphertext
+sidecar. The legacy pickle fallback is disabled unless
+`allow_unsafe_pickle=True`.
 
 ---
 

@@ -107,6 +107,24 @@ set(OPENFHE_LIBRARY_DIR "${OPENFHE_GPU_BUILD_DIR}/lib")
 # ==============================================================================
 find_package(CUDAToolkit REQUIRED)
 
+set(CUDA_EXTRA_INCLUDE_DIRS "")
+if(DEFINED CUDAToolkit_TARGET_DIR)
+    list(APPEND CUDA_EXTRA_INCLUDE_DIRS "${CUDAToolkit_TARGET_DIR}/include/cccl")
+endif()
+foreach(_cuda_inc ${CUDAToolkit_INCLUDE_DIRS})
+    list(APPEND CUDA_EXTRA_INCLUDE_DIRS "${_cuda_inc}/cccl")
+endforeach()
+if(DEFINED CUDAToolkit_NVCC_EXECUTABLE AND EXISTS "${CUDAToolkit_NVCC_EXECUTABLE}")
+    get_filename_component(_nvcc_real "${CUDAToolkit_NVCC_EXECUTABLE}" REALPATH)
+    get_filename_component(_nvcc_bin_dir "${_nvcc_real}" DIRECTORY)
+    get_filename_component(_cuda_root_from_nvcc "${_nvcc_bin_dir}" DIRECTORY)
+    list(APPEND CUDA_EXTRA_INCLUDE_DIRS
+        "${_cuda_root_from_nvcc}/targets/x86_64-linux/include/cccl"
+        "${_cuda_root_from_nvcc}/include/cccl"
+    )
+endif()
+list(REMOVE_DUPLICATES CUDA_EXTRA_INCLUDE_DIRS)
+
 # ==============================================================================
 # Main Extension Module (CPU Backend)
 # ==============================================================================
@@ -116,6 +134,11 @@ target_compile_options(ckks_openfhe_backend PRIVATE -ftls-model=global-dynamic)
 
 foreach(_inc ${OPENFHE_INCLUDE_DIRS})
     if(EXISTS "${_inc}")
+        target_include_directories(ckks_openfhe_backend SYSTEM PRIVATE "${_inc}")
+    endif()
+endforeach()
+foreach(_inc ${CUDA_EXTRA_INCLUDE_DIRS})
+    if(EXISTS "${_inc}/thrust/device_vector.h")
         target_include_directories(ckks_openfhe_backend SYSTEM PRIVATE "${_inc}")
     endif()
 endforeach()
@@ -129,6 +152,11 @@ target_compile_options(ckks_openfhe_gpu_backend PRIVATE -ftls-model=global-dynam
 
 foreach(_inc ${OPENFHE_INCLUDE_DIRS})
     if(EXISTS "${_inc}")
+        target_include_directories(ckks_openfhe_gpu_backend SYSTEM PRIVATE "${_inc}")
+    endif()
+endforeach()
+foreach(_inc ${CUDA_EXTRA_INCLUDE_DIRS})
+    if(EXISTS "${_inc}/thrust/device_vector.h")
         target_include_directories(ckks_openfhe_gpu_backend SYSTEM PRIVATE "${_inc}")
     endif()
 endforeach()
@@ -218,5 +246,6 @@ message(STATUS "  pybind11:         ${pybind11_VERSION}")
 message(STATUS "  OpenFHE GPU Root: ${OPENFHE_GPU_ROOT}")
 message(STATUS "  OpenFHE Build:    ${OPENFHE_GPU_BUILD_DIR}")
 message(STATUS "  CUDA Toolkit:     ${CUDAToolkit_VERSION}")
+message(STATUS "  CUDA CCCL:        ${CUDA_EXTRA_INCLUDE_DIRS}")
 message(STATUS "  Install Prefix:   ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "")
