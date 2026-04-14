@@ -1,5 +1,8 @@
 """Tests for serialization of Context and EncryptedTensor."""
 
+import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -14,7 +17,7 @@ from conftest import requires_real_backend
 
 class TestContextSerialization:
     
-    def test_context_save_load(self, tmp_path: Path):
+    def test_context_save_load(self, use_mock_backend, tmp_path: Path):
         config = InferenceConfig(
             poly_mod_degree=8192,
             scale_bits=30,
@@ -43,7 +46,7 @@ class TestContextSerialization:
         assert loaded_ctx.auto_bootstrap is True
         assert loaded_ctx.bootstrap_threshold == 3
     
-    def test_context_load_alias(self, tmp_path: Path):
+    def test_context_load_alias(self, use_mock_backend, tmp_path: Path):
         ctx = CKKSInferenceContext()
         save_path = tmp_path / "context.bin"
         with pytest.warns(UserWarning, match="unsafe"):
@@ -54,7 +57,7 @@ class TestContextSerialization:
         
         assert loaded_ctx.config.poly_mod_degree == ctx.config.poly_mod_degree
     
-    def test_context_save_load_with_rotations(self, tmp_path: Path):
+    def test_context_save_load_with_rotations(self, use_mock_backend, tmp_path: Path):
         rotations = [1, 2, 4, 8, -1, -2, -4, -8]
         ctx = CKKSInferenceContext(rotations=rotations)
         
@@ -67,7 +70,7 @@ class TestContextSerialization:
         
         assert loaded_ctx._rotations == rotations
 
-    def test_context_pickle_requires_explicit_opt_in(self, tmp_path: Path):
+    def test_context_pickle_requires_explicit_opt_in(self, use_mock_backend, tmp_path: Path):
         ctx = CKKSInferenceContext()
         save_path = tmp_path / "context.bin"
 
@@ -322,3 +325,35 @@ class TestNativeSerialization:
 
         decrypted = loaded_ctx.decrypt(loaded_tensor)
         torch.testing.assert_close(decrypted.cpu(), original, rtol=1e-4, atol=1e-4)
+
+    @requires_real_backend
+    def test_native_backend_exit_cleanup_does_not_segfault(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [p for p in [env.get("PYTHONPATH"), str(Path.cwd()), str(Path.cwd() / "cukks" / "_native")] if p]
+        )
+        script = """
+import torch
+from cukks.context import CKKSInferenceContext, InferenceConfig
+from cukks.profiling import get_profiler
+
+assert get_profiler() is None
+ctx = CKKSInferenceContext(
+    config=InferenceConfig(poly_mod_degree=32768, scale_bits=40, mult_depth=4),
+    device="cpu",
+    rotations=[1, -1],
+    use_bsgs=False,
+    enable_gpu=False,
+)
+x = ctx.encrypt(torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64))
+y = x.add(1.0)
+assert y.shape == (4,)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path.cwd(),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout

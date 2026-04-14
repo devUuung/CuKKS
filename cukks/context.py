@@ -7,6 +7,7 @@ parameters optimized for neural network inference.
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import pickle
@@ -29,6 +30,15 @@ from .rotation_planning import collect_rotation_requirements, compute_reduction_
 CKKSConfig: Any | None = None
 CKKSContext: Any | None = None
 _CONTEXT_MANIFEST_KIND = "cukks.context.native.v1"
+_INTERPRETER_SHUTTING_DOWN = False
+
+
+def _mark_interpreter_shutdown() -> None:
+    global _INTERPRETER_SHUTTING_DOWN
+    _INTERPRETER_SHUTTING_DOWN = True
+
+
+atexit.register(_mark_interpreter_shutdown)
 
 
 def _context_bundle_paths(path: Union[str, Path]) -> Dict[str, Path]:
@@ -972,6 +982,10 @@ class CKKSInferenceContext:
     load = load_context
 
     def close(self):
+        if _INTERPRETER_SHUTTING_DOWN:
+            self._ctx = None
+            self._initialized = False
+            return
         if hasattr(self, "_ctx") and self._ctx is not None:
             if hasattr(self._ctx, "cleanup"):
                 self._ctx.cleanup()
@@ -979,10 +993,10 @@ class CKKSInferenceContext:
         self._initialized = False
 
     def __del__(self):
-        try:
-            self.close()
-        except Exception:
-            pass
+        # Avoid forcing pybind-backed teardown during GC. Real backend handles
+        # can crash when interpreter/module finalization order is unfavorable.
+        # Explicit `close()` and context-manager usage remain supported.
+        return
 
     def __enter__(self):
         return self

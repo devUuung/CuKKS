@@ -7,6 +7,7 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import pickle
@@ -46,6 +47,15 @@ if TYPE_CHECKING:
 
 
 _TENSOR_MANIFEST_KIND = "cukks.tensor.native.v1"
+_INTERPRETER_SHUTTING_DOWN = False
+
+
+def _mark_interpreter_shutdown() -> None:
+    global _INTERPRETER_SHUTTING_DOWN
+    _INTERPRETER_SHUTTING_DOWN = True
+
+
+atexit.register(_mark_interpreter_shutdown)
 
 
 def _tensor_bundle_paths(path: Union[str, Path]) -> Dict[str, Path]:
@@ -211,6 +221,8 @@ class EncryptedTensor:
         self._sigma_factor_ref = value
 
     def __del__(self):
+        if _INTERPRETER_SHUTTING_DOWN:
+            return
         try:
             self._sigma_factor = None
             if getattr(self, "_owns_cipher", True):
