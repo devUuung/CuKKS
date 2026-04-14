@@ -92,6 +92,14 @@ def _load_native_tensor_manifest(path: Path) -> Optional[Dict[str, Any]]:
     return manifest
 
 
+def _unsafe_pickle_error(path: Union[str, Path]) -> str:
+    return (
+        f"Refusing to use legacy pickle-based tensor serialization for {Path(path)}. "
+        "This path is unsafe and intended only for trusted development artifacts. "
+        "Pass allow_unsafe_pickle=True only when you fully trust the file."
+    )
+
+
 class EncryptedTensor:
     """A tensor containing CKKS-encrypted data.
 
@@ -1567,7 +1575,7 @@ class EncryptedTensor:
             f"scale={meta.get('scale', 0):.2e})"
         )
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: Union[str, Path], *, allow_unsafe_pickle: bool = False) -> None:
         """Save the encrypted tensor to a file.
 
         Serializes the tensor metadata and underlying cipher data.
@@ -1621,6 +1629,16 @@ class EncryptedTensor:
             "slots_per_sample": self._slots_per_sample,
             "packed_sample_shape": self._packed_sample_shape,
         }
+        if not allow_unsafe_pickle:
+            raise RuntimeError(_unsafe_pickle_error(path))
+
+        warnings.warn(
+            "Saving an EncryptedTensor with pickle is unsafe and intended only for trusted "
+            "development artifacts. Prefer the native OpenFHE serialization path whenever "
+            "a real backend is available.",
+            UserWarning,
+            stacklevel=2,
+        )
         with open(path, "wb") as f:
             pickle.dump(tensor_data, f)
 
@@ -1629,6 +1647,8 @@ class EncryptedTensor:
         cls,
         path: Union[str, Path],
         context: "CKKSInferenceContext",
+        *,
+        allow_unsafe_pickle: bool = False,
     ) -> "EncryptedTensor":
         """Load an encrypted tensor from a file.
 
@@ -1673,6 +1693,9 @@ class EncryptedTensor:
             result._packing_layout = _packing_layout_from_dict(manifest.get("packing_layout"))
             result._stip_layout_fresh = bool(manifest.get("stip_layout_fresh", False))
             return result
+
+        if not allow_unsafe_pickle:
+            raise RuntimeError(_unsafe_pickle_error(path))
 
         warnings.warn(
             "EncryptedTensor.load() uses pickle, which can execute arbitrary code. "

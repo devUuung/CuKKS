@@ -100,8 +100,18 @@ ctx = CKKSInferenceContext.for_depth(
 저장된 컨텍스트 설정을 로드합니다.
 
 ```python
-ctx = CKKSInferenceContext.load_context(path: str) -> CKKSInferenceContext
+ctx = CKKSInferenceContext.load_context(
+    path: str,
+    allow_unsafe_pickle: bool = False,
+    device: Optional[str] = None,
+    enable_gpu: Optional[bool] = None,
+) -> CKKSInferenceContext
 ```
+
+기본값은 native manifest 로드입니다. 레거시 `pickle` 파일은
+`allow_unsafe_pickle=True`가 있어야만 로드되며, 신뢰된 개발용
+아티팩트에만 사용해야 합니다. native 아티팩트는 `device`와
+`enable_gpu`로 로드 대상 런타임을 덮어쓸 수 있습니다.
 
 #### 인스턴스 메서드
 
@@ -171,8 +181,11 @@ samples = ctx.decrypt_batch(
 컨텍스트 설정을 저장합니다.
 
 ```python
-ctx.save_context(path: str) -> None
+ctx.save_context(path: str, allow_unsafe_pickle: bool = False) -> None
 ```
+
+기본적으로 JSON manifest와 native OpenFHE sidecar 파일을 저장합니다.
+레거시 `pickle` fallback은 `allow_unsafe_pickle=True`일 때만 허용됩니다.
 
 #### 속성
 
@@ -351,11 +364,19 @@ tensor = enc_tensor.decrypt(shape: Optional[Sequence[int]] = None) -> torch.Tens
 
 ```python
 # 암호화된 텐서 저장
-enc_tensor.save(path: str) -> None
+enc_tensor.save(path: str, allow_unsafe_pickle: bool = False) -> None
 
 # 암호화된 텐서 로드
-enc_tensor = EncryptedTensor.load(path: str, context: CKKSInferenceContext) -> EncryptedTensor
+enc_tensor = EncryptedTensor.load(
+    path: str,
+    context: CKKSInferenceContext,
+    allow_unsafe_pickle: bool = False,
+) -> EncryptedTensor
 ```
+
+기본 저장 형식은 JSON manifest + native OpenFHE ciphertext sidecar입니다.
+레거시 `pickle` 경로는 `allow_unsafe_pickle=True`를 명시적으로 줘야만
+사용할 수 있습니다.
 
 ---
 

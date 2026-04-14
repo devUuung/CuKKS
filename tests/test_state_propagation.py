@@ -171,9 +171,11 @@ class TestSerializationState:
         assert a_mul._needs_rescale is True
 
         save_path = tmp_path / "tensor.pkl"
-        a_mul.save(save_path)
+        with pytest.warns(UserWarning, match="unsafe"):
+            a_mul.save(save_path, allow_unsafe_pickle=True)
 
-        loaded = EncryptedTensor.load(save_path, mock_enc_context)
+        with pytest.warns(UserWarning, match="pickle"):
+            loaded = EncryptedTensor.load(save_path, mock_enc_context, allow_unsafe_pickle=True)
         assert loaded._needs_rescale is True
 
     def test_save_load_preserves_cnn_layout(self, mock_enc_context, tmp_path):
@@ -187,9 +189,11 @@ class TestSerializationState:
         }
 
         save_path = tmp_path / "tensor.pkl"
-        a.save(save_path)
+        with pytest.warns(UserWarning, match="unsafe"):
+            a.save(save_path, allow_unsafe_pickle=True)
 
-        loaded = EncryptedTensor.load(save_path, mock_enc_context)
+        with pytest.warns(UserWarning, match="pickle"):
+            loaded = EncryptedTensor.load(save_path, mock_enc_context, allow_unsafe_pickle=True)
         assert loaded._cnn_layout is not None
         assert loaded._cnn_layout["num_patches"] == 4
         assert loaded._cnn_layout["patch_features"] == 4
@@ -203,9 +207,11 @@ class TestSerializationState:
         assert a._cnn_layout is None
 
         save_path = tmp_path / "tensor.pkl"
-        a.save(save_path)
+        with pytest.warns(UserWarning, match="unsafe"):
+            a.save(save_path, allow_unsafe_pickle=True)
 
-        loaded = EncryptedTensor.load(save_path, mock_enc_context)
+        with pytest.warns(UserWarning, match="pickle"):
+            loaded = EncryptedTensor.load(save_path, mock_enc_context, allow_unsafe_pickle=True)
         assert loaded._needs_rescale is False
         assert loaded._cnn_layout is None
 
@@ -234,10 +240,11 @@ class TestContextSerialization:
         )
 
         save_path = tmp_path / "context.pkl"
-        ctx.save_context(save_path)
+        with pytest.warns(UserWarning, match="unsafe"):
+            ctx.save_context(save_path, allow_unsafe_pickle=True)
 
         with pytest.warns(UserWarning, match="pickle deserialization"):
-            loaded = CKKSInferenceContext.load_context(save_path)
+            loaded = CKKSInferenceContext.load_context(save_path, allow_unsafe_pickle=True)
 
         assert loaded.config.poly_mod_degree == 8192
         assert loaded.config.scale_bits == 35

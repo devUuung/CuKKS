@@ -54,6 +54,14 @@ def _load_native_context_manifest(path: Path) -> Optional[Dict[str, Any]]:
     return manifest
 
 
+def _unsafe_pickle_error(kind: str, path: Union[str, Path]) -> str:
+    return (
+        f"Refusing to use legacy pickle-based {kind} serialization for {Path(path)}. "
+        "This path is unsafe and intended only for trusted development artifacts. "
+        f"Pass allow_unsafe_pickle=True to {kind} methods only when you fully trust the file."
+    )
+
+
 @dataclass
 class InferenceConfig:
     poly_mod_degree: int = 32768  # OpenFHE 1.2+ requires ≥32768 for HE standards
@@ -782,7 +790,7 @@ class CKKSInferenceContext:
             f"status={status})"
         )
 
-    def save_context(self, path: Union[str, Path]) -> None:
+    def save_context(self, path: Union[str, Path], *, allow_unsafe_pickle: bool = False) -> None:
         config_data = {
             "kind": _CONTEXT_MANIFEST_KIND,
             "config": {
@@ -833,11 +841,28 @@ class CKKSInferenceContext:
             )
             return
 
+        if not allow_unsafe_pickle:
+            raise RuntimeError(_unsafe_pickle_error("context", path))
+
+        warnings.warn(
+            "Saving a CKKSInferenceContext with pickle is unsafe and intended only for trusted "
+            "development artifacts. Prefer the native OpenFHE serialization path whenever "
+            "a real backend is available.",
+            UserWarning,
+            stacklevel=2,
+        )
         with open(path, "wb") as f:
             pickle.dump(legacy_config_data, f)
 
     @classmethod
-    def load_context(cls, path: Union[str, Path]) -> "CKKSInferenceContext":
+    def load_context(
+        cls,
+        path: Union[str, Path],
+        *,
+        allow_unsafe_pickle: bool = False,
+        device: Optional[str] = None,
+        enable_gpu: Optional[bool] = None,
+    ) -> "CKKSInferenceContext":
         path_obj = Path(path)
         manifest = _load_native_context_manifest(path_obj)
         if manifest is not None:
@@ -861,14 +886,18 @@ class CKKSInferenceContext:
 
             instance = cls(
                 config=inference_config,
-                device=runtime["device"],
+                device=device if device is not None else runtime["device"],
                 rotations=[int(v) for v in runtime["rotations"]],
                 use_bsgs=bool(runtime["use_bsgs"]),
                 max_rotation_dim=runtime.get("max_rotation_dim"),
                 auto_bootstrap=bool(runtime["auto_bootstrap"]),
                 bootstrap_threshold=int(runtime["bootstrap_threshold"]),
                 cnn_config=runtime.get("cnn_config"),
-                enable_gpu=bool(runtime.get("enable_gpu", True)),
+                enable_gpu=(
+                    bool(enable_gpu)
+                    if enable_gpu is not None
+                    else bool(runtime.get("enable_gpu", True))
+                ),
                 batch_size=int(runtime.get("batch_size", 1)),
                 architecture=runtime.get("architecture", "default"),
             )
@@ -907,6 +936,9 @@ class CKKSInferenceContext:
             instance._initialized = True
             return instance
 
+        if not allow_unsafe_pickle:
+            raise RuntimeError(_unsafe_pickle_error("context", path))
+
         with open(path, "rb") as f:
             config_data = pickle.load(f)
 
@@ -926,12 +958,13 @@ class CKKSInferenceContext:
 
         return cls(
             config=inference_config,
-            device=config_data["device"],
+            device=device if device is not None else config_data["device"],
             rotations=config_data["rotations"],
             use_bsgs=config_data["use_bsgs"],
             max_rotation_dim=config_data["max_rotation_dim"],
             auto_bootstrap=config_data["auto_bootstrap"],
             bootstrap_threshold=config_data["bootstrap_threshold"],
+            enable_gpu=bool(enable_gpu) if enable_gpu is not None else True,
             batch_size=config_data.get("batch_size", 1),
             architecture=config_data.get("architecture", "default"),
         )

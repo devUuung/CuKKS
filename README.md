@@ -108,6 +108,10 @@ export LD_LIBRARY_PATH="$OPENFHE_BUILD_DIR/lib:$OPENFHE_BUILD_DIR/_deps/rmm-buil
 pip install -e bindings/openfhe_backend
 ```
 
+On CUDA 13 source builds, make sure CCCL/Thrust headers are installed. The
+backend CMake now probes common CUDA 13 `cccl` include layouts automatically,
+but the toolkit package still needs to provide those headers.
+
 </details>
 
 ## Key Features
@@ -266,6 +270,9 @@ transformer     0.01         54.27           7794      x 0.087978
 ## Documentation
 
 - [API Reference](docs/api.md)
+- Native serialization now defaults to OpenFHE-managed binaries plus a JSON
+  manifest. Legacy pickle save/load is opt-in with `allow_unsafe_pickle=True`
+  and should only be used for trusted local development artifacts.
 - [CKKS Concepts](docs/concepts.md)
 - [GPU Acceleration Guide](docs/gpu-acceleration.md)
 - [STIP Packed Attention](docs/stip-attention.md)
