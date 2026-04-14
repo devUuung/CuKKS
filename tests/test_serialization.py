@@ -8,6 +8,7 @@ import torch
 
 from cukks.context import CKKSInferenceContext, InferenceConfig
 from cukks.tensor import EncryptedTensor
+from conftest import requires_real_backend
 
 
 class TestContextSerialization:
@@ -125,5 +126,41 @@ class TestRoundTrip:
         
         loaded_tensor = EncryptedTensor.load(tensor_path, mock_enc_context)
         decrypted = mock_enc_context.decrypt(loaded_tensor)
-        
+
         torch.testing.assert_close(decrypted, original, rtol=1e-5, atol=1e-5)
+
+
+class TestNativeSerialization:
+    @requires_real_backend
+    def test_native_context_and_tensor_roundtrip(self, tmp_path: Path):
+        config = InferenceConfig(
+            poly_mod_degree=32768,
+            scale_bits=40,
+            mult_depth=4,
+        )
+        ctx = CKKSInferenceContext(
+            config=config,
+            device="cpu",
+            rotations=[1, -1],
+            use_bsgs=False,
+            enable_gpu=False,
+        )
+
+        original = torch.tensor([0.25, -1.5, 2.75, 4.0], dtype=torch.float64)
+        enc_tensor = ctx.encrypt(original)
+
+        context_path = tmp_path / "native_context.bin"
+        tensor_path = tmp_path / "native_tensor.bin"
+        ctx.save_context(context_path)
+        enc_tensor.save(tensor_path)
+
+        assert context_path.exists()
+        assert tensor_path.exists()
+        assert Path(f"{context_path}.context.bin").exists()
+        assert Path(f"{tensor_path}.ciphertext.bin").exists()
+
+        loaded_ctx = CKKSInferenceContext.load_context(context_path)
+        loaded_tensor = EncryptedTensor.load(tensor_path, loaded_ctx)
+
+        decrypted = loaded_ctx.decrypt(loaded_tensor)
+        torch.testing.assert_close(decrypted, original, rtol=1e-4, atol=1e-4)

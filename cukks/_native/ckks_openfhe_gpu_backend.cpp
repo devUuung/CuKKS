@@ -10,10 +10,15 @@
 #include <openfhe.h>
 #include "scheme/ckksrns/ckksrns-cryptoparameters.h"
 #include "scheme/ckksrns/ckksrns-fhe.h"
+#include "cryptocontext-ser.h"
+#include "ciphertext-ser.h"
+#include "key/key-ser.h"
+#include "utils/serial.h"
 #include "gpu/Utils.h"
 #include "math/dftransform.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -40,16 +45,13 @@ struct GPUContextHandle {
     bool bootstrap_enabled;
     uint32_t bootstrap_num_slots = 0;
     
-    // GPU context and keys
     std::unique_ptr<ckks::Context> gpu_context;
     std::unique_ptr<ckks::EvaluationKey> gpu_evk;
     std::unique_ptr<std::map<int, ckks::EvaluationKey>> gpu_rot_keys;
     std::unique_ptr<std::map<uint32_t, ckks::EvaluationKey>> gpu_rot_keys_auto;
     
-    // Track if GPU is initialized
     bool gpu_initialized = false;
-    
-    // Crypto parameters for GPU operations
+
     std::shared_ptr<CryptoParametersCKKSRNS> crypto_params;
 
     std::string key_tag;
@@ -58,6 +60,8 @@ struct GPUContextHandle {
     std::unordered_map<std::uint64_t, ckks::PtAccurate> gpu_plain_cache_pinned;
     std::size_t gpu_plain_cache_limit = 2048;
 };
+
+void init_gpu(const std::shared_ptr<GPUContextHandle>& ctx);
 
 void sync_large_ring_gpu(const std::shared_ptr<GPUContextHandle>& ctx, const char* stage) {
     if (!ctx || !ctx->gpu_context || ctx->gpu_context->GetDegree() <= 32768) {
@@ -79,12 +83,10 @@ struct GPUCiphertextHandle {
     std::shared_ptr<GPUContextHandle> context;
     Ciphertext<DCRTPoly> ciphertext;
     
-    // GPU ciphertext (lazy loaded)
     mutable std::unique_ptr<ckks::CtAccurate> gpu_ct;
     mutable bool gpu_loaded = false;
     bool force_cpu = false;
     
-    // Load to GPU if not already loaded
     void ensureGPU() const {
         if (!gpu_loaded && context->gpu_initialized) {
             gpu_ct = std::make_unique<ckks::CtAccurate>(
@@ -260,7 +262,6 @@ std::shared_ptr<GPUCiphertextHandle> make_cipher_from_gpu(
     handle->gpu_ct = std::make_unique<ckks::CtAccurate>(gpu_ct);
     handle->gpu_loaded = true;
     
-    // Create CPU ciphertext from GPU result
     handle->ciphertext = ctx->context->Encrypt(
         ctx->context->KeyGen().publicKey,
         ctx->context->MakeCKKSPackedPlaintext(std::vector<double>{0.0})
@@ -479,9 +480,13 @@ bool use_batch_muladd_for_context(const std::shared_ptr<GPUContextHandle>& ctx) 
     return use_batch_muladd() && ctx && ctx->gpu_context && ctx->gpu_context->GetDegree() <= 32768;
 }
 
-// ============== Profiling infrastructure ==============
 bool profiling_enabled() {
     static const bool enabled = env_flag("CUKKS_PROFILE", false);
+    return enabled;
+}
+
+bool debug_compare_enabled() {
+    static const bool enabled = env_flag("CUKKS_DEBUG_COMPARE", false);
     return enabled;
 }
 
@@ -1896,9 +1901,157 @@ py::dict cipher_metadata(const std::shared_ptr<GPUCiphertextHandle>& handle) {
     return meta;
 }
 
-}  // namespace
+constexpr auto kSerializationType = SerType::BINARY;
 
-// Initialize GPU context from existing OpenFHE context
+void save_context_bundle(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::shared_ptr<GPUKeySetHandle>& keys,
+    const std::string& context_path,
+    const std::string& public_key_path,
+    const std::string& secret_key_path,
+    const std::string& eval_mult_key_path,
+    const std::string& eval_sum_key_path,
+    const std::string& eval_auto_key_path
+) {
+    if (!lbcrypto::Serial::SerializeToFile(context_path, ctx->context, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize crypto context to " + context_path);
+    }
+    if (!lbcrypto::Serial::SerializeToFile(public_key_path, keys->public_key, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize public key to " + public_key_path);
+    }
+    if (!lbcrypto::Serial::SerializeToFile(secret_key_path, keys->secret_key, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize secret key to " + secret_key_path);
+    }
+
+    {
+        std::ofstream out(eval_mult_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval mult key path " + eval_mult_key_path);
+        }
+        if (!ctx->context->SerializeEvalMultKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval mult keys to " + eval_mult_key_path);
+        }
+    }
+    {
+        std::ofstream out(eval_sum_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval sum key path " + eval_sum_key_path);
+        }
+        if (!ctx->context->SerializeEvalSumKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval sum keys to " + eval_sum_key_path);
+        }
+    }
+    {
+        std::ofstream out(eval_auto_key_path, std::ios::binary);
+        if (!out.is_open()) {
+            throw std::runtime_error("Failed to open eval automorphism key path " + eval_auto_key_path);
+        }
+        if (!ctx->context->SerializeEvalAutomorphismKey(out, kSerializationType, ctx->context)) {
+            throw std::runtime_error("Failed to serialize eval automorphism keys to " + eval_auto_key_path);
+        }
+    }
+}
+
+std::pair<std::shared_ptr<GPUContextHandle>, std::shared_ptr<GPUKeySetHandle>> load_context_bundle(
+    const std::string& context_path,
+    const std::string& public_key_path,
+    const std::string& secret_key_path,
+    const std::string& eval_mult_key_path,
+    const std::string& eval_sum_key_path,
+    const std::string& eval_auto_key_path,
+    bool enable_bootstrap,
+    const std::vector<std::uint32_t>& level_budget,
+    bool enable_gpu
+) {
+    CryptoContext<DCRTPoly> context;
+    if (!lbcrypto::Serial::DeserializeFromFile(context_path, context, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize crypto context from " + context_path);
+    }
+    context->Enable(PKE);
+    context->Enable(KEYSWITCH);
+    context->Enable(LEVELEDSHE);
+    context->Enable(ADVANCEDSHE);
+    if (enable_bootstrap) {
+        context->Enable(FHE);
+    }
+
+    PublicKey<DCRTPoly> public_key;
+    if (!lbcrypto::Serial::DeserializeFromFile(public_key_path, public_key, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize public key from " + public_key_path);
+    }
+
+    PrivateKey<DCRTPoly> secret_key;
+    if (!lbcrypto::Serial::DeserializeFromFile(secret_key_path, secret_key, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize secret key from " + secret_key_path);
+    }
+
+    {
+        std::ifstream in(eval_mult_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval mult key path " + eval_mult_key_path);
+        }
+        if (!context->DeserializeEvalMultKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval mult keys from " + eval_mult_key_path);
+        }
+    }
+    {
+        std::ifstream in(eval_sum_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval sum key path " + eval_sum_key_path);
+        }
+        if (!context->DeserializeEvalSumKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval sum keys from " + eval_sum_key_path);
+        }
+    }
+    {
+        std::ifstream in(eval_auto_key_path, std::ios::binary);
+        if (!in.is_open()) {
+            throw std::runtime_error("Failed to open eval automorphism key path " + eval_auto_key_path);
+        }
+        if (!context->DeserializeEvalAutomorphismKey(in, kSerializationType)) {
+            throw std::runtime_error("Failed to deserialize eval automorphism keys from " + eval_auto_key_path);
+        }
+    }
+
+    auto ctx = std::make_shared<GPUContextHandle>();
+    ctx->context = context;
+    ctx->bootstrap_enabled = enable_bootstrap;
+    ctx->level_budget = level_budget;
+    ctx->bootstrap_num_slots = enable_bootstrap ? context->GetRingDimension() / 2 : 0;
+
+    auto keys = std::make_shared<GPUKeySetHandle>();
+    keys->context = ctx;
+    keys->public_key = public_key;
+    keys->secret_key = secret_key;
+
+    ctx->key_tag = secret_key->GetKeyTag();
+    if (enable_gpu) {
+        init_gpu(ctx);
+    }
+
+    return {ctx, keys};
+}
+
+void save_ciphertext(const std::shared_ptr<GPUCiphertextHandle>& handle, const std::string& ciphertext_path) {
+    if (handle->gpu_loaded) {
+        const_cast<GPUCiphertextHandle*>(handle.get())->syncFromGPU();
+    }
+    if (!lbcrypto::Serial::SerializeToFile(ciphertext_path, handle->ciphertext, kSerializationType)) {
+        throw std::runtime_error("Failed to serialize ciphertext to " + ciphertext_path);
+    }
+}
+
+std::shared_ptr<GPUCiphertextHandle> load_ciphertext(
+    const std::shared_ptr<GPUContextHandle>& ctx,
+    const std::string& ciphertext_path
+) {
+    Ciphertext<DCRTPoly> ciphertext;
+    if (!lbcrypto::Serial::DeserializeFromFile(ciphertext_path, ciphertext, kSerializationType)) {
+        throw std::runtime_error("Failed to deserialize ciphertext from " + ciphertext_path);
+    }
+    return make_cipher(ctx, ciphertext);
+}
+
 void init_gpu(const std::shared_ptr<GPUContextHandle>& ctx) {
     if (ctx->gpu_initialized) return;
     
@@ -1912,7 +2065,6 @@ void init_gpu(const std::shared_ptr<GPUContextHandle>& ctx) {
         
         ctx->crypto_params = params;
         
-        // Generate GPU context
         ctx->gpu_context = std::make_unique<ckks::Context>(
             GenGPUContext(params)
         );
@@ -1923,7 +2075,6 @@ void init_gpu(const std::shared_ptr<GPUContextHandle>& ctx) {
             ctx->gpu_context->is_rescale_fused = false;
         }
         
-        // Load evaluation keys to GPU
         ctx->gpu_evk = std::make_unique<ckks::EvaluationKey>(
             LoadEvalMultRelinKey(ctx->context, ctx->key_tag)
         );
@@ -1940,6 +2091,8 @@ void init_gpu(const std::shared_ptr<GPUContextHandle>& ctx) {
         ctx->gpu_initialized = false;
     }
 }
+
+}  // namespace
 
 std::shared_ptr<GPUContextHandle> create_context(
     std::uint32_t poly_mod_degree,
@@ -2089,8 +2242,6 @@ std::vector<double> decrypt(
     result->SetLength(result->GetCKKSPackedValue().size());
     return result->GetRealPackedValue();
 }
-
-// ============== GPU-Accelerated Operations ==============
 
 std::shared_ptr<GPUCiphertextHandle> add_cipher(
     const std::shared_ptr<GPUCiphertextHandle>& lhs,
@@ -2602,8 +2753,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
     const std::size_t slots = static_cast<std::size_t>(cc->GetRingDimension() / 2);
     if (n > slots) throw std::invalid_argument("matrix column dimension exceeds available CKKS slots");
 
-    // Pre-scan: identify non-zero diagonals to skip zero diagonals
-    // (block-diagonal weight matrices have exact structural zeros)
     std::vector<bool> diag_nonzero(n, false);
     for (std::size_t k = 0; k < n; ++k) {
         for (std::size_t i = 0; i < m; ++i) {
@@ -2620,9 +2769,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
         auto canonical_rotation = [n, large_ring_gpu](std::size_t diagonal_index) -> int {
             if (diagonal_index == 0) return 0;
             if (large_ring_gpu) {
-                // Keep the same positive rotation schedule as the CPU path.
-                // Large-ring key generation already includes these indices,
-                // while the signed canonical form can miss required keys.
                 return static_cast<int>(diagonal_index);
             }
             const std::size_t half = n / 2;
@@ -2719,7 +2865,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_dense_cipher(
     const uint32_t ct_level = tensor->ciphertext->GetLevel();
     Ciphertext<DCRTPoly> accumulator;
     for (std::size_t k = 0; k < n; ++k) {
-        if (!diag_nonzero[k]) continue;  // skip zero diagonal
+        if (!diag_nonzero[k]) continue;
         std::vector<double> diag(slots, 0.0);
         for (std::size_t i = 0; i < m; ++i) {
             diag[i] = matrix[i][(i + k) % n];
@@ -2780,8 +2926,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         bsgs_n2 = (static_cast<std::uint32_t>(in_features) + bsgs_n1 - 1) / bsgs_n1;
     }
     
-    // Pre-scan: identify non-zero diagonals to skip zero diagonals
-    // (block-diagonal weight matrices have exact structural zeros)
     std::vector<bool> diag_nonzero_vec;
     if (!precomputed_nonzero.empty() && precomputed_nonzero.size() == in_features) {
         diag_nonzero_vec = precomputed_nonzero;
@@ -2817,7 +2961,6 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
 
             if (rotations_available) {
                 tensor->ensureGPU();
-                // Map diagonal index → pointer into the global gpu_plain_cache
                 std::vector<const ckks::PtAccurate*> pt_cached_ptrs(in_features, nullptr);
                 {
                     OpTimer pt_timer("matmul_bsgs.pt_encode");
@@ -3118,7 +3261,7 @@ std::shared_ptr<GPUCiphertextHandle> matmul_bsgs_cipher(
         for (std::uint32_t j = 0; j < baby_ciphers.size(); ++j) {
             std::uint32_t d = giant_step + j;
             if (d >= in_features) break;
-            if (!diag_nonzero_vec[d]) continue;  // skip zero diagonal
+            if (!diag_nonzero_vec[d]) continue;
 
             std::vector<double> diag(slots, 0.0);
             for (std::size_t i = 0; i < slots; ++i) {
@@ -3299,11 +3442,8 @@ std::shared_ptr<GPUCiphertextHandle> bootstrap_cipher(
     return make_cipher(ctx, result);
 }
 
-// GPU status check
 bool is_gpu_available() {
-    // Check if CUDA is available
     try {
-        // Simple check - if we can create a DeviceVector, GPU is available
         ckks::HostVector test_vec(16, 0);
         ckks::DeviceVector gpu_vec(test_vec);
         return true;
@@ -3421,19 +3561,35 @@ PYBIND11_MODULE(ckks_openfhe_gpu_backend, m) {
     m.def("bootstrap", &bootstrap_cipher, py::arg("tensor"),
           py::call_guard<py::gil_scoped_release>());
     m.def("cipher_metadata", &cipher_metadata, py::arg("cipher"));
-    m.def("rotate_debug_compare", &rotate_debug_compare,
-          py::arg("tensor"), py::arg("rotation"), py::arg("coeff_limit") = 16);
-    m.def("fast_rotate_ext_debug_compare", &fast_rotate_ext_debug_compare,
-          py::arg("tensor"), py::arg("rotation"), py::arg("add_first"), py::arg("coeff_limit") = 16);
-    m.def("bsgs_block_debug_compare", &bsgs_block_debug_compare,
-          py::arg("tensor"), py::arg("matrix"), py::arg("bsgs_n1") = 0, py::arg("bsgs_n2") = 0,
-          py::arg("coeff_limit") = 8);
-    m.def("ext_mult_term_debug_compare", &ext_mult_term_debug_compare,
-          py::arg("tensor"), py::arg("diag"), py::arg("rotation"), py::arg("add_first"), py::arg("coeff_limit") = 8);
-    m.def("cpu_ext_term_vs_standard_debug", &cpu_ext_term_vs_standard_debug,
-          py::arg("tensor"), py::arg("diag"), py::arg("rotation"), py::arg("coeff_limit") = 8);
-    m.def("rescale_debug_compare", &rescale_debug_compare,
-          py::arg("tensor"), py::arg("coeff_limit") = 8);
+    m.def("save_context_bundle", &save_context_bundle,
+          py::arg("context"), py::arg("keys"),
+          py::arg("context_path"), py::arg("public_key_path"), py::arg("secret_key_path"),
+          py::arg("eval_mult_key_path"), py::arg("eval_sum_key_path"), py::arg("eval_auto_key_path"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("load_context_bundle", &load_context_bundle,
+          py::arg("context_path"), py::arg("public_key_path"), py::arg("secret_key_path"),
+          py::arg("eval_mult_key_path"), py::arg("eval_sum_key_path"), py::arg("eval_auto_key_path"),
+          py::arg("enable_bootstrap"), py::arg("level_budget"), py::arg("enable_gpu") = true,
+          py::call_guard<py::gil_scoped_release>());
+    m.def("save_ciphertext", &save_ciphertext, py::arg("cipher"), py::arg("ciphertext_path"),
+          py::call_guard<py::gil_scoped_release>());
+    m.def("load_ciphertext", &load_ciphertext, py::arg("context"), py::arg("ciphertext_path"),
+          py::call_guard<py::gil_scoped_release>());
+    if (debug_compare_enabled()) {
+        m.def("rotate_debug_compare", &rotate_debug_compare,
+              py::arg("tensor"), py::arg("rotation"), py::arg("coeff_limit") = 16);
+        m.def("fast_rotate_ext_debug_compare", &fast_rotate_ext_debug_compare,
+              py::arg("tensor"), py::arg("rotation"), py::arg("add_first"), py::arg("coeff_limit") = 16);
+        m.def("bsgs_block_debug_compare", &bsgs_block_debug_compare,
+              py::arg("tensor"), py::arg("matrix"), py::arg("bsgs_n1") = 0, py::arg("bsgs_n2") = 0,
+              py::arg("coeff_limit") = 8);
+        m.def("ext_mult_term_debug_compare", &ext_mult_term_debug_compare,
+              py::arg("tensor"), py::arg("diag"), py::arg("rotation"), py::arg("add_first"), py::arg("coeff_limit") = 8);
+        m.def("cpu_ext_term_vs_standard_debug", &cpu_ext_term_vs_standard_debug,
+              py::arg("tensor"), py::arg("diag"), py::arg("rotation"), py::arg("coeff_limit") = 8);
+        m.def("rescale_debug_compare", &rescale_debug_compare,
+              py::arg("tensor"), py::arg("coeff_limit") = 8);
+    }
     m.def("is_gpu_available", &is_gpu_available);
     m.def("get_gpu_info", &get_gpu_info);
     m.def("set_plain_cache_limit", &set_plain_cache_limit,

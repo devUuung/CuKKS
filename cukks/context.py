@@ -7,9 +7,11 @@ parameters optimized for neural network inference.
 
 from __future__ import annotations
 
+import json
 import math
 import pickle
 import threading
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -26,6 +28,30 @@ from .rotation_planning import collect_rotation_requirements, compute_reduction_
 
 CKKSConfig: Any | None = None
 CKKSContext: Any | None = None
+_CONTEXT_MANIFEST_KIND = "cukks.context.native.v1"
+
+
+def _context_bundle_paths(path: Union[str, Path]) -> Dict[str, Path]:
+    base = Path(path)
+    return {
+        "manifest": base,
+        "context": Path(f"{base}.context.bin"),
+        "public_key": Path(f"{base}.public.key.bin"),
+        "secret_key": Path(f"{base}.secret.key.bin"),
+        "eval_mult_key": Path(f"{base}.evalmult.key.bin"),
+        "eval_sum_key": Path(f"{base}.evalsum.key.bin"),
+        "eval_auto_key": Path(f"{base}.evalauto.key.bin"),
+    }
+
+
+def _load_native_context_manifest(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if manifest.get("kind") != _CONTEXT_MANIFEST_KIND:
+        return None
+    return manifest
 
 
 @dataclass
@@ -758,28 +784,131 @@ class CKKSInferenceContext:
 
     def save_context(self, path: Union[str, Path]) -> None:
         config_data = {
-            "poly_mod_degree": self.config.poly_mod_degree,
-            "scale_bits": self.config.scale_bits,
-            "security_level": self.config.security_level,
-            "mult_depth": self.config.mult_depth,
-            "enable_bootstrap": self.config.enable_bootstrap,
-            "device": self.device,
-            "use_bsgs": self.use_bsgs,
-            "rotations": self._rotations,
-            "max_rotation_dim": self._max_rotation_dim,
-            "auto_bootstrap": self._auto_bootstrap,
-            "bootstrap_threshold": self._bootstrap_threshold,
-            "batch_size": self._batch_size,
-            "architecture": self._architecture,
+            "kind": _CONTEXT_MANIFEST_KIND,
+            "config": {
+                "poly_mod_degree": self.config.poly_mod_degree,
+                "coeff_mod_bits": list(self.config.coeff_mod_bits),
+                "scale_bits": self.config.scale_bits,
+                "security_level": self.config.security_level,
+                "mult_depth": self.config.mult_depth,
+                "enable_bootstrap": self.config.enable_bootstrap,
+                "level_budget": (
+                    list(self.config.level_budget) if self.config.level_budget is not None else None
+                ),
+            },
+            "runtime": {
+                "device": self.device,
+                "use_bsgs": self.use_bsgs,
+                "rotations": self._rotations,
+                "max_rotation_dim": self._max_rotation_dim,
+                "auto_bootstrap": self._auto_bootstrap,
+                "bootstrap_threshold": self._bootstrap_threshold,
+                "cnn_config": self._cnn_config,
+                "enable_gpu": self._enable_gpu,
+                "batch_size": self._batch_size,
+                "architecture": self._architecture,
+            },
         }
+        legacy_config_data = config_data["config"] | config_data["runtime"]
+        backend_context = None
+        try:
+            self._ensure_initialized()
+            backend_context = self._ctx
+        except RuntimeError:
+            backend_context = None
+
+        bundle_paths = _context_bundle_paths(path)
+        if hasattr(backend_context, "save_native_bundle"):
+            backend_context.save_native_bundle(
+                context_path=str(bundle_paths["context"]),
+                public_key_path=str(bundle_paths["public_key"]),
+                secret_key_path=str(bundle_paths["secret_key"]),
+                eval_mult_key_path=str(bundle_paths["eval_mult_key"]),
+                eval_sum_key_path=str(bundle_paths["eval_sum_key"]),
+                eval_auto_key_path=str(bundle_paths["eval_auto_key"]),
+            )
+            bundle_paths["manifest"].write_text(
+                json.dumps(config_data, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            return
+
         with open(path, "wb") as f:
-            pickle.dump(config_data, f)
+            pickle.dump(legacy_config_data, f)
 
     @classmethod
     def load_context(cls, path: Union[str, Path]) -> "CKKSInferenceContext":
+        path_obj = Path(path)
+        manifest = _load_native_context_manifest(path_obj)
+        if manifest is not None:
+            config_data = manifest["config"]
+            runtime = manifest["runtime"]
+            raw_level_budget = config_data.get("level_budget")
+            level_budget = (
+                (int(raw_level_budget[0]), int(raw_level_budget[1]))
+                if raw_level_budget is not None
+                else None
+            )
+            inference_config = InferenceConfig(
+                poly_mod_degree=int(config_data["poly_mod_degree"]),
+                scale_bits=int(config_data["scale_bits"]),
+                security_level=config_data["security_level"],
+                mult_depth=int(config_data["mult_depth"]),
+                enable_bootstrap=bool(config_data["enable_bootstrap"]),
+                level_budget=level_budget,
+                _coeff_mod_bits=tuple(int(v) for v in config_data["coeff_mod_bits"]),
+            )
+
+            instance = cls(
+                config=inference_config,
+                device=runtime["device"],
+                rotations=[int(v) for v in runtime["rotations"]],
+                use_bsgs=bool(runtime["use_bsgs"]),
+                max_rotation_dim=runtime.get("max_rotation_dim"),
+                auto_bootstrap=bool(runtime["auto_bootstrap"]),
+                bootstrap_threshold=int(runtime["bootstrap_threshold"]),
+                cnn_config=runtime.get("cnn_config"),
+                enable_gpu=bool(runtime.get("enable_gpu", True)),
+                batch_size=int(runtime.get("batch_size", 1)),
+                architecture=runtime.get("architecture", "default"),
+            )
+
+            global CKKSConfig, CKKSContext
+            if CKKSConfig is None or CKKSContext is None:
+                from .backend_loader import load_backend
+
+                CKKSConfig, CKKSContext = load_backend()
+
+            backend_config = CKKSConfig(
+                poly_mod_degree=instance.config.poly_mod_degree,
+                coeff_mod_bits=instance.config.coeff_mod_bits,
+                scale_bits=instance.config.scale_bits,
+                security_level=instance.config.security_level,
+                enable_bootstrap=instance.config.enable_bootstrap,
+                level_budget=instance.config.resolved_level_budget,
+                rotations=instance._rotations,
+                relin=True,
+                generate_conjugate_keys=True,
+            )
+            bundle_paths = _context_bundle_paths(path_obj)
+            if not hasattr(CKKSContext, "load_native_bundle"):
+                raise RuntimeError("Active backend does not support native context deserialization")
+            instance._ctx = CKKSContext.load_native_bundle(
+                backend_config,
+                device=instance.device,
+                enable_gpu=instance._enable_gpu,
+                context_path=str(bundle_paths["context"]),
+                public_key_path=str(bundle_paths["public_key"]),
+                secret_key_path=str(bundle_paths["secret_key"]),
+                eval_mult_key_path=str(bundle_paths["eval_mult_key"]),
+                eval_sum_key_path=str(bundle_paths["eval_sum_key"]),
+                eval_auto_key_path=str(bundle_paths["eval_auto_key"]),
+            )
+            instance._initialized = True
+            return instance
+
         with open(path, "rb") as f:
             config_data = pickle.load(f)
-        import warnings
 
         warnings.warn(
             "CKKSInferenceContext.load_context() uses pickle deserialization which can "

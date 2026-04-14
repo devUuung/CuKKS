@@ -239,6 +239,106 @@ class CKKSContext:
             result = result.view(final_shape)
         return result
 
+    def save_native_bundle(
+        self,
+        *,
+        context_path: str,
+        public_key_path: str,
+        secret_key_path: str,
+        eval_mult_key_path: str,
+        eval_sum_key_path: str,
+        eval_auto_key_path: str,
+    ) -> None:
+        if not hasattr(self._active_backend, "save_context_bundle"):
+            raise RuntimeError("Active backend does not support native context serialization")
+        self._active_backend.save_context_bundle(
+            self._ctx,
+            self._keys,
+            context_path,
+            public_key_path,
+            secret_key_path,
+            eval_mult_key_path,
+            eval_sum_key_path,
+            eval_auto_key_path,
+        )
+
+    @classmethod
+    def load_native_bundle(
+        cls,
+        config: CKKSConfig,
+        *,
+        device: str | torch.device | None = None,
+        enable_gpu: bool = True,
+        context_path: str,
+        public_key_path: str,
+        secret_key_path: str,
+        eval_mult_key_path: str,
+        eval_sum_key_path: str,
+        eval_auto_key_path: str,
+    ) -> "CKKSContext":
+        _load_backends()
+
+        resolved_enable_gpu = enable_gpu and _gpu_backend is not None
+        active_backend = _gpu_backend if resolved_enable_gpu else (_cpu_backend or _backend)
+        if not hasattr(active_backend, "load_context_bundle"):
+            raise RuntimeError("Active backend does not support native context deserialization")
+
+        level_budget = list(config.level_budget or [])
+        if resolved_enable_gpu:
+            ctx_handle, key_handle = active_backend.load_context_bundle(
+                context_path,
+                public_key_path,
+                secret_key_path,
+                eval_mult_key_path,
+                eval_sum_key_path,
+                eval_auto_key_path,
+                bool(config.enable_bootstrap),
+                level_budget,
+                True,
+            )
+        else:
+            ctx_handle, key_handle = active_backend.load_context_bundle(
+                context_path,
+                public_key_path,
+                secret_key_path,
+                eval_mult_key_path,
+                eval_sum_key_path,
+                eval_auto_key_path,
+                bool(config.enable_bootstrap),
+                level_budget,
+            )
+
+        obj = cls.__new__(cls)
+        obj.config = config
+        obj.device = (
+            torch.device(device)
+            if device is not None
+            else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        obj._enable_gpu = resolved_enable_gpu
+        obj._active_backend = active_backend if hasattr(active_backend, "keygen") else _backend
+        obj._ctx = ctx_handle
+        obj._keys = key_handle
+        return obj
+
+    def save_ciphertext(self, tensor: "CKKSTensor", *, ciphertext_path: str) -> None:
+        if not hasattr(self._active_backend, "save_ciphertext"):
+            raise RuntimeError("Active backend does not support native ciphertext serialization")
+        self._active_backend.save_ciphertext(tensor._cipher, ciphertext_path)
+
+    def load_ciphertext(
+        self,
+        *,
+        ciphertext_path: str,
+        shape: Sequence[int],
+        device: str | torch.device | None = None,
+    ) -> "CKKSTensor":
+        if not hasattr(self._active_backend, "load_ciphertext"):
+            raise RuntimeError("Active backend does not support native ciphertext deserialization")
+        cipher = self._active_backend.load_ciphertext(self._ctx, ciphertext_path)
+        target_device = torch.device(device) if device is not None else self.device
+        return CKKSTensor(self, cipher, shape, target_device)
+
 
 class CKKSTensor:
     """Encrypted tensor that mirrors a Torch tensor shape."""
