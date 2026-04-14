@@ -39,12 +39,18 @@ Follow existing code patterns and keep changes focused.
 
 ### 3. Run local checks before opening a PR
 
+`pip install -e .` installs the base `cukks` Python package.
+GPU/backend work also needs the native backend from `bindings/openfhe_backend`.
+
 Typical Python checks:
 
 ```bash
 pytest -q
-python -m build
+python -m build --outdir .artifacts/dist
 ```
+
+For backend builds and linker environment setup, see `bindings/openfhe_backend/BUILD.md`.
+If you need local backend build trees, keep them under `.artifacts/` rather than inside tracked package directories.
 
 If your change touches GPU packaging or release logic, mention what you verified in the PR.
 
@@ -69,10 +75,11 @@ That workflow:
 
 - builds CUDA Docker images used by wheel builds
 - builds GPU wheel artifacts for CUDA 11.8, 12.1, 12.4, and 12.8
-- checks installed wheel structure across Python 3.10-3.13
+- checks installed wheel structure and runs a tiny CPU-backed native smoke test across Python 3.10-3.13
 - builds the main `cukks` package
 
 CI validates changes but does not publish packages from a normal PR.
+It also rejects tracked build artifacts such as checked-in `build*/`, `dist/`, or `*.egg-info/` trees.
 
 For the full automation model, see `docs/ci-cd.md`.
 

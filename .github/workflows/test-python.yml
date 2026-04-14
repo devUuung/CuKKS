@@ -34,10 +34,16 @@ jobs:
           pip install ruff
 
       - name: Ruff lint check
-        run: ruff check cukks/ tests/ --exit-zero
+        run: ruff check cukks/ tests/ scripts/
 
       - name: Ruff format check
-        run: ruff format cukks/ tests/ --check --diff
+        run: ruff format cukks/ tests/ scripts/ --check --diff
+
+      - name: Detect tracked build artifacts
+        run: python scripts/check_tracked_artifacts.py
+
+      - name: Type check
+        run: pyright
 
   test-mock:
     runs-on: ubuntu-latest

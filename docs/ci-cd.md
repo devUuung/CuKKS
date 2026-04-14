@@ -6,27 +6,28 @@ This document explains how CuKKS validates changes, publishes packages, and crea
 
 ### 1. CI validation: `.github/workflows/build-wheels.yml`
 
-Triggered on:
+Triggers:
 
 - pull requests
 - pushes to `main`
 - manual `workflow_dispatch`
 
-What it does:
+Builds and validates:
 
 - builds CUDA Docker images for 11.8, 12.1, 12.4, and 12.8
 - builds GPU wheels for each CUDA package
-- validates wheel contents across Python 3.10-3.13
+- validates wheel contents and runs a tiny CPU-backed native smoke test across Python 3.10-3.13
 - builds the main `cukks` package
+- rejects tracked build artifacts such as `build*/`, `dist/`, and `*.egg-info/`
 
-What it does not do:
+Does not:
 
-- it does not publish to PyPI
-- it does not create releases
+- publish to PyPI
+- create releases
 
 ### 2. Package publishing: `.github/workflows/publish-packages.yml`
 
-Triggered by:
+Triggers:
 
 - `workflow_call` from the release workflow
 - manual `workflow_dispatch` for controlled recovery only
@@ -47,7 +48,7 @@ Packages published:
 
 ### 3. Milestone release orchestration: `.github/workflows/release-milestone.yml`
 
-Triggered by:
+Triggers:
 
 - manual `workflow_dispatch`
 
@@ -58,11 +59,11 @@ Inputs:
 - `draft`
 - `publish_pypi`
 
-What it does:
+Responsibilities:
 
 - validates that the milestone exists and is closed
 - checks that milestone PRs are merged into `main`
-- uses the milestone title as the release version, syncs tracked version files to it, and creates a release prep commit when needed
+- uses the milestone title as the release version, syncs tracked version files, and creates a release prep commit when needed
 - generates release notes from merged PRs and closed issues in the milestone
 - creates an annotated tag
 - creates a GitHub release
@@ -70,7 +71,7 @@ What it does:
 
 ## Contributor view
 
-External contributors usually interact with CI only through PRs.
+External contributors usually interact with CI through PRs.
 
 - open an issue first
 - submit a PR linked to the issue
@@ -79,7 +80,7 @@ External contributors usually interact with CI only through PRs.
 
 ## Maintainer view
 
-Maintainers own release preparation.
+Maintainers handle release preparation.
 
 Before releasing:
 
@@ -96,3 +97,4 @@ Before releasing:
 - normal GitHub release creation in the UI is not the publish path
 - historical release restoration should not be used as a publish mechanism
 - release publication is intentionally separated from PR/main CI
+- local developer outputs should be kept under `.artifacts/` so tracked source trees stay reviewable

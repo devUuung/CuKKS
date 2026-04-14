@@ -7,13 +7,20 @@ to PyTorch users while operating on encrypted data.
 
 from __future__ import annotations
 
-import copy
 import math
 import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
+
+from .packed_batch_metadata import (
+    copy_cnn_layout,
+    copy_runtime_metadata,
+    packed_sample_dims,
+    propagate_runtime_metadata,
+    refresh_packed_shape_metadata,
+)
 
 
 # Profiler hook — lazy import to avoid circular dependency
@@ -30,6 +37,7 @@ def _get_active_profiler():
         pass
     return None
 
+
 if TYPE_CHECKING:
     from .batching import PackingLayout
     from .context import CKKSInferenceContext
@@ -37,38 +45,38 @@ if TYPE_CHECKING:
 
 class EncryptedTensor:
     """A tensor containing CKKS-encrypted data.
-    
+
     This class wraps a CKKS ciphertext and provides tensor-like operations.
     It tracks the original shape and provides arithmetic operations that
     work on encrypted data.
-    
+
     Packed-Batch Layout Contract
     ----------------------------
     When ``_packed_batch=True``, the ciphertext slots contain multiple samples
     packed contiguously::
-    
+
         [s0[0..K-1], s1[0..K-1], ..., s(B-1)[0..K-1], padding...]
-    
+
     where *B* = ``_batch_size`` and *K* = ``_slots_per_sample``.
-    
+
     All element-wise operations (add, sub, mul, neg, poly_eval),
     slot rotations (rotate), rescale, bootstrap, and matmul preserve
     this metadata automatically.  The I/O contract is::
-    
+
         # Encryption
         enc_batch = ctx.encrypt_batch(samples)         # _packed_batch=True
-    
+
         # Model forward (metadata preserved through every op)
         enc_out = enc_model(enc_batch)                  # _packed_batch=True
-    
+
         # Decryption
         results = ctx.decrypt_batch(enc_out)            # list of B tensors
-    
+
     Note:
         This is NOT a torch.Tensor subclass. Encrypted operations have
         different semantics (e.g., rescaling) that don't map cleanly
         to PyTorch's autograd.
-    
+
     Example:
         >>> ctx = CKKSInferenceContext()
         >>> x = ctx.encrypt(torch.randn(10))
@@ -76,7 +84,7 @@ class EncryptedTensor:
         >>> z = x + y    # Encrypted addition
         >>> result = ctx.decrypt(z)
     """
-    
+
     __slots__ = (
         "__dict__",
         "__weakref__",
@@ -86,6 +94,7 @@ class EncryptedTensor:
         "_context",
         "_depth",
         "_original_size",
+        "_slot_count_hint",
         "_cnn_layout",
         "_packed_batch",
         "_batch_size",
@@ -105,7 +114,7 @@ class EncryptedTensor:
         depth: int = 0,
     ):
         """Initialize an EncryptedTensor.
-        
+
         Args:
             cipher: The underlying CKKS ciphertext.
             shape: The logical shape of the tensor.
@@ -118,6 +127,7 @@ class EncryptedTensor:
         self._context = context
         self._depth = depth
         self._original_size: Optional[int] = None
+        self._slot_count_hint = self._infer_slot_count_hint(cipher, context)
         self._cnn_layout: Optional[Dict[str, Any]] = None  # CNN im2col layout info
         self._packed_batch: bool = False
         self._batch_size: Optional[int] = None
@@ -146,37 +156,72 @@ class EncryptedTensor:
     def __del__(self):
         try:
             self._sigma_factor = None
-            if getattr(self, '_owns_cipher', True):
-                cipher = getattr(self, '_cipher', None)
-                if cipher and hasattr(cipher, 'cleanup'):
+            if getattr(self, "_owns_cipher", True):
+                cipher = getattr(self, "_cipher", None)
+                if cipher and hasattr(cipher, "cleanup"):
                     cipher.cleanup()
         except Exception:
             pass
 
     @staticmethod
     def _copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if layout is None:
-            return None
-        return copy.deepcopy(layout)
+        return copy_cnn_layout(layout)
 
     def _copy_runtime_metadata_from(self, other: "EncryptedTensor") -> None:
-        self._original_size = other._original_size
-        self._cnn_layout = self._copy_cnn_layout(other._cnn_layout)
-        self._packed_batch = other._packed_batch
-        self._batch_size = other._batch_size
-        self._slots_per_sample = other._slots_per_sample
-        self._packed_sample_shape = other._packed_sample_shape
-        self._packing_layout = other._packing_layout
-        self._sigma_factor = other._sigma_factor
+        copy_runtime_metadata(self, other)
 
     def _active_size(self) -> int:
         if self._cnn_layout is not None:
             return int(self._cnn_layout["num_patches"]) * int(self._cnn_layout["patch_features"])
-        if self._packed_batch and self._batch_size is not None and self._slots_per_sample is not None:
+        if (
+            self._packed_batch
+            and self._batch_size is not None
+            and self._slots_per_sample is not None
+        ):
             return int(self._batch_size) * int(self._slots_per_sample)
         return self.size
 
+    @staticmethod
+    def _infer_slot_count_hint(cipher: Any, context: Any) -> Optional[int]:
+        context_slots = getattr(context, "num_slots", None)
+        try:
+            if context_slots is not None:
+                resolved = context_slots() if callable(context_slots) else context_slots
+                if resolved is not None:
+                    return int(resolved)
+        except Exception:
+            pass
+
+        try:
+            data = getattr(cipher, "data", None)
+        except Exception:
+            data = None
+        if data is not None and hasattr(data, "numel"):
+            try:
+                return int(data.numel())
+            except Exception:
+                pass
+
+        try:
+            cipher_size = getattr(cipher, "size", None)
+        except Exception:
+            cipher_size = None
+        if cipher_size is not None:
+            try:
+                return int(cipher_size)
+            except Exception:
+                pass
+
+        return None
+
     def _cipher_slot_count(self) -> int:
+        if self._slot_count_hint is not None:
+            return int(self._slot_count_hint)
+
+        cipher_size = getattr(self._cipher, "size", None)
+        if cipher_size is not None:
+            return int(cipher_size)
+
         data = getattr(self._cipher, "data", None)
         if data is not None and hasattr(data, "numel"):
             return int(data.numel())
@@ -187,34 +232,15 @@ class EncryptedTensor:
         if num_slots is not None:
             return int(num_slots)
 
-        return int(self._cipher.size)
+        raise AttributeError(
+            f"Cipher handle {type(self._cipher).__name__} does not expose slot count via size, data.numel(), or context.config.num_slots"
+        )
 
     def _packed_sample_dims(self) -> Optional[Tuple[int, ...]]:
-        if not self._packed_batch:
-            return None
-        if self._packed_sample_shape is not None:
-            return self._packed_sample_shape
-        if self._batch_size is not None and len(self._shape) > 1 and self._shape[0] == self._batch_size:
-            return tuple(self._shape[1:])
-        return None
+        return packed_sample_dims(self)
 
     def _update_packed_shape_metadata(self) -> None:
-        if not self._packed_batch or self._batch_size is None:
-            return
-
-        total_size = self.size
-        if self._batch_size <= 0 or total_size % self._batch_size != 0:
-            self._packed_batch = False
-            self._batch_size = None
-            self._slots_per_sample = None
-            self._packed_sample_shape = None
-            return
-
-        self._slots_per_sample = total_size // self._batch_size
-        if len(self._shape) > 1 and self._shape[0] == self._batch_size:
-            sample_size = int(math.prod(self._shape[1:])) if len(self._shape) > 1 else 1
-            if sample_size == self._slots_per_sample:
-                self._packed_sample_shape = tuple(self._shape[1:])
+        refresh_packed_shape_metadata(self)
 
     def _build_repeated_block_diagonals(
         self,
@@ -239,6 +265,7 @@ class EncryptedTensor:
             diagonal_indices.reshape(-1).tolist(),
             global_rows.reshape(-1).tolist(),
             values.reshape(-1).tolist(),
+            strict=True,
         ):
             diagonals[diagonal_index][global_row] = value
         return diagonals
@@ -262,37 +289,29 @@ class EncryptedTensor:
     def _reduce_slots(self, length: int) -> "EncryptedTensor":
         if length <= 0:
             raise ValueError(f"length must be positive, got {length}")
+        if length > self.size:
+            raise ValueError(f"length {length} exceeds tensor size {self.size}")
 
         tensor = self
+        slot_count = self._cipher_slot_count()
         if length != self.size:
-            prefix_mask = [1.0] * length + [0.0] * (self.size - length)
+            prefix_mask = [1.0] * length + [0.0] * max(0, slot_count - length)
             tensor = self.mul(prefix_mask).rescale()
 
-        if length <= 16:
-            reduced = tensor
-            step = 1
-            while step < length:
-                reduced = reduced.add(reduced.rotate(step))
-                step <<= 1
-            return reduced
-
-        reduced_cipher = tensor._cipher.sum_slots()
-        slot_count = tensor._cipher_slot_count()
-        if hasattr(reduced_cipher, "shape"):
-            reduced_cipher.shape = (slot_count,)
-        if hasattr(reduced_cipher, "size"):
-            reduced_cipher.size = slot_count
-
-        result = EncryptedTensor(reduced_cipher, tensor._shape, tensor._context, tensor._depth)
-        result._needs_rescale = tensor._needs_rescale
-        result._copy_runtime_metadata_from(tensor)
-        return result
+        # sum_and_broadcast keeps the ciphertext width stable and avoids the
+        # wrap-around overcounting that appears with naive tree reduction when
+        # length is not a power of two.
+        return tensor.sum_and_broadcast(length)
 
     def _pack_scalar_outputs(self, outputs: Sequence["EncryptedTensor"]) -> "EncryptedTensor":
         if not outputs:
             raise ValueError("outputs must not be empty")
 
-        slot_count = self._cipher_slot_count()
+        slot_count = outputs[0]._cipher_slot_count()
+        if len(outputs) > slot_count:
+            raise ValueError(
+                f"cannot pack {len(outputs)} outputs into ciphertext with {slot_count} slots"
+            )
         result: Optional[EncryptedTensor] = None
         for idx, output in enumerate(outputs):
             shifted = output if idx == 0 else output.rotate(-idx)
@@ -315,7 +334,11 @@ class EncryptedTensor:
         bias_list: list | None = None,
     ) -> "EncryptedTensor":
         out_features, in_features = weight_2d.shape
-        slot_count = self._cipher.size
+        slot_count = self._cipher_slot_count()
+        if in_features > slot_count:
+            raise ValueError(
+                f"matmul requires {in_features} input slots but ciphertext exposes {slot_count}"
+            )
         weight_rows = weight_list if weight_list is not None else weight_2d.tolist()
 
         outputs: List[EncryptedTensor] = []
@@ -336,66 +359,59 @@ class EncryptedTensor:
                 result = result.add(bias_flat.tolist())
 
         return result
-    
+
     def _propagate_batch_meta(self, result: "EncryptedTensor") -> "EncryptedTensor":
         """Copy packed-batch metadata from *self* to *result*.
-        
+
         Also copies ``_cnn_layout`` when present.  Every method that constructs
         a new :class:`EncryptedTensor` from an existing one should call this.
         """
-        if self._packed_batch:
-            result._packed_batch = True
-            result._batch_size = self._batch_size
-            result._slots_per_sample = self._slots_per_sample
-            result._packed_sample_shape = self._packed_sample_shape
-        result._cnn_layout = self._copy_cnn_layout(self._cnn_layout)
-        result._packing_layout = self._packing_layout
-        result._sigma_factor = self._sigma_factor
-        return result
+        return propagate_runtime_metadata(self, result)
+
     @property
     def shape(self) -> Tuple[int, ...]:
         """The logical shape of the tensor."""
         return self._shape
-    
+
     @property
     def size(self) -> int:
         """Total number of elements."""
         return int(math.prod(self._shape)) if self._shape else 1
-    
+
     @property
     def ndim(self) -> int:
         """Number of dimensions."""
         return len(self._shape)
-    
+
     @property
     def context(self) -> "CKKSInferenceContext":
         """The CKKS context associated with this tensor."""
         return self._context
-    
+
     @property
     def metadata(self) -> dict:
         """Get ciphertext metadata (scale, level, etc.)."""
         return self._cipher.metadata
-    
+
     @property
     def level(self) -> int:
         """Current level (remaining multiplicative depth)."""
         return self.metadata.get("level", 0)
-    
+
     @property
     def scale(self) -> float:
         """Current scale factor."""
         return self.metadata.get("scale", 0.0)
-    
+
     @property
     def depth(self) -> int:
         """Current multiplicative depth consumed."""
         return self._depth
-    
+
     # -------------------------------------------------------------------------
     # Arithmetic Operations
     # -------------------------------------------------------------------------
-    
+
     def _expand_plain_tensor(self, values: torch.Tensor) -> List[float]:
         flat = values.reshape(-1)
         slot_count = self._cipher.size
@@ -414,13 +430,15 @@ class EncryptedTensor:
         if isinstance(other, list) and len(other) >= self._cipher.size:
             return values.reshape(-1).tolist()
         return self._expand_plain_tensor(values)
-    
-    def add(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
+
+    def add(
+        self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]
+    ) -> "EncryptedTensor":
         """Add another tensor or scalar.
-        
+
         Args:
             other: EncryptedTensor, plain tensor, or scalar to add.
-            
+
         Returns:
             New EncryptedTensor with the sum.
         """
@@ -453,18 +471,20 @@ class EncryptedTensor:
             result._needs_rescale = needs_rescale
             result._copy_runtime_metadata_from(self)
             return result
-    
-    def sub(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
+
+    def sub(
+        self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]
+    ) -> "EncryptedTensor":
         """Subtract another tensor or scalar.
-        
+
         Args:
             other: EncryptedTensor, plain tensor, or scalar to subtract.
-            
+
         Returns:
             New EncryptedTensor with the difference.
         """
         self._profile_op("sub")
-        if hasattr(self._cipher, 'sub'):
+        if hasattr(self._cipher, "sub"):
             if isinstance(other, EncryptedTensor):
                 if self.size != other.size:
                     raise ValueError(
@@ -493,7 +513,7 @@ class EncryptedTensor:
                 result._needs_rescale = needs_rescale
                 result._copy_runtime_metadata_from(self)
                 return result
-        
+
         # Fallback: negate and add
         if isinstance(other, EncryptedTensor):
             neg_other = other.neg()
@@ -503,16 +523,18 @@ class EncryptedTensor:
                 return self.add(-float(other))
             else:
                 return self.add(-torch.as_tensor(other, dtype=torch.float64))
-    
-    def mul(self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]) -> "EncryptedTensor":
+
+    def mul(
+        self, other: Union["EncryptedTensor", torch.Tensor, float, int, List[float]]
+    ) -> "EncryptedTensor":
         """Multiply by another tensor or scalar.
-        
+
         Args:
             other: EncryptedTensor, plain tensor, or scalar to multiply.
-            
+
         Returns:
             New EncryptedTensor with the product.
-            
+
         Note:
             Cipher-cipher multiplication increases noise and consumes levels.
             Rescale is deferred (lazy) until needed by next operation.
@@ -530,52 +552,52 @@ class EncryptedTensor:
             plain = self._to_plain_list(other)
             new_cipher = self._cipher.mul(plain)
             new_depth = self._depth + 1
-        
+
         result = EncryptedTensor(new_cipher, self._shape, self._context, new_depth)
         result._needs_rescale = True
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     def neg(self) -> "EncryptedTensor":
         """Negate the tensor (free operation - doesn't consume multiplicative depth)."""
-        if hasattr(self._cipher, 'neg'):
+        if hasattr(self._cipher, "neg"):
             new_cipher = self._cipher.neg()
             needs_rescale = self._needs_rescale
         else:
             neg_plain = [-1.0] * self._cipher.size
             new_cipher = self._cipher.mul(neg_plain)
             needs_rescale = self._needs_rescale
-        
+
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._needs_rescale = needs_rescale
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     def div(self, divisor: float) -> "EncryptedTensor":
         """Divide by plaintext scalar.
-        
+
         Args:
             divisor: Non-zero scalar to divide by.
-            
+
         Returns:
             New EncryptedTensor with the quotient.
-            
+
         Note:
             Cipher-cipher division is not supported in CKKS.
         """
         if divisor == 0:
             raise ValueError("Division by zero")
         return self.mul(1.0 / divisor)
-    
+
     def square(self) -> "EncryptedTensor":
         """Square the tensor (element-wise).
-        
+
         Uses dedicated GPU square operation when available, which is more
         efficient and stable than cipher-cipher multiplication with self.
         """
         self._profile_op("square")
         # Use dedicated square() if available (GPU-optimized path)
-        if hasattr(self._cipher, 'square'):
+        if hasattr(self._cipher, "square"):
             new_cipher = self._cipher.square()
         else:
             # Fallback for backends without dedicated square
@@ -584,22 +606,22 @@ class EncryptedTensor:
         result._needs_rescale = True  # Mark for lazy rescale
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     # -------------------------------------------------------------------------
     # CKKS-specific Operations
     # -------------------------------------------------------------------------
-    
+
     def rescale(self) -> "EncryptedTensor":
         """Rescale to reduce scale and consume a level.
-        
+
         This should typically be called after multiplication to
         manage the scale growth.
-        
+
         Under FLEXIBLEAUTO scaling, some operations (e.g. CPU EvalMult,
         EvalPoly) auto-rescale internally. Calling rescale() again would
         waste a level. We detect this via noiseScaleDeg metadata: a value
         of 1 means the ciphertext is already at nominal scale.
-        
+
         Returns:
             New EncryptedTensor with reduced scale.
         """
@@ -653,13 +675,13 @@ class EncryptedTensor:
         if self._needs_rescale:
             return self.rescale()
         return self
-    
+
     def rotate(self, steps: int) -> "EncryptedTensor":
         """Rotate slots by the given number of steps.
-        
+
         Args:
             steps: Number of positions to rotate. Positive = left, negative = right.
-            
+
         Returns:
             New EncryptedTensor with rotated slots.
         """
@@ -672,10 +694,10 @@ class EncryptedTensor:
         result._needs_rescale = self._needs_rescale
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     def sum_slots(self) -> "EncryptedTensor":
         """Sum all slots into the first slot.
-        
+
         Returns:
             New EncryptedTensor with sum in first position.
         """
@@ -683,17 +705,17 @@ class EncryptedTensor:
         result = EncryptedTensor(new_cipher, (1,), self._context, self._depth)
         result._needs_rescale = self._needs_rescale
         return self._propagate_batch_meta(result)
-    
+
     def sum_and_broadcast(self, n: int) -> "EncryptedTensor":
         """Sum first n slots and replicate the result across all n positions.
-        
+
         Uses log(n) rotation-and-add operations. In real CKKS, this naturally
         fills all slots with the sum. Required for LayerNorm and Attention
         operations that need reduction followed by element-wise operations.
-        
+
         Args:
             n: Number of active elements to sum and broadcast.
-            
+
         Returns:
             EncryptedTensor of same shape with sum replicated in first n slots.
         """
@@ -761,13 +783,13 @@ class EncryptedTensor:
         result = EncryptedTensor(new_cipher, self._shape, self._context, self._depth)
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     def bootstrap(self) -> "EncryptedTensor":
         """Bootstrap to refresh the ciphertext.
-        
+
         This is expensive but allows continuing computation when
         levels are exhausted.
-        
+
         Returns:
             New EncryptedTensor with refreshed levels.
         """
@@ -776,7 +798,7 @@ class EncryptedTensor:
         result = EncryptedTensor(new_cipher, self._shape, self._context, 0)
         result._copy_runtime_metadata_from(self)
         return result
-    
+
     def maybe_bootstrap(
         self, context: Optional["CKKSInferenceContext"] = None
     ) -> "EncryptedTensor":
@@ -796,10 +818,11 @@ class EncryptedTensor:
             ctx, "bootstrap_threshold", 2
         ):
             import logging
+
             logging.info(f"Auto-bootstrapping: depth={self._depth}")
             return self.bootstrap()
         return self
-    
+
     # -------------------------------------------------------------------------
     # Matrix Operations
     # -------------------------------------------------------------------------
@@ -1019,7 +1042,7 @@ class EncryptedTensor:
         tensor._propagate_batch_meta(accumulator)
         accumulator._shape = (batch_size, slots_per_sample)
         return accumulator
-    
+
     def matmul(
         self,
         weight: torch.Tensor,
@@ -1036,21 +1059,33 @@ class EncryptedTensor:
         tensor = self
         if self._needs_rescale:
             tensor = self.rescale()
-        
+
         weight_2d = weight.detach().to(dtype=torch.float64, device="cpu")
         if weight_2d.ndim == 1:
             weight_2d = weight_2d.unsqueeze(0)
 
-        resolved_use_bsgs = getattr(tensor._context, 'use_bsgs', False) if use_bsgs is None else use_bsgs
+        resolved_use_bsgs = (
+            getattr(tensor._context, "use_bsgs", False) if use_bsgs is None else use_bsgs
+        )
 
-        if tensor._packed_batch and tensor._batch_size is not None and tensor._slots_per_sample is not None:
+        if (
+            tensor._packed_batch
+            and tensor._batch_size is not None
+            and tensor._slots_per_sample is not None
+        ):
             batch_size = tensor._batch_size
             slots_per_sample = tensor._slots_per_sample
             sample_shape = tensor._packed_sample_dims()
             in_features = weight_2d.shape[1]
             out_features = weight_2d.shape[0]
-            if sample_shape is not None and len(sample_shape) > 0 and sample_shape[-1] == in_features:
-                groups_per_sample = int(math.prod(sample_shape[:-1])) if len(sample_shape) > 1 else 1
+            if (
+                sample_shape is not None
+                and len(sample_shape) > 0
+                and sample_shape[-1] == in_features
+            ):
+                groups_per_sample = (
+                    int(math.prod(sample_shape[:-1])) if len(sample_shape) > 1 else 1
+                )
                 output_sample_shape = tuple(sample_shape[:-1]) + (out_features,)
             elif slots_per_sample == in_features:
                 groups_per_sample = 1
@@ -1063,7 +1098,9 @@ class EncryptedTensor:
 
             num_blocks = batch_size * groups_per_sample
             total_in = batch_size * slots_per_sample
-            diagonals = tensor._build_repeated_block_diagonals(weight_2d, num_blocks, total_in, tensor._cipher.size)
+            diagonals = tensor._build_repeated_block_diagonals(
+                weight_2d, num_blocks, total_in, tensor._cipher.size
+            )
             x_flat = tensor.view(total_in)
             new_cipher = x_flat._matmul_diagonals_bsgs(diagonals, total_in)
             output_shape = (batch_size,) + output_sample_shape
@@ -1085,7 +1122,7 @@ class EncryptedTensor:
                 result = result.add(repeated_bias)
 
             return result
-        
+
         out_features = weight_2d.shape[0]
         in_features = weight_2d.shape[1]
         if in_features <= 16:
@@ -1101,7 +1138,7 @@ class EncryptedTensor:
             )
         elif resolved_use_bsgs:
             weight_list = weight_list if weight_list is not None else weight_2d.tolist()
-            max_dim = getattr(tensor._context, '_max_rotation_dim', None)
+            max_dim = getattr(tensor._context, "_max_rotation_dim", None)
             # IMPORTANT: bsgs_n1 must match the n1 used when generating rotation keys
             # to ensure the required rotations (baby steps 0..n1-1, giant steps n1, 2*n1, ...)
             # are available. Use max_dim for n1 calculation, not actual in_features.
@@ -1109,15 +1146,19 @@ class EncryptedTensor:
             bsgs_n1 = max(1, int(math.ceil(math.sqrt(bsgs_dim))))
             bsgs_n2 = (in_features + bsgs_n1 - 1) // bsgs_n1
 
-            new_cipher = tensor._cipher.matmul_bsgs(weight_list, bsgs_n1, bsgs_n2,
-                                                    weight_hash=weight_hash,
-                                                    diag_nonzero=diag_nonzero)
-            result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)
+            new_cipher = tensor._cipher.matmul_bsgs(
+                weight_list, bsgs_n1, bsgs_n2, weight_hash=weight_hash, diag_nonzero=diag_nonzero
+            )
+            result = EncryptedTensor(
+                new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1
+            )
             tensor._propagate_batch_meta(result)
         else:
             w_list = weight_list if weight_list is not None else weight_2d.tolist()
             new_cipher = tensor._cipher.matmul_dense(w_list)
-            result = EncryptedTensor(new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1)
+            result = EncryptedTensor(
+                new_cipher, (weight_2d.shape[0],), tensor._context, tensor._depth + 1
+            )
             tensor._propagate_batch_meta(result)
 
         if not use_small_output:
@@ -1132,16 +1173,16 @@ class EncryptedTensor:
                 else:
                     bias_flat = bias.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
                     result = result.add(bias_flat.tolist())
-        
+
         return result
-    
+
     def poly_eval(self, coeffs: Sequence[float]) -> "EncryptedTensor":
         """Evaluate a polynomial on the encrypted values.
-        
+
         Args:
             coeffs: Polynomial coefficients [a0, a1, a2, ...] for
                     a0 + a1*x + a2*x^2 + ...
-                    
+
         Returns:
             New EncryptedTensor with polynomial evaluated element-wise.
         """
@@ -1175,8 +1216,12 @@ class EncryptedTensor:
         new_cipher = tensor._cipher.poly_eval(coeff_list)
         degree = len(coeffs) - 1 if len(coeffs) > 1 else 0
         poly_depth = max(1, math.ceil(math.log2(degree + 1))) if degree > 0 else 0
-        result = EncryptedTensor(new_cipher, tensor._shape, tensor._context, tensor._depth + poly_depth)
-        if degree > 0 and not (getattr(tensor._context, "_enable_gpu", False) and is_sparse_degree4):
+        result = EncryptedTensor(
+            new_cipher, tensor._shape, tensor._context, tensor._depth + poly_depth
+        )
+        if degree > 0 and not (
+            getattr(tensor._context, "_enable_gpu", False) and is_sparse_degree4
+        ):
             result._needs_rescale = True
         result._copy_runtime_metadata_from(tensor)
         return result
@@ -1191,11 +1236,11 @@ class EncryptedTensor:
         Mock and OpenFHE backends.
 
         Args:
-            domain: Input domain (a, b). 
+            domain: Input domain (a, b).
                 - For shallow=False: Must be (0.1, 100.0) in v1 (default).
                 - For shallow=True: Default (1.0, 10.0) for polynomial-only mode.
             shallow: If True, use polynomial-only approximation without bootstrap.
-                Use this for OpenFHE GPU contexts where bootstrap is unavailable 
+                Use this for OpenFHE GPU contexts where bootstrap is unavailable
                 or has known issues. If False (default), use full method
                 with Newton refinement and bootstrap.
 
@@ -1222,20 +1267,18 @@ class EncryptedTensor:
         """
         if shallow:
             from cukks.stats.crypto_inv_sqrt import crypto_inv_sqrt_shallow
-            
+
             if domain is None:
                 domain = (1.0, 10.0)
             return crypto_inv_sqrt_shallow(self, domain=domain)
         else:
             from cukks.stats.crypto_inv_sqrt import crypto_inv_sqrt
-            
+
             if domain is None:
                 domain = (0.1, 100.0)
             return crypto_inv_sqrt(self, domain=domain)
 
-    def sqrt(
-        self, domain: tuple[float, float] = (0.1, 100.0)
-    ) -> "EncryptedTensor":
+    def sqrt(self, domain: tuple[float, float] = (0.1, 100.0)) -> "EncryptedTensor":
         """Compute sqrt(x) = x * inv_sqrt(x).
 
         Uses the identity sqrt(x) = x * (1/sqrt(x)) to compute the
@@ -1264,11 +1307,11 @@ class EncryptedTensor:
         """
         inv_sqrt_x = self.inv_sqrt(domain=domain)
         return self.mul(inv_sqrt_x).rescale()
-    
+
     # -------------------------------------------------------------------------
     # CNN Operations
     # -------------------------------------------------------------------------
-    
+
     def conv2d(
         self,
         weight: torch.Tensor,
@@ -1279,11 +1322,11 @@ class EncryptedTensor:
         output_shape: Tuple[int, ...],
     ) -> "EncryptedTensor":
         """Apply 2D convolution using im2col method.
-        
+
         This method is not available in pure HE mode.
         Use encrypt_cnn_input() to pre-apply im2col before encryption,
         then use EncryptedConv2d with _cnn_layout input.
-        
+
         Args:
             weight: Convolution weight matrix (out_channels, in_channels * kH * kW).
             bias: Optional bias (out_channels,).
@@ -1291,7 +1334,7 @@ class EncryptedTensor:
             stride: Stride (sH, sW).
             padding: Padding (pH, pW).
             output_shape: Expected output shape (batch, out_channels, out_h, out_w).
-            
+
         Returns:
             Encrypted output tensor with output_shape.
         """
@@ -1300,22 +1343,22 @@ class EncryptedTensor:
             "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
             "then use EncryptedConv2d with _cnn_layout input."
         )
-    
+
     def matmul_2d(
         self,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> "EncryptedTensor":
         """Matrix multiply for 2D input (num_patches, features).
-        
+
         This method is not available in pure HE mode.
         Use encrypt_cnn_input() to pre-apply im2col before encryption,
         then use EncryptedLinear with packed BSGS matmul.
-        
+
         Args:
             weight: Weight matrix (out_features, in_features).
             bias: Optional bias (out_features,).
-            
+
         Returns:
             Encrypted result of shape (num_patches, out_features).
         """
@@ -1324,7 +1367,7 @@ class EncryptedTensor:
             "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
             "then use EncryptedLinear with packed BSGS matmul."
         )
-    
+
     def avgpool2d(
         self,
         kernel_size: Tuple[int, int],
@@ -1332,16 +1375,16 @@ class EncryptedTensor:
         padding: Tuple[int, int] = (0, 0),
     ) -> "EncryptedTensor":
         """Apply 2D average pooling.
-        
+
         This method is not available in pure HE mode.
         Use encrypt_cnn_input() to pre-apply im2col before encryption,
         then use EncryptedAvgPool2d with _cnn_layout input.
-        
+
         Args:
             kernel_size: Pooling kernel size (kH, kW).
             stride: Pooling stride (sH, sW).
             padding: Pooling padding (pH, pW).
-            
+
         Returns:
             Encrypted output after average pooling.
         """
@@ -1350,70 +1393,68 @@ class EncryptedTensor:
             "Use encrypt_cnn_input() to pre-apply im2col before encryption, "
             "then use EncryptedAvgPool2d with _cnn_layout input."
         )
-    
+
     # -------------------------------------------------------------------------
     # Decryption
     # -------------------------------------------------------------------------
-    
+
     def decrypt(self, shape: Optional[Sequence[int]] = None) -> torch.Tensor:
         """Decrypt this tensor.
-        
+
         Args:
             shape: Optional shape for the output.
-            
+
         Returns:
             Decrypted PyTorch tensor.
         """
         return self._context.decrypt(self, shape=shape)
-    
+
     # -------------------------------------------------------------------------
     # Python Operators
     # -------------------------------------------------------------------------
-    
+
     def __add__(self, other: Any) -> "EncryptedTensor":
         return self.add(other)
-    
+
     def __radd__(self, other: Any) -> "EncryptedTensor":
         return self.add(other)
-    
+
     def __sub__(self, other: Any) -> "EncryptedTensor":
         return self.sub(other)
-    
+
     def __rsub__(self, other: Any) -> "EncryptedTensor":
         return self.neg().add(other)
-    
+
     def __mul__(self, other: Any) -> "EncryptedTensor":
         return self.mul(other)
-    
+
     def __rmul__(self, other: Any) -> "EncryptedTensor":
         return self.mul(other)
-    
+
     def __neg__(self) -> "EncryptedTensor":
         return self.neg()
-    
+
     def __matmul__(self, other: Any) -> "EncryptedTensor":
         if isinstance(other, torch.Tensor):
             return self.matmul(other)
         raise TypeError(f"matmul not supported with {type(other)}")
-    
+
     # -------------------------------------------------------------------------
     # Utility Methods
     # -------------------------------------------------------------------------
-    
+
     def view(self, *shape: int) -> "EncryptedTensor":
         """Reshape the tensor (logical only, no data movement).
-        
+
         Args:
             *shape: New shape dimensions.
-            
+
         Returns:
             New EncryptedTensor with updated shape.
         """
         new_size = math.prod(shape)
         if new_size != self.size:
-            raise ValueError(
-                f"Cannot reshape tensor of size {self.size} to shape {shape}"
-            )
+            raise ValueError(f"Cannot reshape tensor of size {self.size} to shape {shape}")
         result = EncryptedTensor(self._cipher, tuple(shape), self._context, self._depth)
         result._owns_cipher = False
         result._needs_rescale = self._needs_rescale
@@ -1422,15 +1463,15 @@ class EncryptedTensor:
         result._cnn_layout = None
         result._update_packed_shape_metadata()
         return result
-    
+
     def reshape(self, shape: Union[int, Tuple[int, ...]]) -> "EncryptedTensor":
         if isinstance(shape, int):
             return self.view(shape)
         return self.view(*shape)
-    
+
     def flatten(self) -> "EncryptedTensor":
         return self.view(self.size)
-    
+
     def unfold(
         self,
         kernel_size: Tuple[int, int],
@@ -1438,15 +1479,15 @@ class EncryptedTensor:
         padding: Tuple[int, int] = (0, 0),
     ) -> "EncryptedTensor":
         """Unfold tensor into patches (im2col).
-        
+
         This method is not available in pure HE mode.
         Use encrypt_cnn_input() to pre-apply im2col before encryption.
-        
+
         Args:
             kernel_size: Kernel size (kH, kW).
             stride: Stride (sH, sW).
             padding: Padding (pH, pW).
-            
+
         Returns:
             Encrypted patches tensor.
         """
@@ -1454,10 +1495,10 @@ class EncryptedTensor:
             "unfold() is not available in pure HE mode. "
             "Use encrypt_cnn_input() to pre-apply im2col before encryption."
         )
-    
+
     def clone(self) -> "EncryptedTensor":
         """Create a copy of this tensor.
-        
+
         Note: This creates a new Python wrapper but the underlying
         ciphertext may be shared (copy-on-write semantics).
         """
@@ -1467,7 +1508,7 @@ class EncryptedTensor:
         result._copy_runtime_metadata_from(self)
         result._stip_layout_fresh = self._stip_layout_fresh
         return result
-    
+
     def __repr__(self) -> str:
         meta = self.metadata
         return (
@@ -1476,20 +1517,20 @@ class EncryptedTensor:
             f"level={meta.get('level')}, "
             f"scale={meta.get('scale', 0):.2e})"
         )
-    
+
     def save(self, path: Union[str, Path]) -> None:
         """Save the encrypted tensor to a file.
-        
+
         Serializes the tensor metadata and underlying cipher data.
         The cipher serialization depends on the backend implementation.
-        
+
         Args:
             path: Path to save the tensor.
         """
         cipher_data = None
-        if hasattr(self._cipher, 'data'):
+        if hasattr(self._cipher, "data"):
             cipher_data = self._cipher.data
-        
+
         tensor_data = {
             "shape": self._shape,
             "depth": self._depth,
@@ -1503,7 +1544,7 @@ class EncryptedTensor:
         }
         with open(path, "wb") as f:
             pickle.dump(tensor_data, f)
-    
+
     @classmethod
     def load(
         cls,
@@ -1511,19 +1552,21 @@ class EncryptedTensor:
         context: "CKKSInferenceContext",
     ) -> "EncryptedTensor":
         """Load an encrypted tensor from a file.
-        
+
         Args:
             path: Path to the saved tensor.
             context: The CKKS context to associate with the loaded tensor.
-            
+
         Returns:
             The loaded EncryptedTensor.
         """
         import warnings
+
         warnings.warn(
             "EncryptedTensor.load() uses pickle, which can execute arbitrary code. "
             "Only load files from trusted sources.",
-            UserWarning, stacklevel=2,
+            UserWarning,
+            stacklevel=2,
         )
 
         with open(path, "rb") as f:
@@ -1535,23 +1578,23 @@ class EncryptedTensor:
             "OpenFHE backends, use the native serialization API instead.",
             stacklevel=2,
         )
-        
+
         shape = tensor_data["shape"]
         depth = tensor_data["depth"]
         cipher_data = tensor_data["cipher_data"]
-        
+
         if cipher_data is not None:
             dummy_tensor = torch.zeros(math.prod(shape) if shape else 1)
-            if hasattr(context, '_ensure_initialized'):
+            if hasattr(context, "_ensure_initialized"):
                 context._ensure_initialized()
-            backend_context = getattr(context, '_ctx', context)
+            backend_context = getattr(context, "_ctx", context)
             cipher = backend_context.encrypt(dummy_tensor)
-            setattr(cipher, 'data', cipher_data)
-            setattr(cipher, 'shape', shape)
-            setattr(cipher, 'size', int(math.prod(shape)) if shape else 1)
+            cipher.data = cipher_data
+            cipher.shape = shape
+            cipher.size = int(math.prod(shape)) if shape else 1
         else:
             raise ValueError("Cannot load tensor: cipher_data not available")
-        
+
         result = cls(cipher, shape, context, depth)
         result._needs_rescale = tensor_data.get("needs_rescale", False)
         result._cnn_layout = cls._copy_cnn_layout(tensor_data.get("cnn_layout", None))
@@ -1559,5 +1602,7 @@ class EncryptedTensor:
         result._batch_size = tensor_data.get("batch_size", None)
         result._slots_per_sample = tensor_data.get("slots_per_sample", None)
         packed_sample_shape = tensor_data.get("packed_sample_shape", None)
-        result._packed_sample_shape = tuple(packed_sample_shape) if packed_sample_shape is not None else None
+        result._packed_sample_shape = (
+            tuple(packed_sample_shape) if packed_sample_shape is not None else None
+        )
         return result

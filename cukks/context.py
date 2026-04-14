@@ -19,11 +19,14 @@ import torch
 if TYPE_CHECKING:
     from .tensor import EncryptedTensor
 
-from .batching.packing import SlotPacker
 from .batching import PackingLayout, TokenBlockPacker
+from .batching.packing import SlotPacker
+from .depth_estimation import estimate_model_depth
+from .rotation_planning import collect_rotation_requirements, compute_reduction_rotations
 
 CKKSConfig: Any | None = None
 CKKSContext: Any | None = None
+
 
 @dataclass
 class InferenceConfig:
@@ -33,25 +36,25 @@ class InferenceConfig:
     mult_depth: int = 4
     enable_bootstrap: bool = False
     level_budget: Optional[Tuple[int, int]] = None
-    
+
     _coeff_mod_bits: Optional[Tuple[int, ...]] = field(default=None, repr=False)
-    
+
     def __post_init__(self) -> None:
         if self._coeff_mod_bits is None:
             middle_bits = tuple([self.scale_bits] * self.mult_depth)
-            object.__setattr__(self, '_coeff_mod_bits', (60,) + middle_bits + (60,))
-    
+            object.__setattr__(self, "_coeff_mod_bits", (60,) + middle_bits + (60,))
+
     @property
     def coeff_mod_bits(self) -> Tuple[int, ...]:
         if self._coeff_mod_bits is None:
             middle_bits = tuple([self.scale_bits] * self.mult_depth)
             return (60,) + middle_bits + (60,)
         return self._coeff_mod_bits
-    
+
     @property
     def num_slots(self) -> int:
         return self.poly_mod_degree // 2
-    
+
     @property
     def resolved_level_budget(self) -> Optional[Tuple[int, int]]:
         if self.level_budget is not None:
@@ -59,7 +62,7 @@ class InferenceConfig:
         if self.enable_bootstrap:
             return (3, 3)
         return None
-    
+
     @classmethod
     def for_depth(cls, mult_depth: int, **kwargs: Any) -> "InferenceConfig":
         mult_depth = max(1, mult_depth)
@@ -67,7 +70,7 @@ class InferenceConfig:
         level_budget = kwargs.pop("level_budget", None)
         security_level = kwargs.pop("security_level", "128_classic")
         scale_bits = kwargs.pop("scale_bits", 50)
-        
+
         # Check if poly_mod_degree is explicitly passed
         poly_mod_degree = kwargs.pop("poly_mod_degree", None)
 
@@ -102,7 +105,7 @@ class InferenceConfig:
             level_budget=level_budget,
             **kwargs,
         )
-    
+
     @classmethod
     def for_model(
         cls,
@@ -113,7 +116,7 @@ class InferenceConfig:
     ) -> "InferenceConfig":
         enable_gpu = kwargs.pop("enable_gpu", False)
         attention_normalization_mode = kwargs.pop("attention_normalization_mode", "power_softmax")
-        depth = _estimate_model_depth(
+        depth = estimate_model_depth(
             model,
             activation_degree=activation_degree,
             use_square_activation=use_square_activation,
@@ -131,44 +134,14 @@ def _estimate_model_depth(
     attention_normalization_mode: str = "power_softmax",
     inverse_free_ln_names: "frozenset[str]" = frozenset(),
 ) -> int:
-    depth = 0
-    if use_square_activation:
-        poly_depth = 1
-    elif enable_gpu and activation_degree >= 4:
-        poly_depth = 3
-    else:
-        poly_depth = max(1, math.ceil(math.log2(activation_degree + 1)))
-
-    from .nn.block_diagonal import BlockDiagonalLinear
-    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
-
-    _module_to_name = {id(m): name for name, m in model.named_modules()}
-
-    for module in model.modules():
-        if isinstance(module, BlockDiagLowRankLinear):
-            depth += 2 if module.rank > 0 else 1
-        elif isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, BlockDiagonalLinear)):
-            depth += 1
-            if enable_gpu:
-                depth += 1
-        elif isinstance(module, (
-            torch.nn.ReLU, torch.nn.GELU, torch.nn.SiLU,
-            torch.nn.Sigmoid, torch.nn.Tanh,
-        )):
-            depth += poly_depth
-        elif isinstance(module, torch.nn.MultiheadAttention):
-            depth += 9 if attention_normalization_mode == "gaussian" else 10
-        elif isinstance(module, torch.nn.LayerNorm):
-            module_name = _module_to_name.get(id(module), "")
-            if module_name in inverse_free_ln_names:
-                depth += 5
-            else:
-                depth += 18
-        elif isinstance(module, torch.nn.GroupNorm):
-            depth += activation_degree + 3
-        elif isinstance(module, torch.nn.AdaptiveAvgPool2d):
-            depth += 1
-    return max(1, depth)
+    return estimate_model_depth(
+        model,
+        activation_degree=activation_degree,
+        use_square_activation=use_square_activation,
+        enable_gpu=enable_gpu,
+        attention_normalization_mode=attention_normalization_mode,
+        inverse_free_ln_names=inverse_free_ln_names,
+    )
 
 
 def _collect_rotation_requirements(
@@ -177,267 +150,39 @@ def _collect_rotation_requirements(
     *,
     small_output_threshold: int = 16,
 ) -> Tuple[List[int], List[int], List[int], List[int]]:
-    from .nn.block_diagonal import BlockDiagonalLinear
-    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
-    from .nn.conv import EncryptedConv2d as _EC
-
-    generic_dims: List[int] = []
-    reduction_lengths: List[int] = []
-    pack_shifts: set[int] = set()
-    extra_rotations: set[int] = set()
-
-    spatial_h, spatial_w = 28, 28
-    if input_shape is not None:
-        if len(input_shape) == 4:
-            spatial_h, spatial_w = int(input_shape[2]), int(input_shape[3])
-        elif len(input_shape) >= 2:
-            spatial_h, spatial_w = int(input_shape[-2]), int(input_shape[-1])
-
-    current_channels: Optional[int] = None
-    if input_shape is not None:
-        if len(input_shape) == 4:
-            current_channels = int(input_shape[1])
-        elif len(input_shape) == 3:
-            current_channels = int(input_shape[0])
-
-    pending_sparse_pool: Optional[Tuple[int, int]] = None
-
-    for module in model.modules():
-        if isinstance(module, BlockDiagLowRankLinear):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-            generic_dims.extend([module.in_features, module.out_features])
-            pending_sparse_pool = None
-            continue
-
-        if isinstance(module, BlockDiagonalLinear):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-            generic_dims.extend([module.in_features, module.out_features])
-            pending_sparse_pool = None
-            continue
-
-        if isinstance(module, torch.nn.MultiheadAttention):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-            generic_dims.extend([module.embed_dim, module.embed_dim * 8])
-            pending_sparse_pool = None
-            continue
-
-        if isinstance(module, torch.nn.Conv2d):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-            kh, kw = (module.kernel_size, module.kernel_size) if isinstance(module.kernel_size, int) else module.kernel_size
-            sh, sw = (module.stride, module.stride) if isinstance(module.stride, int) else module.stride
-            if isinstance(module.padding, int):
-                ph = pw = int(module.padding)
-            elif isinstance(module.padding, tuple):
-                ph, pw = int(module.padding[0]), int(module.padding[1])
-            else:
-                pending_sparse_pool = None
-                continue
-
-            kh, kw = int(kh), int(kw)
-            sh, sw = int(sh), int(sw)
-
-            out_h = (spatial_h + 2 * ph - kh) // sh + 1
-            out_w = (spatial_w + 2 * pw - kw) // sw + 1
-            num_patches = out_h * out_w
-            patch_features = module.in_channels * kh * kw
-
-            extra_rotations.update(
-                _EC.required_packed_compact_rotations(num_patches, patch_features, module.out_channels)
-            )
-
-            spatial_h, spatial_w = out_h, out_w
-            current_channels = int(module.out_channels)
-            pending_sparse_pool = None
-            continue
-
-        if isinstance(module, torch.nn.GroupNorm):
-            if current_channels is not None:
-                sample_size = spatial_h * spatial_w * current_channels
-            else:
-                sample_size = int(module.num_channels)
-            generic_dims.append(sample_size)
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-                pending_sparse_pool = None
-            continue
-
-        if isinstance(module, torch.nn.AvgPool2d):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-                pending_sparse_pool = None
-
-            if isinstance(module.kernel_size, int):
-                pk_h = pk_w = module.kernel_size
-            else:
-                pk_h, pk_w = int(module.kernel_size[0]), int(module.kernel_size[1])
-
-            stride = getattr(module, "stride", None)
-            if isinstance(stride, int):
-                ps_h = ps_w = stride
-            elif stride is None:
-                ps_h, ps_w = pk_h, pk_w
-            else:
-                ps_h, ps_w = int(stride[0]), int(stride[1])
-
-            padding = getattr(module, "padding", 0)
-            if isinstance(padding, int):
-                p_h = p_w = padding
-            else:
-                p_h, p_w = int(padding[0]), int(padding[1])
-
-            pool_total_slots = spatial_h * spatial_w * current_channels if current_channels is not None else None
-
-            if current_channels is not None and pk_h == 2 and pk_w == 2 and ps_h == 2 and ps_w == 2 and p_h == 0 and p_w == 0:
-                extra_rotations.update(
-                    compute_cnn_rotations(
-                        spatial_h,
-                        spatial_w,
-                        current_channels,
-                        pool_size=pk_h,
-                        pool_stride=ps_h,
-                    )
-                )
-                if pk_h == 2 and ps_h == 2:
-                    compact_features = (spatial_h // ps_h) * (spatial_w // ps_w) * current_channels
-                    total_slots = spatial_h * spatial_w * current_channels
-                    pending_sparse_pool = (compact_features, total_slots)
-                else:
-                    pending_sparse_pool = None
-            else:
-                if pool_total_slots is not None:
-                    generic_dims.append(pool_total_slots)
-                pending_sparse_pool = None
-
-            spatial_h = (spatial_h + 2 * p_h - pk_h) // ps_h + 1
-            spatial_w = (spatial_w + 2 * p_w - pk_w) // ps_w + 1
-            continue
-
-        if isinstance(module, torch.nn.AdaptiveAvgPool2d):
-            if pending_sparse_pool is not None:
-                generic_dims.append(pending_sparse_pool[1])
-                pending_sparse_pool = None
-
-            if current_channels is not None:
-                total_in = spatial_h * spatial_w * current_channels
-                generic_dims.append(total_in)
-
-            output_size = module.output_size
-            if isinstance(output_size, int):
-                out_h = out_w = int(output_size)
-            elif output_size is not None:
-                out_h_s, out_w_s = output_size
-                out_h = int(out_h_s) if out_h_s is not None else spatial_h
-                out_w = int(out_w_s) if out_w_s is not None else spatial_w
-            else:
-                out_h, out_w = spatial_h, spatial_w
-            spatial_h, spatial_w = out_h, out_w
-            continue
-
-        if isinstance(module, torch.nn.Linear):
-            if pending_sparse_pool is not None and pending_sparse_pool[0] != module.in_features:
-                generic_dims.append(pending_sparse_pool[1])
-                pending_sparse_pool = None
-
-            if module.out_features <= small_output_threshold and module.out_features < module.in_features:
-                reduction_length = int(module.in_features)
-                if pending_sparse_pool is not None and pending_sparse_pool[0] == module.in_features:
-                    reduction_length = pending_sparse_pool[1]
-                reduction_lengths.append(reduction_length)
-                pack_shifts.update(range(1, int(module.out_features)))
-            else:
-                if pending_sparse_pool is not None:
-                    generic_dims.append(pending_sparse_pool[1])
-                    pending_sparse_pool = None
-                generic_dims.extend([module.in_features, module.out_features])
-            pending_sparse_pool = None
-            continue
-
-        if isinstance(module, (
-            torch.nn.Flatten,
-            torch.nn.ReLU,
-            torch.nn.GELU,
-            torch.nn.SiLU,
-            torch.nn.Sigmoid,
-            torch.nn.Tanh,
-            torch.nn.Dropout,
-        )):
-            continue
-
-        if pending_sparse_pool is not None:
-            generic_dims.append(pending_sparse_pool[1])
-            pending_sparse_pool = None
-
-    if pending_sparse_pool is not None:
-        generic_dims.append(pending_sparse_pool[1])
-
+    requirements = collect_rotation_requirements(
+        model,
+        input_shape=input_shape,
+        small_output_threshold=small_output_threshold,
+    )
     return (
-        generic_dims,
-        sorted(set(reduction_lengths)),
-        sorted(pack_shifts),
-        sorted(extra_rotations),
+        requirements.generic_dims,
+        requirements.reduction_lengths,
+        requirements.pack_shifts,
+        requirements.extra_rotations,
     )
 
 
 def _compute_reduction_rotations(length: int) -> List[int]:
-    if length <= 1:
-        return []
-
-    rotations: List[int] = []
-    step = 1
-    while step < length:
-        rotations.append(step)
-        step *= 2
-    return rotations
+    return compute_reduction_rotations(length)
 
 
 def compute_bsgs_rotations(max_dim: int, bsgs_n1: Optional[int] = None) -> List[int]:
-    if max_dim <= 1:
-        return []
-    
-    if bsgs_n1 is None:
-        bsgs_n1 = max(1, int(math.ceil(math.sqrt(max_dim))))
-    
-    bsgs_n2 = (max_dim + bsgs_n1 - 1) // bsgs_n1
-    
-    baby_steps = list(range(1, bsgs_n1))
-    giant_steps = [i * bsgs_n1 for i in range(1, bsgs_n2 + 1) if i * bsgs_n1 < max_dim]
-    
-    rotations = sorted(set(baby_steps + giant_steps))
-    return rotations
+    from .rotation_planning import compute_bsgs_rotations as _compute_bsgs_rotations
+
+    return _compute_bsgs_rotations(max_dim, bsgs_n1)
+
 
 def compute_packed_batch_rotations(
     max_dim: int,
     batch_size: int = 1,
     bsgs_n1: Optional[int] = None,
 ) -> List[int]:
-    """Compute rotation indices for packed-batch CKKS inference.
+    from .rotation_planning import (
+        compute_packed_batch_rotations as _compute_packed_batch_rotations,
+    )
 
-    Returns the union of within-sample BSGS rotations and cross-block
-    offsets.  Total count grows as O(sqrt(max_dim) + batch_size) instead
-    of O(batch_size * max_dim).
-
-    Args:
-        max_dim: Slots per sample (*K*).
-        batch_size: Number of samples packed per ciphertext (*B*).
-        bsgs_n1: Optional baby-step size override.
-
-    Returns:
-        Sorted list of **positive** rotation indices.  The caller is
-        responsible for adding negatives.
-    """
-    # Within-sample rotations: O(sqrt(K))
-    rotations = set(compute_bsgs_rotations(max_dim, bsgs_n1))
-
-    # Cross-block offsets: O(B) — shift between packed sample blocks
-    if batch_size > 1:
-        for i in range(1, batch_size):
-            rotations.add(i * max_dim)
-
-    return sorted(rotations)
+    return _compute_packed_batch_rotations(max_dim, batch_size, bsgs_n1)
 
 
 def compute_cnn_rotations(
@@ -447,57 +192,15 @@ def compute_cnn_rotations(
     pool_size: int = 2,
     pool_stride: int = 2,
 ) -> List[int]:
-    rotations = set()
-    if pool_size == 2 and pool_stride == 2:
-        W = image_width
-        offsets = [
-            channels,
-            W * channels,
-            (W + 1) * channels,
-        ]
-        rotations.update(offsets)
-    else:
-        for dy in range(pool_size):
-            for dx in range(pool_size):
-                if dy == 0 and dx == 0:
-                    continue
-                offset = (dy * image_width + dx) * channels
-                rotations.add(offset)
-    return sorted(rotations)
+    from .rotation_planning import compute_cnn_rotations as _compute_cnn_rotations
+
+    return _compute_cnn_rotations(image_height, image_width, channels, pool_size, pool_stride)
 
 
 def compute_rotations_for_model(model: torch.nn.Module, use_bsgs: bool = True) -> List[int]:
-    from .nn.block_diagonal_low_rank import BlockDiagLowRankLinear
+    from .rotation_planning import compute_rotations_for_model as _compute_rotations_for_model
 
-    dims, reduction_lengths, pack_shifts, extra_rotations = _collect_rotation_requirements(model)
-    rotations = set(extra_rotations)
-
-    if dims:
-        max_dim = max(dims)
-    else:
-        max_dim = 0
-
-    if max_dim > 1 and use_bsgs:
-        rotations = compute_bsgs_rotations(max_dim)
-    elif max_dim > 1:
-        rotations = list(range(1, max_dim))
-    else:
-        rotations = []
-
-    rotation_set = set(rotations) | set(extra_rotations) | set(pack_shifts)
-    for length in reduction_lengths:
-        rotation_set.update(_compute_reduction_rotations(length))
-    
-    for module in model.modules():
-        if isinstance(module, BlockDiagLowRankLinear) and module.rank > 0:
-            step = 1
-            while step <= max_dim * 64:
-                rotation_set.add(step)
-                step *= 2
-            break
-
-    neg_rotations = [-r for r in rotation_set if r > 0]
-    return sorted(set(rotation_set) | set(neg_rotations))
+    return _compute_rotations_for_model(model, use_bsgs)
 
 
 class CKKSInferenceContext:
@@ -517,13 +220,10 @@ class CKKSInferenceContext:
         architecture: str = "default",
     ):
         if architecture not in {"default", "stip"}:
-            raise ValueError(
-                "architecture must be 'default' or 'stip', "
-                f"got {architecture!r}"
-            )
+            raise ValueError(f"architecture must be 'default' or 'stip', got {architecture!r}")
         if cnn_config is not None and config is None:
             config = InferenceConfig(mult_depth=6, security_level=None)
-        
+
         self.config = config or InferenceConfig()
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.use_bsgs = use_bsgs
@@ -533,7 +233,7 @@ class CKKSInferenceContext:
         self._enable_gpu = enable_gpu
         self._batch_size = batch_size
         self._architecture = architecture
-        
+
         _resolved_max_dim = max_rotation_dim
         if rotations is None:
             max_dim = max_rotation_dim or min(self.config.num_slots, 1024)
@@ -548,39 +248,39 @@ class CKKSInferenceContext:
                     for i in range(1, batch_size):
                         rotations.extend([i * max_dim, -(i * max_dim)])
                     rotations = sorted(set(rotations))
-            
+
             if cnn_config is not None:
                 cnn_rots = compute_cnn_rotations(
-                    image_height=cnn_config.get('image_height', 8),
-                    image_width=cnn_config.get('image_width', 8),
-                    channels=cnn_config.get('channels', 4),
-                    pool_size=cnn_config.get('pool_size', 2),
-                    pool_stride=cnn_config.get('pool_stride', 2),
+                    image_height=cnn_config.get("image_height", 8),
+                    image_width=cnn_config.get("image_width", 8),
+                    channels=cnn_config.get("channels", 4),
+                    pool_size=cnn_config.get("pool_size", 2),
+                    pool_stride=cnn_config.get("pool_stride", 2),
                 )
                 cnn_neg_rots = [-r for r in cnn_rots if r > 0]
                 all_rots = set(rotations) | set(cnn_rots) | set(cnn_neg_rots)
-                
-                H = cnn_config.get('image_height', 8)
-                W = cnn_config.get('image_width', 8)
-                C = cnn_config.get('channels', 4)
+
+                H = cnn_config.get("image_height", 8)
+                W = cnn_config.get("image_width", 8)
+                C = cnn_config.get("channels", 4)
                 total_sparse_slots = H * W * C
-                
+
                 fc_rots = compute_bsgs_rotations(total_sparse_slots)
                 fc_neg_rots = [-r for r in fc_rots if r > 0]
                 all_rots = all_rots | set(fc_rots) | set(fc_neg_rots)
-                
+
                 rotations = sorted(all_rots)
-        
+
         self._rotations = rotations
         self._max_rotation_dim = _resolved_max_dim
         self._ctx: Any = None
         self._initialized = False
         self._init_lock = threading.Lock()
-    
+
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        
+
         with self._init_lock:
             if self._initialized:
                 return
@@ -588,8 +288,11 @@ class CKKSInferenceContext:
             global CKKSConfig, CKKSContext
             if CKKSConfig is None or CKKSContext is None:
                 from .backend_loader import load_backend
-                CKKSConfig, CKKSContext = load_backend()  # raises RuntimeError with install hint if unavailable
-            
+
+                CKKSConfig, CKKSContext = (
+                    load_backend()
+                )  # raises RuntimeError with install hint if unavailable
+
             ckks_config = CKKSConfig(
                 poly_mod_degree=self.config.poly_mod_degree,
                 coeff_mod_bits=self.config.coeff_mod_bits,
@@ -601,14 +304,14 @@ class CKKSInferenceContext:
                 relin=True,
                 generate_conjugate_keys=True,
             )
-            
+
             self._ctx = CKKSContext(ckks_config, device=self.device, enable_gpu=self._enable_gpu)
             self._initialized = True
-    
+
     @property
     def num_slots(self) -> int:
         return self.config.num_slots
-    
+
     @property
     def batch_size(self) -> int:
         """Number of samples this context was configured to pack."""
@@ -617,62 +320,62 @@ class CKKSInferenceContext:
     @property
     def auto_bootstrap(self) -> bool:
         return self._auto_bootstrap
-    
+
     @property
     def bootstrap_threshold(self) -> int:
         return self._bootstrap_threshold
-    
+
     @property
     def backend(self) -> Any:
         self._ensure_initialized()
         return self._ctx
-    
+
     def set_plain_cache_limit(self, limit: int) -> None:
         self._ensure_initialized()
-        if hasattr(self._ctx, 'set_plain_cache_limit'):
+        if hasattr(self._ctx, "set_plain_cache_limit"):
             self._ctx.set_plain_cache_limit(limit)
 
     def pin_plain_cache(self) -> None:
         self._ensure_initialized()
-        if hasattr(self._ctx, 'pin_plain_cache'):
+        if hasattr(self._ctx, "pin_plain_cache"):
             self._ctx.pin_plain_cache()
 
     def clear_pinned_plain_cache(self) -> None:
         self._ensure_initialized()
-        if hasattr(self._ctx, 'clear_pinned_plain_cache'):
+        if hasattr(self._ctx, "clear_pinned_plain_cache"):
             self._ctx.clear_pinned_plain_cache()
 
     def plain_cache_info(self) -> Dict[str, int]:
         self._ensure_initialized()
-        if hasattr(self._ctx, 'plain_cache_info'):
+        if hasattr(self._ctx, "plain_cache_info"):
             return self._ctx.plain_cache_info()
         return {"total": 0, "pinned": 0, "unpinned": 0}
 
     def encrypt(self, tensor: torch.Tensor) -> "EncryptedTensor":
         from .tensor import EncryptedTensor
-        
+
         self._ensure_initialized()
-        
+
         flat = tensor.detach().to(dtype=torch.float64, device="cpu").reshape(-1)
         original_size = flat.numel()
-        
+
         if original_size > self.num_slots:
             raise ValueError(
                 f"Tensor size {original_size} exceeds available slots {self.num_slots}. "
                 f"Consider using a larger poly_mod_degree or batching."
             )
-        
+
         if self.use_bsgs and original_size < self.num_slots:
             # Tile data to fill all slots for BSGS giant step access
             indices = torch.arange(self.num_slots) % original_size
             flat = flat[indices]
             assert len(flat) == self.num_slots
-        
+
         cipher = self._ctx.encrypt(flat)
         enc_tensor = EncryptedTensor(cipher, tuple(tensor.shape), self)
         enc_tensor._original_size = original_size
         return enc_tensor
-    
+
     def decrypt(
         self,
         encrypted: "EncryptedTensor",
@@ -680,52 +383,52 @@ class CKKSInferenceContext:
     ) -> torch.Tensor:
         self._ensure_initialized()
 
-        if hasattr(encrypted, '_cipher'):
+        if hasattr(encrypted, "_cipher"):
             cipher = encrypted
         else:
             from .tensor import EncryptedTensor
 
-            raw_shape = getattr(encrypted, 'shape', None)
+            raw_shape = getattr(encrypted, "shape", None)
             resolved_shape = tuple(raw_shape) if raw_shape else shape
             if resolved_shape is None:
                 raise ValueError("shape is required when decrypting a raw backend tensor")
             cipher = EncryptedTensor(encrypted, tuple(resolved_shape), self)
 
-        if getattr(cipher, '_needs_rescale', False):
+        if getattr(cipher, "_needs_rescale", False):
             cipher = cipher.rescale()
-        
+
         target_shape = tuple(shape) if shape else cipher.shape
         target_numel = int(math.prod(target_shape)) if target_shape else 1
-        
+
         result = self._ctx.decrypt(cipher._cipher, shape=None)
         result = result[:target_numel].reshape(target_shape)
-        
+
         if self.device != "cpu":
             result = result.to(self.device)
-            
+
         return result
-    
+
     def encrypt_batch(
         self,
         samples: List[torch.Tensor],
         slots_per_sample: Optional[int] = None,
     ) -> Any:
         """Pack *samples* into a single ciphertext and return an EncryptedTensor.
-        
+
         Slot layout (contiguous block packing)::
-        
+
             [s0[0..K-1], s1[0..K-1], ..., s(B-1)[0..K-1], padding...]
-        
+
         where *B* = ``len(samples)`` and *K* = ``slots_per_sample``.
-        
+
         The returned tensor carries ``_packed_batch=True``,
         ``_batch_size=B``, and ``_slots_per_sample=K`` so that every
         subsequent operation preserves the packed-batch contract.
-        
+
         Args:
             samples: List of plaintext tensors (all same numel).
             slots_per_sample: Slots reserved per sample (default: sample numel).
-        
+
         Returns:
             EncryptedTensor with packed-batch metadata set.
         """
@@ -746,13 +449,17 @@ class CKKSInferenceContext:
         sample_shape = tuple(samples[0].shape)
         if slots_per_sample is None:
             slots_per_sample = first_sample_size
-        
+
         packer = SlotPacker(slots_per_sample, self.num_slots)
         packed = packer.pack(samples)
-        
+
         cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
 
-        batch_shape = (len(samples), *sample_shape) if slots_per_sample == first_sample_size else (len(samples), slots_per_sample)
+        batch_shape = (
+            (len(samples), *sample_shape)
+            if slots_per_sample == first_sample_size
+            else (len(samples), slots_per_sample)
+        )
         enc_tensor = EncryptedTensor(cipher, batch_shape, self)
         enc_tensor._packed_batch = True
         enc_tensor._batch_size = len(samples)
@@ -760,13 +467,15 @@ class CKKSInferenceContext:
         enc_tensor._packed_sample_shape = sample_shape
         return enc_tensor
 
-    def _forward_packed_batch(self, model: Any, packed_batch: "EncryptedTensor") -> "EncryptedTensor":
+    def _forward_packed_batch(
+        self, model: Any, packed_batch: "EncryptedTensor"
+    ) -> "EncryptedTensor":
         raise RuntimeError(
             "Legacy packed-batch plaintext fallback has been disabled. "
             "Packed EncryptedTensor inputs must execute through native layer "
             "implementations without decrypt/re-encrypt."
         )
-    
+
     def decrypt_batch(
         self,
         encrypted: Any,
@@ -783,7 +492,7 @@ class CKKSInferenceContext:
 
         if num_samples is None and getattr(encrypted, "_packed_batch", False):
             num_samples = getattr(encrypted, "_batch_size", None)
-        
+
         if num_samples is None:
             if len(encrypted.shape) >= 1:
                 num_samples = encrypted.shape[0]
@@ -792,9 +501,12 @@ class CKKSInferenceContext:
                     "Cannot infer num_samples from encrypted tensor shape. "
                     "Please provide num_samples explicitly."
                 )
-        
-        if getattr(encrypted, "_packed_batch", False) and getattr(encrypted, "_slots_per_sample", None) is not None:
-            slots_per_sample = int(getattr(encrypted, "_slots_per_sample"))
+
+        if (
+            getattr(encrypted, "_packed_batch", False)
+            and getattr(encrypted, "_slots_per_sample", None) is not None
+        ):
+            slots_per_sample = int(encrypted._slots_per_sample)
         elif len(encrypted.shape) >= 2:
             slots_per_sample = encrypted.shape[1]
         else:
@@ -804,10 +516,10 @@ class CKKSInferenceContext:
             raise ValueError("num_samples could not be resolved")
 
         full_result = self._ctx.decrypt(encrypted._cipher, shape=None)
-        
+
         packer = SlotPacker(slots_per_sample, self.num_slots)
         samples = packer.unpack(full_result, num_samples)
-        
+
         if sample_shape is not None:
             target_numel = int(math.prod(sample_shape))
             reshaped_samples = []
@@ -817,10 +529,10 @@ class CKKSInferenceContext:
             samples = reshaped_samples
         else:
             samples = [s.to(torch.float32) for s in samples]
-        
+
         if self.device != "cpu":
             samples = [s.to(self.device) for s in samples]
-        
+
         return samples
 
     def encrypt_sequence(
@@ -835,7 +547,9 @@ class CKKSInferenceContext:
         self._ensure_initialized()
 
         if tensor.ndim != 2:
-            raise ValueError(f"Expected 2D tensor (seq_len, d_model), got shape {tuple(tensor.shape)}")
+            raise ValueError(
+                f"Expected 2D tensor (seq_len, d_model), got shape {tuple(tensor.shape)}"
+            )
 
         seq_len, d_model = tensor.shape
         resolved_block_size = int(block_size) if block_size is not None else int(d_model)
@@ -878,46 +592,46 @@ class CKKSInferenceContext:
         if self.device != "cpu":
             recovered = recovered.to(self.device)
         return recovered.to(torch.float32)
-    
+
     def encrypt_cnn_input(
         self,
         image: torch.Tensor,
         conv_params: List[Dict[str, Any]],
     ) -> "EncryptedTensor":
         import torch.nn.functional as F
-        
+
         self._ensure_initialized()
-        
+
         if image.ndim == 3:
             image = image.unsqueeze(0)
-        
+
         if not conv_params:
             return self.encrypt(image)
-        
+
         first_conv = conv_params[0]
-        kernel_size = first_conv['kernel_size']
-        stride = first_conv.get('stride', (1, 1))
-        padding = first_conv.get('padding', (0, 0))
-        
+        kernel_size = first_conv["kernel_size"]
+        stride = first_conv.get("stride", (1, 1))
+        padding = first_conv.get("padding", (0, 0))
+
         if padding != (0, 0):
             image = F.pad(image, (padding[1], padding[1], padding[0], padding[0]))
-        
+
         patches = F.unfold(image.to(torch.float64), kernel_size, stride=stride)
         patches = patches.transpose(1, 2)
         patches = patches.squeeze(0)
-        
+
         num_patches, patch_features = patches.shape
         flat_patches = patches.flatten()
-        
+
         enc_tensor = self.encrypt(flat_patches)
-        
+
         enc_tensor._cnn_layout = {
-            'num_patches': num_patches,
-            'patch_features': patch_features,
-            'original_shape': tuple(image.shape),
+            "num_patches": num_patches,
+            "patch_features": patch_features,
+            "original_shape": tuple(image.shape),
         }
         enc_tensor._shape = (num_patches, patch_features)
-        
+
         return enc_tensor
 
     @classmethod
@@ -953,16 +667,16 @@ class CKKSInferenceContext:
             poly_mod_degree=poly_mod_degree,
         )
         input_shape_tuple = tuple(input_shape) if input_shape is not None else None
-        dims, reduction_lengths, pack_shifts, extra_rotations = _collect_rotation_requirements(
+        requirements = collect_rotation_requirements(
             model,
             input_shape=input_shape_tuple,
         )
-        max_dim = max(dims) if dims else 0
+        max_dim = max(requirements.generic_dims) if requirements.generic_dims else 0
         resolved_use_bsgs = use_bsgs
 
-        positive_rotations: set[int] = set(extra_rotations)
-        for length in reduction_lengths:
-            positive_rotations.update(_compute_reduction_rotations(length))
+        positive_rotations: set[int] = set(requirements.extra_rotations)
+        for length in requirements.reduction_lengths:
+            positive_rotations.update(compute_reduction_rotations(length))
 
         if max_dim > 1:
             if resolved_use_bsgs:
@@ -973,17 +687,19 @@ class CKKSInferenceContext:
                     positive_rotations.update(i * max_dim for i in range(1, batch_size))
 
         if batch_size > 1:
-            positive_rotations.update(pack_shifts)
+            positive_rotations.update(requirements.pack_shifts)
             rotations = sorted(positive_rotations | {-r for r in positive_rotations if r > 0})
         else:
-            rotations = sorted(positive_rotations | {-shift for shift in pack_shifts if shift > 0})
+            rotations = sorted(
+                positive_rotations | {-shift for shift in requirements.pack_shifts if shift > 0}
+            )
         resolved_max_dim = max_dim
 
         extra_rotations = kwargs.pop("rotations", [])
         if extra_rotations:
             rotations.extend(extra_rotations)
             rotations = sorted(list(set(rotations)))
-        
+
         return cls(
             config,
             rotations=rotations,
@@ -993,7 +709,7 @@ class CKKSInferenceContext:
             architecture=architecture,
             **kwargs,
         )
-    
+
     @classmethod
     def for_depth(
         cls,
@@ -1028,7 +744,7 @@ class CKKSInferenceContext:
 
         config = InferenceConfig.for_depth(depth, **config_kwargs)
         return cls(config, **context_kwargs)
-    
+
     def __repr__(self) -> str:
         status = "initialized" if self._initialized else "not initialized"
         return (
@@ -1038,7 +754,7 @@ class CKKSInferenceContext:
             f"device='{self.device}', "
             f"status={status})"
         )
-    
+
     def save_context(self, path: Union[str, Path]) -> None:
         config_data = {
             "poly_mod_degree": self.config.poly_mod_degree,
@@ -1057,18 +773,19 @@ class CKKSInferenceContext:
         }
         with open(path, "wb") as f:
             pickle.dump(config_data, f)
-    
+
     @classmethod
     def load_context(cls, path: Union[str, Path]) -> "CKKSInferenceContext":
         with open(path, "rb") as f:
             config_data = pickle.load(f)
         import warnings
+
         warnings.warn(
             "CKKSInferenceContext.load_context() uses pickle deserialization which can "
             "execute arbitrary code. Only load context files from trusted sources.",
             stacklevel=2,
         )
-        
+
         inference_config = InferenceConfig(
             poly_mod_degree=config_data["poly_mod_degree"],
             scale_bits=config_data["scale_bits"],
@@ -1076,7 +793,7 @@ class CKKSInferenceContext:
             mult_depth=config_data["mult_depth"],
             enable_bootstrap=config_data["enable_bootstrap"],
         )
-        
+
         return cls(
             config=inference_config,
             device=config_data["device"],
@@ -1088,12 +805,12 @@ class CKKSInferenceContext:
             batch_size=config_data.get("batch_size", 1),
             architecture=config_data.get("architecture", "default"),
         )
-    
+
     load = load_context
 
     def close(self):
-        if hasattr(self, '_ctx') and self._ctx is not None:
-            if hasattr(self._ctx, 'cleanup'):
+        if hasattr(self, "_ctx") and self._ctx is not None:
+            if hasattr(self._ctx, "cleanup"):
                 self._ctx.cleanup()
             self._ctx = None
         self._initialized = False
@@ -1116,84 +833,84 @@ class CKKSInferenceContext:
         conv_params: List[Dict[str, Any]],
     ) -> "EncryptedTensor":
         """Pack *B* images into a single ciphertext after im2col unfolding.
-        
+
         Slot layout::
-        
+
             [img0_patches, img1_patches, ..., img(B-1)_patches, padding...]
-        
+
         Each image is independently unfolded (im2col) using *conv_params*,
         then all patches are concatenated into one flat vector and encrypted.
-        
+
         The returned tensor carries ``_packed_batch=True`` and ``_cnn_layout``
         with ``batch_size`` so downstream :class:`EncryptedConv2d` can apply
         the weight matrix as a block-diagonal without mixing images.
-        
+
         Args:
             images: List of B image tensors, each (C, H, W) or (1, C, H, W).
             conv_params: List of conv parameter dicts (same as encrypt_cnn_input).
-        
+
         Returns:
             EncryptedTensor with packed-batch and CNN layout metadata.
         """
         import torch.nn.functional as F
-        
+
         self._ensure_initialized()
-        
+
         if not images:
             raise ValueError("Cannot encrypt empty list of images")
-        
+
         if self._batch_size > 1 and len(images) != self._batch_size:
             raise ValueError(
                 f"Context was created with batch_size={self._batch_size} but "
                 f"received {len(images)} images. "
                 f"Provide exactly {self._batch_size} images."
             )
-        
+
         batch_size = len(images)
         processed_images = []
-        
+
         for img in images:
             if img.ndim == 3:
                 img = img.unsqueeze(0)
             processed_images.append(img)
-        
+
         if not conv_params:
             # Fallback to regular batch encryption
             return self.encrypt_batch([img.flatten() for img in processed_images])
-        
+
         first_conv = conv_params[0]
-        kernel_size = first_conv['kernel_size']
-        stride = first_conv.get('stride', (1, 1))
-        padding = first_conv.get('padding', (0, 0))
-        
+        kernel_size = first_conv["kernel_size"]
+        stride = first_conv.get("stride", (1, 1))
+        padding = first_conv.get("padding", (0, 0))
+
         all_patches = []
         for image in processed_images:
             if padding != (0, 0):
                 image = F.pad(image, (padding[1], padding[1], padding[0], padding[0]))
-            
+
             patches = F.unfold(image.to(torch.float64), kernel_size, stride=stride)
             patches = patches.transpose(1, 2)
             patches = patches.squeeze(0)
             all_patches.append(patches)
-        
+
         # Concatenate all patches from all images
         concatenated = torch.cat(all_patches, dim=0)
         num_patches_per_image = all_patches[0].shape[0]
         patch_features = all_patches[0].shape[1]
         flat_patches = concatenated.flatten()
-        
+
         enc_tensor = self.encrypt(flat_patches)
-        
+
         enc_tensor._cnn_layout = {
-            'num_patches': num_patches_per_image * batch_size,
-            'num_patches_per_image': num_patches_per_image,
-            'patch_features': patch_features,
-            'batch_size': batch_size,
-            'original_shape': tuple(processed_images[0].shape),
+            "num_patches": num_patches_per_image * batch_size,
+            "num_patches_per_image": num_patches_per_image,
+            "patch_features": patch_features,
+            "batch_size": batch_size,
+            "original_shape": tuple(processed_images[0].shape),
         }
         enc_tensor._shape = (num_patches_per_image * batch_size, patch_features)
         enc_tensor._packed_batch = True
         enc_tensor._batch_size = batch_size
         enc_tensor._slots_per_sample = num_patches_per_image * patch_features
-        
+
         return enc_tensor
