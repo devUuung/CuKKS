@@ -14,13 +14,10 @@ Supports both Mock and OpenFHE backends.
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 from numpy.polynomial.chebyshev import cheb2poly, chebfit
-
-if TYPE_CHECKING:
-    from cukks.tensor import EncryptedTensor
 
 
 @functools.lru_cache(maxsize=4)
@@ -61,9 +58,9 @@ def _get_coeffs(domain: tuple[float, float]) -> list[float]:
 
 
 def crypto_inv_sqrt(
-    enc_tensor: EncryptedTensor,
+    enc_tensor: Any,
     domain: tuple[float, float] = (0.1, 100.0),
-) -> EncryptedTensor:
+) -> Any:
     """Compute 1/sqrt(x) using Chebyshev + Newton approximation.
 
     This function approximates the inverse square root for encrypted values
@@ -143,10 +140,10 @@ def crypto_inv_sqrt(
 
 
 def crypto_inv_sqrt_shallow(
-    enc_tensor: EncryptedTensor,
+    enc_tensor: Any,
     domain: tuple[float, float] = (1.0, 10.0),
     degree: int = 15,
-) -> EncryptedTensor:
+) -> Any:
     """Compute 1/sqrt(x) using Chebyshev polynomial only (no bootstrap).
 
     This is a shallow-depth version that works without bootstrapping.

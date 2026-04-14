@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
-
-if TYPE_CHECKING:
-    from .tensor import EncryptedTensor
+from typing import Any, Dict, Optional, Tuple
 
 
 def copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -14,7 +11,7 @@ def copy_cnn_layout(layout: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]
     return copy.deepcopy(layout)
 
 
-def copy_runtime_metadata(target: "EncryptedTensor", source: "EncryptedTensor") -> None:
+def copy_runtime_metadata(target: Any, source: Any) -> None:
     target._original_size = source._original_size
     target._cnn_layout = copy_cnn_layout(source._cnn_layout)
     target._packed_batch = source._packed_batch
@@ -25,9 +22,7 @@ def copy_runtime_metadata(target: "EncryptedTensor", source: "EncryptedTensor") 
     target._sigma_factor = source._sigma_factor
 
 
-def propagate_runtime_metadata(
-    source: "EncryptedTensor", target: "EncryptedTensor"
-) -> "EncryptedTensor":
+def propagate_runtime_metadata(source: Any, target: Any) -> Any:
     if source._packed_batch:
         target._packed_batch = True
         target._batch_size = source._batch_size
@@ -39,7 +34,7 @@ def propagate_runtime_metadata(
     return target
 
 
-def packed_sample_dims(tensor: "EncryptedTensor") -> Optional[Tuple[int, ...]]:
+def packed_sample_dims(tensor: Any) -> Optional[Tuple[int, ...]]:
     if not tensor._packed_batch:
         return None
     if tensor._packed_sample_shape is not None:
@@ -53,7 +48,7 @@ def packed_sample_dims(tensor: "EncryptedTensor") -> Optional[Tuple[int, ...]]:
     return None
 
 
-def refresh_packed_shape_metadata(tensor: "EncryptedTensor") -> None:
+def refresh_packed_shape_metadata(tensor: Any) -> None:
     if not tensor._packed_batch or tensor._batch_size is None:
         return
 

@@ -445,25 +445,26 @@ class CKKSInferenceContext:
                 f"encrypt_batch() received {len(samples)} samples. "
                 f"Provide exactly {self._batch_size} samples."
             )
-        first_sample_size = samples[0].numel()
+        first_sample_size = int(samples[0].numel())
         sample_shape = tuple(samples[0].shape)
-        if slots_per_sample is None:
-            slots_per_sample = first_sample_size
+        resolved_slots_per_sample = (
+            first_sample_size if slots_per_sample is None else int(slots_per_sample)
+        )
 
-        packer = SlotPacker(slots_per_sample, self.num_slots)
+        packer = SlotPacker(resolved_slots_per_sample, self.num_slots)
         packed = packer.pack(samples)
 
         cipher = self._ctx.encrypt(packed.to(dtype=torch.float64, device="cpu"))
 
         batch_shape = (
             (len(samples), *sample_shape)
-            if slots_per_sample == first_sample_size
-            else (len(samples), slots_per_sample)
+            if resolved_slots_per_sample == first_sample_size
+            else (len(samples), resolved_slots_per_sample)
         )
         enc_tensor = EncryptedTensor(cipher, batch_shape, self)
         enc_tensor._packed_batch = True
         enc_tensor._batch_size = len(samples)
-        enc_tensor._slots_per_sample = slots_per_sample
+        enc_tensor._slots_per_sample = resolved_slots_per_sample
         enc_tensor._packed_sample_shape = sample_shape
         return enc_tensor
 
